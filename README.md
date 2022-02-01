@@ -3,6 +3,9 @@ Image Data. Windows command line app to show image (and audio) metadata for file
 
 I encourage you to use exiftool, not id. It's much better in every possible way. ID was a way for me to learn about file formats.
 
+The number of hacks per line of code is staggering. Apple, Microsoft, Leica, Panasonic, Olympus, Canon, Nikon, Ricoh, and more
+all conspire ignore standards and make life difficult.
+
 Usage:
 
     usage: id [-e:name.jpg] [-f] [filename]
