@@ -7,7 +7,7 @@ Usage:
 
     usage: id [-e:name.jpg] [-f] [filename]
       image data enumeration
-           filename       filename of the image to check
+           filename       filename of the image or audio file to check
            -f             Full information is displayed (all binary data, all field values, etc.)
            -e:<output>    Extract highest-resolution embedded image (if one exists) to the file specified.
 
