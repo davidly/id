@@ -1,5 +1,5 @@
 # id
-Image Data. Windows command line app to show image (and audio) data for files.
+Image Data. Windows command line app to show image (and audio) metadata for files.
 
 I encourage you to use exiftool, not id. It's much better in every possible way. ID was a way for me to learn about file formats.
 
