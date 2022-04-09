@@ -158,8 +158,8 @@ void Usage()
     printf( "      id track.flac /e:track.png\n" ); 
     printf( "\n" );
     printf( "  notes:\n" );
-    printf( "      Most image formats are supported: CR2, NEF, RW2, DNG, TIFF, JPG, ARW, HEIC, HIF, CR3\n" );
-    printf( "      Some non-image formats are supported: FLAC\n" );
+    printf( "      Most image formats are supported: CR2, NEF, RW2, DNG, PNG, TIFF, JPG, ARW, HEIC, HIF, CR3\n" );
+    printf( "      Some non-image formats are supported: FLAC, WAV, MP3\n" );
     printf( "      Some image formats aren't supported yet: presumably many others\n" );
     printf( "      By default, just the first 256 bytes of binary data is displayed. Use -f for all data\n" );
     printf( "      Embedded images may be JPG, PNG, HIF, or some other format\n" );
@@ -4248,7 +4248,14 @@ void EnumerateFlac()
                     if ( NULL == pwcName )
                         wprintf( L"  %ws\n", item.get() );
                     else
-                        wprintf( L"  %-15ws         %ws\n", pwcName, equal + 1 );
+                    {
+                        const WCHAR * value = equal + 1;
+
+                        if ( !wcscmp( pwcName, L"Lyrics" ) && ( !wcschr( value, L'\r' ) || !wcschr( value, L'\n' ) ) )
+                            wprintf( L"  %-15ws\n%ws\n", pwcName, value );
+                        else
+                            wprintf( L"  %-15ws         %ws\n", pwcName, value );
+                    }
                 }
             }
         }
@@ -6249,7 +6256,7 @@ void ConvertInvalidCharsToDot( WCHAR * pwc )
     }
 } //ConvertInvalidCharsToDot
 
-void ReadMP3String( __int64 offset, WCHAR * pwc, int cwc, int maxBytes, bool lang, bool throwawayField = false )
+void ReadMP3String( __int64 offset, WCHAR * pwc, int cwc, int maxBytes, bool lang, bool throwawayField = false, bool invalidCharsToDot = true )
 {
     int cbOutput = cwc * sizeof WCHAR;
     if ( cwc > 0 )
@@ -6358,7 +6365,8 @@ void ReadMP3String( __int64 offset, WCHAR * pwc, int cwc, int maxBytes, bool lan
     else
         printf( "unknown string encoding: %d\n", encoding );
 
-    ConvertInvalidCharsToDot( pwc );
+    if ( invalidCharsToDot )
+        ConvertInvalidCharsToDot( pwc );
 } //ReadMP3String
 
 const char * GetMPEGAudioVersion( int x )
@@ -7254,8 +7262,12 @@ void ParseMP3()
                 // string           description
                 // string           lyrics
     
-                ReadMP3String( frameOffset + frameHeaderSize, awcField, _countof( awcField ), frameHeader.size, true, true );
-                printf( "Lyrics:               %ws\n", awcField );
+                ReadMP3String( frameOffset + frameHeaderSize, awcField, _countof( awcField ), frameHeader.size, true, true, false );
+
+                if ( wcschr( awcField, L'\n' ) || wcschr( awcField, L'\r' ) || wcschr( awcField, 0xa ) )
+                    printf( "Lyrics:\n%ws\n", awcField );
+                else
+                    printf( "Lyrics:               %ws\n", awcField );
             }
             else if ( isMP3Frame( frameHeader.id, "WFED" ) )
             {
