@@ -6,6 +6,8 @@ I encourage you to use exiftool, not id. It's much better in every possible way.
 The number of hacks per line of code is staggering. Apple, Microsoft, Leica, Panasonic, Olympus, Canon, Nikon, Ricoh, and more
 all conspire to ignore standards and make life difficult.
 
+This tool can be used to extract JPG and PNG images embedded in raw, FLAC, and MP3 files.
+
 Usage:
 
     usage: id [-e:name.jpg] [-f] [filename]
