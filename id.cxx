@@ -6189,6 +6189,130 @@ void ParsePNG()
     } while( true );
 } //ParsePNG
 
+const char * BmpCompression( DWORD c )
+{
+    if ( BI_RGB == c )
+        return "uncompressed";
+
+    if ( BI_RLE8 == c )
+        return "run-length encoded 8 (RLE8)";
+
+    if ( BI_RLE4 == c )
+        return "run-length encoded 4 (RLE4)";
+
+    if ( BI_BITFIELDS == c )
+        return "bitfields";
+
+    if ( BI_JPEG == c )
+        return "JPEG";
+
+    if ( BI_PNG == c )
+        return "PNG";
+
+    return "unknown";
+} //BmpCompression
+
+const char * BmpColorSpace( DWORD cs )
+{
+    if ( LCS_CALIBRATED_RGB == cs )
+        return "calibrated";
+
+    if ( LCS_sRGB == cs )
+        return "sRGB color space";
+
+    if ( LCS_WINDOWS_COLOR_SPACE == cs )
+        return "system default color space";
+
+    if ( PROFILE_LINKED == cs )
+        return "linked profile";
+
+    if ( PROFILE_EMBEDDED == cs )
+        return "embedded profile";
+
+    return "unknown";
+} //BmpColorSpace
+
+const char * BmpIntent( DWORD i )
+{
+    if ( LCS_GM_ABS_COLORIMETRIC == i )
+        return "match absolute colorimetric";
+
+    if ( LCS_GM_BUSINESS == i )
+        return "graphic saturation";
+
+    if ( LCS_GM_GRAPHICS == i )
+        return "proof relative colorimetric";
+
+    if ( LCS_GM_IMAGES == i )
+        return "picture perceptual";
+
+    return "unknown";
+} //BmpIntent
+
+void ParseBMP()
+{
+    printf( "mimetype:                  image/bmp\n" );
+
+    BITMAPFILEHEADER bfh;
+    GetBytes( 0, &bfh, sizeof bfh );
+
+    printf( "type:                      %#x %#x == %c%c\n", bfh.bfType & 0xff, bfh.bfType >> 8, bfh.bfType & 0xff, bfh.bfType >> 8 );
+    printf( "size of file:      %9d\n", bfh.bfSize );
+
+    if ( bfh.bfSize != g_pStream->Length() )
+        printf( "warning: file size %lld isn't the same as bitmap file header size %d\n", g_pStream->Length(), bfh.bfSize );
+
+    printf( "reserved 1:          %7d\n", bfh.bfReserved1 );
+    printf( "reserved 2:          %7d\n", bfh.bfReserved2 );
+    printf( "offset of bits:      %7d\n", bfh.bfOffBits );
+
+    BITMAPV5HEADER bih;
+    GetBytes( sizeof bfh, &bih, sizeof bih );
+
+    printf( "header size:         %7d\n", bih.bV5Size );
+    printf( "width:               %7d\n", bih.bV5Width );
+    printf( "height:              %7d\n", bih.bV5Height );
+    printf( "planes:              %7d\n", bih.bV5Planes );
+    printf( "bit count:           %7d\n", bih.bV5BitCount );
+    printf( "compression:               %s\n", BmpCompression( bih.bV5Compression ) );
+    printf( "size of image:     %9d\n", bih.bV5SizeImage );
+    printf( "pixels per meter X:  %7d\n", bih.bV5XPelsPerMeter );
+    printf( "pixels per meter Y:  %7d\n", bih.bV5YPelsPerMeter );
+    printf( "color indices:       %7d\n", bih.bV5ClrUsed );
+    printf( "colors required:     %7d\n", bih.bV5ClrImportant );
+
+    if ( bih.bV5Size >= sizeof BITMAPV4HEADER )
+    {
+        // >= bV5RedMask
+
+        if ( BI_BITFIELDS == bih.bV5Compression )
+            printf( "RGB masks:                 %#010x %#010x %#010x\n", bih.bV5RedMask, bih.bV5GreenMask, bih.bV5BlueMask );
+
+        if ( LCS_CALIBRATED_RGB == bih.bV5CSType )
+        {
+            printf( "gamma red:        %#10x\n", bih.bV5GammaRed );
+            printf( "gamma green:      %#10x\n", bih.bV5GammaGreen );
+            printf( "gamma blue:       %#10x\n", bih.bV5GammaBlue );
+        }
+
+        printf( "alpha mask:                %#010x\n", bih.bV5AlphaMask );
+        printf( "color space:               %s\n", BmpColorSpace( bih.bV5CSType ) );
+    }
+
+    if ( bih.bV5Size >= sizeof BITMAPV5HEADER )
+    {
+        // >= bV5Intent
+
+        printf( "intent:                    %s\n", BmpIntent( bih.bV5Intent ) );
+
+        if ( PROFILE_LINKED == bih.bV5CSType || PROFILE_EMBEDDED == bih.bV5CSType )
+        {
+            printf( "profile offset:       %7d\n", bih.bV5ProfileData );
+            printf( "profile size:         %7d\n", bih.bV5ProfileSize );
+        }
+    }
+} //ParseBMP
+
 const char * MP3PictureType( byte x )
 {
     if (0x00 == x ) return "Other";
@@ -8260,14 +8384,17 @@ void EnumerateImageData( WCHAR const * pwc )
          ( 0x4f524949 != header ) &&                  // ORF olympus
          ( 0x00554949 != header ) &&                  // RW2 panasonic
          ( 0x494a5546 != header ) &&                  // RAF fujifilm
-         ( 0x474e5089 != header ) )                   // PNG
+         ( 0x474e5089 != header ) &&                  // PNG
+         ( 0x4d42     != ( header & 0xffff ) ) )      // BMP
     {
-        // BMP: 0x4d42
+        printf( "header %#x is unrecognized in file %ws\n", header, pwc );
+        return;
+    }
 
-        if ( 0x4d42 == ( header & 0xffff ) )
-            printf( "BMP isn't yet supported\n" );
-        else 
-            printf( "header %#x is unrecognized in file %ws\n", header, pwc );
+    // BMP: 0x4d42  "BM"
+    if ( 0x4d42 == ( header & 0xffff ) )
+    {
+        ParseBMP();
         return;
     }
 
