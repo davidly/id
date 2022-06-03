@@ -23,11 +23,12 @@ Usage:
           id track.flac /e:track.png
 
       notes:
-          Most image formats are supported: CR2, NEF, RW2, DNG, PNG, TIFF, JPG, ARW, HEIC, HIF, CR3
-          Some non-image formats are supported: FLAC, WAV, MP3
+          Most image formats are supported: CR2, NEF, RW2, DNG, PNG, TIFF, JPG, ARW, HEIC, HIF, CR3, BMP
+          Some non-image formats are supported: FLAC, WAV, MP3, WMA, WMV
           Some image formats aren't supported yet: presumably many others
           By default, just the first 256 bytes of binary data is displayed. Use -f for all data
           Embedded images may be JPG, PNG, HIF, or some other format
+          Fujifilm RAF files are only supported in that the embedded JPG is parsed
 
 JPG sample:
 
