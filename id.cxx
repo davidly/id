@@ -158,11 +158,12 @@ void Usage()
     printf( "      id track.flac /e:track.png\n" ); 
     printf( "\n" );
     printf( "  notes:\n" );
-    printf( "      Most image formats are supported: CR2, NEF, RW2, DNG, PNG, TIFF, JPG, ARW, HEIC, HIF, CR3\n" );
-    printf( "      Some non-image formats are supported: FLAC, WAV, MP3\n" );
+    printf( "      Most image formats are supported: CR2, NEF, RW2, DNG, PNG, TIFF, JPG, ARW, HEIC, HIF, CR3, BMP, ORF\n" );
+    printf( "      Some non-image formats are supported: FLAC, WAV, MP3, WMA, WMV\n" );
     printf( "      Some image formats aren't supported yet: presumably many others\n" );
     printf( "      By default, just the first 256 bytes of binary data is displayed. Use -f for all data\n" );
     printf( "      Embedded images may be JPG, PNG, HIF, or some other format\n" );
+    printf( "      Fujifilm RAF files are only supported in that the embedded JPG is parsed\n" );
     exit( 1 );
 } //Usage
 
