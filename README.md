@@ -3,8 +3,8 @@ Image Data. Windows command line app to show image (and audio) metadata for file
 
 I encourage you to use exiftool, not id. It's much better in every possible way. ID was a way for me to learn about file formats.
 
-The number of hacks per line of code is staggering. Apple, Microsoft, Leica, Panasonic, Olympus, Canon, Nikon, Ricoh, and more
-all conspire to ignore standards and make life difficult.
+The number of hacks per line of code is staggering. Apple, Microsoft, Leica, Panasonic, Olympus, Canon, Nikon, Ricoh, Fujifilm,
+and more conspire to ignore standards and make life difficult.
 
 This tool can be used to extract JPG and PNG images embedded in raw, FLAC, and MP3 files.
 
@@ -23,11 +23,12 @@ Usage:
           id track.flac /e:track.png
 
       notes:
-          Most image formats are supported: CR2, NEF, RW2, DNG, PNG, TIFF, JPG, ARW, HEIC, HIF, CR3
-          Some non-image formats are supported: FLAC, WAV, MP3
+          Most image formats are supported: CR2, NEF, RW2, DNG, PNG, TIFF, JPG, ARW, HEIC, HIF, CR3, BMP, ORF
+          Some non-image formats are supported: FLAC, WAV, MP3, WMA, WMV
           Some image formats aren't supported yet: presumably many others
           By default, just the first 256 bytes of binary data is displayed. Use -f for all data
           Embedded images may be JPG, PNG, HIF, or some other format
+          Fujifilm RAF files are only supported in that the embedded JPG is parsed
 
 JPG sample:
 
