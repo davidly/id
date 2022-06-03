@@ -4135,7 +4135,7 @@ const WCHAR * LookupFlacField( const WCHAR * pwcField )
 
 void EnumerateFlac()
 {
-    printf( "mimetype:                 audio/flac\n" );
+    printf( "mimetype:                             audio/flac\n" );
 
     // Data is big-endian!
 
@@ -4189,16 +4189,16 @@ void EnumerateFlac()
 
             printf( "Stream Info:\n" );
 
-            printf( "  Minimum block size      %d\n", minBlockSize );
-            printf( "  Maximum block size      %d\n", maxBlockSize );
-            printf( "  Minimum frame size      %d\n", minFrameSize );
-            printf( "  Maximum frame size      %d\n", maxFrameSize );
-            printf( "  Sample rate per sec     %d\n", sampleRate );
-            printf( "  Channel count           %d\n", channelCount );
-            printf( "  Bits per sample         %d\n", bitsPerSample );
-            printf( "  Samples                 %I64d\n", ullSamples );
-            printf( "  Length in min:sec       %d:%02d\n", lengthInMinutes, remainderSeconds );
-            printf( "  MD5 signature           " );
+            printf( "  Minimum block size      %13d\n", minBlockSize );
+            printf( "  Maximum block size      %13d\n", maxBlockSize );
+            printf( "  Minimum frame size      %13d\n", minFrameSize );
+            printf( "  Maximum frame size      %13d\n", maxFrameSize );
+            printf( "  Sample rate per sec     %13d\n", sampleRate );
+            printf( "  Channel count           %13d\n", channelCount );
+            printf( "  Bits per sample         %13d\n", bitsPerSample );
+            printf( "  Samples                 %13I64d\n", ullSamples );
+            printf( "  Length in min:sec       %10d:%02d\n", lengthInMinutes, remainderSeconds );
+            printf( "  MD5 signature                       " );
 
             DWORD o = offset + 4 + 6 + 8;
 
@@ -4222,7 +4222,7 @@ void EnumerateFlac()
             unique_ptr<WCHAR> vendor( GetUTF8( o, vendorLength ) );
             o += vendorLength;
 
-            printf( "  Vendor                  %ws\n", vendor.get() );
+            printf( "  Vendor                              %ws\n", vendor.get() );
 
             DWORD items = GetDWORD( o, true );
             o += 4;
@@ -4254,7 +4254,7 @@ void EnumerateFlac()
                         if ( !wcscmp( pwcName, L"Lyrics" ) && ( !wcschr( value, L'\r' ) || !wcschr( value, L'\n' ) ) )
                             wprintf( L"  %-15ws\n%ws\n", pwcName, value );
                         else
-                            wprintf( L"  %-15ws         %ws\n", pwcName, value );
+                            wprintf( L"  %-15ws                     %ws\n", pwcName, value );
                     }
                 }
             }
@@ -4268,7 +4268,7 @@ void EnumerateFlac()
             DWORD o = offset;
 
             DWORD pictureType = GetDWORD( o, false );
-            printf( "  Picture type            %d ", pictureType );
+            printf( "  Picture type            %13d ", pictureType );
 
             if ( 0 == pictureType ) printf( "Other" );
             else if ( 1 == pictureType ) printf( "32x32 pixels 'file icon' (PNG only)" );
@@ -4309,7 +4309,7 @@ void EnumerateFlac()
             mimeType.get()[ mimeTypeBytes ] = 0;
             g_pStream->Seek( o );
             g_pStream->Read( mimeType.get(), mimeTypeBytes );
-            printf( "  mime type               %s\n", mimeType.get() );
+            printf( "  mime type                           %s\n", mimeType.get() );
 
             o += mimeTypeBytes;
 
@@ -4331,23 +4331,23 @@ void EnumerateFlac()
             o += descriptionBytes;
 
             DWORD width = GetDWORD( o, false );
-            printf( "  Width                   %d\n", width );
+            printf( "  Width                   %13d\n", width );
             o += 4;
 
             DWORD height = GetDWORD( o, false );
-            printf( "  Height                  %d\n", height );
+            printf( "  Height                  %13d\n", height );
             o += 4;
 
             DWORD bpp = GetDWORD( o, false );
-            printf( "  Bits per pixel          %d\n", bpp );
+            printf( "  Bits per pixel          %13d\n", bpp );
             o += 4;
 
             DWORD indexedColors = GetDWORD( o, false );
-            printf( "  Indexed colors          %d\n", indexedColors );
+            printf( "  Indexed colors          %13d\n", indexedColors );
             o += 4;
 
             DWORD imageLength = GetDWORD( o, false );
-            printf( "  Image size              %d\n", imageLength );
+            printf( "  Image size              %13d\n", imageLength );
             o += 4;
 
             if ( ( imageLength > 2 ) && IsPerhapsAnImage( o, 0 ) )
@@ -5961,7 +5961,7 @@ void ParsePNG()
     DWORD width, height;
     BYTE bitDepth, colorType, compressionMethod, filterMethod, interlaceMethod;
 
-    printf( "mimetype:                  image/png\n" );
+    printf( "mimetype:                             image/png\n" );
 
     do
     {
@@ -6009,25 +6009,25 @@ void ParsePNG()
             filterMethod = GetBYTE( offset + 19 );
             interlaceMethod = GetBYTE( offset + 20 );
 
-            printf( "image width:           %5d\n", width );
-            printf( "image height:          %5d\n", height );
-            printf( "bit depth:             %5d\n", bitDepth );
-            printf( "color type:            %5d (%s)\n", colorType, GetColorType( colorType) );
-            printf( "compression method:    %5d\n", compressionMethod );
-            printf( "filter method:         %5d\n", filterMethod );
-            printf( "interlace method:      %5d\n", interlaceMethod );
+            printf( "image width:           %16d\n", width );
+            printf( "image height:          %16d\n", height );
+            printf( "bit depth:             %16d\n", bitDepth );
+            printf( "color type:            %16d (%s)\n", colorType, GetColorType( colorType) );
+            printf( "compression method:    %16d\n", compressionMethod );
+            printf( "filter method:         %16d\n", filterMethod );
+            printf( "interlace method:      %16d\n", interlaceMethod );
         }
         else if ( 0x73524742 == type ) // sRGB
         {
             BYTE renderingIntent = GetBYTE( offset + 8 );
 
-            printf( "sRGB rendering intent: %5d (%s)\n", renderingIntent, GetRenderingIntent( renderingIntent ) );
+            printf( "sRGB rendering intent: %16d (%s)\n", renderingIntent, GetRenderingIntent( renderingIntent ) );
         }
         else if ( 0x67414d41 == type ) // gAMA
         {
             DWORD gamma = GetDWORD( offset + 8, false );
 
-            printf( "gamma:               %7d\n", gamma );
+            printf( "gamma:               %18d\n", gamma );
         }
         else if ( 0x70485973 == type ) // pHYs
         {
@@ -6035,29 +6035,29 @@ void ParsePNG()
             DWORD pixelsPerUnitY = GetDWORD( offset + 12, false );
             BYTE unitSpecifier = GetBYTE( offset + 16 );
 
-            printf( "pixels per unit X:     %5d\n", pixelsPerUnitX );
-            printf( "pixels per unit Y:     %5d\n", pixelsPerUnitY );
-            printf( "unit specifier:        %5d (%s)\n", unitSpecifier, GetPNGUnitSpecifier( unitSpecifier ) );
+            printf( "pixels per unit X:     %16d\n", pixelsPerUnitX );
+            printf( "pixels per unit Y:     %16d\n", pixelsPerUnitY );
+            printf( "unit specifier:        %16d (%s)\n", unitSpecifier, GetPNGUnitSpecifier( unitSpecifier ) );
         }
         else if ( 0x49444154 == type ) // IDAT
         {
             // image data; ignore for now
 
             if ( g_FullInformation )
-                printf( "flac image data length:     %5d\n", len );
+                printf( "flac image data length:     %16d\n", len );
         }
         else if ( 0x6348524d == type ) // cHRM
         {
             // chromacity coordinates of the display primaries and white point
             printf( "chromacity:\n" );
-            printf( "       white point x %7u\n", GetDWORD( offset + 8, false ) );
-            printf( "       white point y %7u\n", GetDWORD( offset + 12, false ) );
-            printf( "       red x         %7u\n", GetDWORD( offset + 16, false ) );
-            printf( "       red y         %7u\n", GetDWORD( offset + 20, false ) );
-            printf( "       green x       %7u\n", GetDWORD( offset + 24, false ) );
-            printf( "       green y       %7u\n", GetDWORD( offset + 28, false ) );
-            printf( "       blue x        %7u\n", GetDWORD( offset + 32, false ) );
-            printf( "       blue y        %7u\n", GetDWORD( offset + 36, false ) );
+            printf( "       white point x %18u\n", GetDWORD( offset + 8, false ) );
+            printf( "       white point y %18u\n", GetDWORD( offset + 12, false ) );
+            printf( "       red x         %18u\n", GetDWORD( offset + 16, false ) );
+            printf( "       red y         %18u\n", GetDWORD( offset + 20, false ) );
+            printf( "       green x       %18u\n", GetDWORD( offset + 24, false ) );
+            printf( "       green y       %18u\n", GetDWORD( offset + 28, false ) );
+            printf( "       blue x        %18u\n", GetDWORD( offset + 32, false ) );
+            printf( "       blue y        %18u\n", GetDWORD( offset + 36, false ) );
         }
         else if ( 0x74455874 == type ) // tEXt
         {
@@ -6071,11 +6071,11 @@ void ParsePNG()
             unique_ptr<char> textValue( new char[ valuelen + 1 ] );
             GetString( offset + 8 + keylen + 1, textValue.get(), valuelen + 1, valuelen + 1 );
 
-            printf( "text key:                  %s, value: %s\n", acTextKey, textValue.get() );
+            printf( "text key:                             %s, value: %s\n", acTextKey, textValue.get() );
         }
         else if ( 0x69545874 == type ) // iTXt
         {
-            printf( "text chunk length:     %5d\n", len );
+            printf( "text chunk length:     %16d\n", len );
             DumpBinaryData( offset + 8, 0, len, 8, offset + 8 );
         }
         else if ( 0x504c5445 == type ) // PLTE palette
@@ -6098,22 +6098,22 @@ void ParsePNG()
         }
         else if ( 0x74524e53 == type ) // tRNS transparency information
         {
-            printf( "transparency length:   %5d\n", len );
+            printf( "transparency length:   %16d\n", len );
             DumpBinaryData( offset + 8, 0, len, 8, offset + 8 );
         }
         else if ( 0x73424954 == type ) // sBIT
         {
-            printf( "significant bits len:  %5d\n", len );
+            printf( "significant bits len:  %16d\n", len );
             DumpBinaryData( offset + 8, 0, len, 8, offset + 8 );
         }
         else if ( 0x624b4744 == type ) // bKGD
         {
-            printf( "background color len:  %5d\n", len );
+            printf( "background color len:  %16d\n", len );
             DumpBinaryData( offset + 8, 0, len, 8, offset + 8 );
         }
         else if ( 0x74494d45 == type ) // tIME
         {
-            printf( "last modification:         year %d, month %d, day %d, hour %d, minute %d, second %d\n",
+            printf( "last modification:                    year %d, month %d, day %d, hour %d, minute %d, second %d\n",
                     GetWORD( offset + 8, false ),
                     GetBYTE( offset + 10 ),
                     GetBYTE( offset + 11 ),
@@ -6130,7 +6130,7 @@ void ParsePNG()
 
             BYTE compressionMethod = GetBYTE( offset + 8 + keyLen + 1 );
             int valueLen = len - keyLen - 2;
-            printf( "compressed text key:       %s, compression method %d, value %d bytes\n", acTextKey, compressionMethod, valueLen );
+            printf( "compressed text key:                  %s, compression method %d, value %d bytes\n", acTextKey, compressionMethod, valueLen );
             int dataOffset = offset + 8 + keyLen + valueLen + 2;
             DumpBinaryData( dataOffset, 0, valueLen, 8, dataOffset );
         }
@@ -6251,64 +6251,64 @@ const char * BmpIntent( DWORD i )
 
 void ParseBMP()
 {
-    printf( "mimetype:                  image/bmp\n" );
+    printf( "mimetype:                             image/bmp\n" );
 
     BITMAPFILEHEADER bfh;
     GetBytes( 0, &bfh, sizeof bfh );
 
-    printf( "type:                      %#x %#x == %c%c\n", bfh.bfType & 0xff, bfh.bfType >> 8, bfh.bfType & 0xff, bfh.bfType >> 8 );
-    printf( "size of file:      %9d\n", bfh.bfSize );
+    printf( "type:                         %#x %#x == %c%c\n", bfh.bfType & 0xff, bfh.bfType >> 8, bfh.bfType & 0xff, bfh.bfType >> 8 );
+    printf( "size of file field:%20d\n", bfh.bfSize );
 
     if ( bfh.bfSize != g_pStream->Length() )
-        printf( "warning: file size %lld isn't the same as bitmap file header size %d\n", g_pStream->Length(), bfh.bfSize );
+        printf( "  (warning: file size %lld isn't the same as bitmap file header size %d)\n", g_pStream->Length(), bfh.bfSize );
 
-    printf( "reserved 1:          %7d\n", bfh.bfReserved1 );
-    printf( "reserved 2:          %7d\n", bfh.bfReserved2 );
-    printf( "offset of bits:      %7d\n", bfh.bfOffBits );
+    printf( "reserved 1:          %18d\n", bfh.bfReserved1 );
+    printf( "reserved 2:          %18d\n", bfh.bfReserved2 );
+    printf( "offset of bits:      %18d\n", bfh.bfOffBits );
 
     BITMAPV5HEADER bih;
     GetBytes( sizeof bfh, &bih, sizeof bih );
 
-    printf( "header size:         %7d\n", bih.bV5Size );
-    printf( "width:               %7d\n", bih.bV5Width );
-    printf( "height:              %7d\n", bih.bV5Height );
-    printf( "planes:              %7d\n", bih.bV5Planes );
-    printf( "bit count:           %7d\n", bih.bV5BitCount );
-    printf( "compression:               %s\n", BmpCompression( bih.bV5Compression ) );
-    printf( "size of image:     %9d\n", bih.bV5SizeImage );
-    printf( "pixels per meter X:  %7d\n", bih.bV5XPelsPerMeter );
-    printf( "pixels per meter Y:  %7d\n", bih.bV5YPelsPerMeter );
-    printf( "color indices:       %7d\n", bih.bV5ClrUsed );
-    printf( "colors required:     %7d\n", bih.bV5ClrImportant );
+    printf( "header size:         %18d\n", bih.bV5Size );
+    printf( "width:               %18d\n", bih.bV5Width );
+    printf( "height:              %18d\n", bih.bV5Height );
+    printf( "planes:              %18d\n", bih.bV5Planes );
+    printf( "bit count:           %18d\n", bih.bV5BitCount );
+    printf( "compression:         %18d == %s\n", bih.bV5Compression, BmpCompression( bih.bV5Compression ) );
+    printf( "size of image:       %18d\n", bih.bV5SizeImage );
+    printf( "pixels per meter X:  %18d\n", bih.bV5XPelsPerMeter );
+    printf( "pixels per meter Y:  %18d\n", bih.bV5YPelsPerMeter );
+    printf( "color indices:       %18d\n", bih.bV5ClrUsed );
+    printf( "colors required:     %18d\n", bih.bV5ClrImportant );
 
     if ( bih.bV5Size >= sizeof BITMAPV4HEADER )
     {
         // >= bV5RedMask
 
         if ( BI_BITFIELDS == bih.bV5Compression )
-            printf( "RGB masks:                 %#010x %#010x %#010x\n", bih.bV5RedMask, bih.bV5GreenMask, bih.bV5BlueMask );
+            printf( "RGB masks:                            %#010x %#010x %#010x\n", bih.bV5RedMask, bih.bV5GreenMask, bih.bV5BlueMask );
 
         if ( LCS_CALIBRATED_RGB == bih.bV5CSType )
         {
-            printf( "gamma red:        %#10x\n", bih.bV5GammaRed );
-            printf( "gamma green:      %#10x\n", bih.bV5GammaGreen );
-            printf( "gamma blue:       %#10x\n", bih.bV5GammaBlue );
+            printf( "gamma red:        %#21x\n", bih.bV5GammaRed );
+            printf( "gamma green:      %#21x\n", bih.bV5GammaGreen );
+            printf( "gamma blue:       %#21x\n", bih.bV5GammaBlue );
         }
 
-        printf( "alpha mask:                %#010x\n", bih.bV5AlphaMask );
-        printf( "color space:               %s\n", BmpColorSpace( bih.bV5CSType ) );
+        printf( "alpha mask:                  %#010x\n", bih.bV5AlphaMask );
+        printf( "color space:         %18d == %s\n", bih.bV5CSType, BmpColorSpace( bih.bV5CSType ) );
     }
 
     if ( bih.bV5Size >= sizeof BITMAPV5HEADER )
     {
         // >= bV5Intent
 
-        printf( "intent:                    %s\n", BmpIntent( bih.bV5Intent ) );
+        printf( "intent:              %18d == %s\n", bih.bV5Intent, BmpIntent( bih.bV5Intent ) );
 
         if ( PROFILE_LINKED == bih.bV5CSType || PROFILE_EMBEDDED == bih.bV5CSType )
         {
-            printf( "profile offset:       %7d\n", bih.bV5ProfileData );
-            printf( "profile size:         %7d\n", bih.bV5ProfileSize );
+            printf( "profile offset:       %18d\n", bih.bV5ProfileData );
+            printf( "profile size:         %18d\n", bih.bV5ProfileSize );
         }
     }
 } //ParseBMP
@@ -8251,7 +8251,7 @@ void EnumerateImageData( WCHAR const * pwc )
         return;
     }
 
-    printf( "file size: %I64d\n", GetStreamLength() );
+    printf( "file size: %28I64d\n", GetStreamLength() );
     WCHAR * pwcExt = PathFindExtension( pwc );
     DWORD heifOffsetBase = 0;
 
@@ -8341,7 +8341,7 @@ void EnumerateImageData( WCHAR const * pwc )
 
             stream.reset( embeddedImage );
             g_pStream = embeddedImage;
-            printf( "file size: %I64d\n", GetStreamLength() );
+            printf( "file size: %28I64d\n", GetStreamLength() );
         }
         else
         {
