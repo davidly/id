@@ -4252,7 +4252,7 @@ void EnumerateFlac()
                     {
                         const WCHAR * value = equal + 1;
 
-                        if ( !wcscmp( pwcName, L"Lyrics" ) && ( !wcschr( value, L'\r' ) || !wcschr( value, L'\n' ) ) )
+                        if ( !wcscmp( pwcName, L"Lyrics" ) )// && ( !wcschr( value, L'\r' ) || !wcschr( value, L'\n' ) ) )
                             wprintf( L"  %-15ws\n%ws\n", pwcName, value );
                         else
                             wprintf( L"  %-15ws                     %ws\n", pwcName, value );
@@ -5948,9 +5948,29 @@ const char * GetPNGUnitSpecifier( byte b )
     return "unknown";
 } //GetPNGUnitSpecifier
 
+const char * GetPNGFilterMethod( byte fm )
+{
+    if ( 0 == fm )
+        return "none";
+
+    if ( 1 == fm )
+        return "sub";
+
+    if ( 2 == fm )
+        return "up";
+
+    if ( 3 == fm )
+        return "average";
+
+    if ( 4 == fm )
+        return "paeth";
+
+    return "unknown";
+} //GetPNGFilterMethod
+
 // https://en.wikipedia.org/wiki/Portable_Network_Graphics
 // http://www.libpng.org/pub/png/spec/1.2/PNG-Chunks.html
-// PNG files are big-endian. 8-byte header then recordsof:
+// PNG files are big-endian. 8-byte header then records of:
 //    4: length
 //    4: type
 //    length: data
@@ -5958,6 +5978,15 @@ const char * GetPNGUnitSpecifier( byte b )
 
 void ParsePNG()
 {
+    DWORD dwHeader0 = GetDWORD( 0, false );
+    DWORD dwHeader4 = GetDWORD( 4, false );
+    if ( 0x89504e47 != dwHeader0 || 0xd0a1a0a != dwHeader4 )
+    {
+        printf( "Invalid PNG header: first 4 bytes: %#x, next 4 bytes: %#x\n", dwHeader0, dwHeader4 );
+        printf( "expected 0x89504e47 then 0xd0a1a0a\n" );
+        return;
+    }
+
     DWORD offset = 8;
     DWORD width, height;
     BYTE bitDepth, colorType, compressionMethod, filterMethod, interlaceMethod;
@@ -6015,7 +6044,7 @@ void ParsePNG()
             printf( "bit depth:             %16d\n", bitDepth );
             printf( "color type:            %16d (%s)\n", colorType, GetColorType( colorType) );
             printf( "compression method:    %16d\n", compressionMethod );
-            printf( "filter method:         %16d\n", filterMethod );
+            printf( "filter method:         %16d (%s)\n", filterMethod, GetPNGFilterMethod( filterMethod ) );
             printf( "interlace method:      %16d\n", interlaceMethod );
         }
         else if ( 0x73524742 == type ) // sRGB
