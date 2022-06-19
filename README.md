@@ -212,3 +212,129 @@ Canon CR3 sample:
     GPS IFDOffset 8, NumTags 1
     GPS VersionID:                      0x302
     Embedded image found: offset 314368 length 2128644  embedded image header: 0x6008400dbffd8ff; image is likely jpg
+
+Flac sample:
+
+    D:\flac\mini trees\always in motion>id "01 Moments in Between.flac"
+    parsing input file D:\flac\mini trees\always in motion\01 Moments in Between.flac
+    file size:                     38054700
+    mimetype:                             audio/flac
+    Stream Info:
+      Minimum block size               4096
+      Maximum block size               4096
+      Minimum frame size               5335
+      Maximum frame size              21950
+      Sample rate per sec             48000
+      Channel count                       2
+      Bits per sample                    24
+      Samples                       8190689
+      Length in min:sec                2:50
+      MD5 signature                       e344c343c1f4823a023f9467db6ca870
+    Comments:
+      Vendor                              reference libFLAC 1.3.2 20170101
+      Title                               Moments in Between
+      Artist                              Mini Trees
+      Year                                2021
+      Comment                             Visit https://minitrees.bandcamp.com
+      Album                               Always In Motion
+      Track                               1
+      Album Artist                        Mini Trees
+      Lyrics
+    Color shades of glass
+    Faded with the tide
+    Calls me back
+    
+    Drifting further toward
+    Nothing I have known before
+    
+    Brighter in the morning
+    Feel it start to calmá
+    You're taking my hand and you're pulling me on
+    Leave the ground beneath me, light ethereal scene
+    Can you tell me what more are we waiting for?
+    
+    How long are all the moments in between it?
+    
+    Dreaming again
+    But I know that it's all in my headá
+    Dreaming again
+    
+    Running, hopping fence
+    Carrying the thought
+    Is it all a myth?
+    
+    Reaching further forward
+    Never wanted something more
+    
+    Brighter in the morning
+    Feel it start to calm
+    You're taking my hand and you're pulling me on
+    Leave the ground beneath me, light ethereal scene
+    Can you tell me what more are we waiting for?
+    
+    How long til you're taking me there?
+    I'm growing wearier here
+    But I know it's all the moments in between it
+    Picture:
+      Picture type                        3 Cover (front)
+      mime type                           image/jpeg
+      Description
+      Width                             700
+      Height                            700
+      Bits per pixel                     24
+      Indexed colors                      0
+      Image size                     114149
+    Embedded image metadata:
+    file size:                       114149
+    mimetype:                             image/jpeg
+    id marker:                            JFIF
+    major version:                        1
+    minor version:                        1
+    units:                                dots/inch
+    x density:                           72
+    y density:                           72
+    start of frame:                     192 (0xc0) (baseline DCT process frame marker)
+    bits per sample:                      8
+    image height:                       700
+    image width:                        700
+    color components:                     3 (YCbCr)
+    compression:                          YCbCr4:4:4 (1 1)
+    number of components:                 3
+    Embedded image found: offset 1504 length 114149  embedded image header: 0x464a1000e0ffd8ff; image is likely jpg
+    
+WAV sample:
+
+    C:\>id tmbg.wav
+    parsing input file C:\Users\david\OneDrive\id\tmbg.wav
+    file size:                     50759408
+    WAV file is RIFF and WAVE. Size - 8: 50759400
+    mimetype:                    audio/x-wav
+    chunk: JUNK, size 92
+    chunk: bext, size 602
+    chunk: fmt , size 40
+      type of format:            1 -- PCM
+      channels:                  2
+      sample rate (samples/sec): 48000
+      dataRate (Bytes/sec):      288000
+      blockAlign:                6
+      bits per sample:           24
+    chunk: minf, size 16
+    chunk: elm1, size 214
+    chunk: data, size 50490390
+      data size:                 50490390
+      sample count:              8415065
+      seconds:                   175.313854
+             0x400  01 00 00 fc ff ff 06 00 00 fd ff ff 02 00 00 f9 ff ff fc ff ff f5 ff ff ff ff ff fa ff ff fe ff  ................................
+             0x420  ff 03 00 00 02 00 00 05 00 00 06 00 00 00 00 00 04 00 00 00 00 00 04 00 00 09 00 00 05 00 00 0b  ................................
+             0x440  00 00 04 00 00 09 00 00 04 00 00 0a 00 00 04 00 00 09 00 00 04 00 00 09 00 00 fc ff ff 05 00 00  ................................
+             0x460  f4 ff ff 00 00 00 f7 ff ff fe ff ff f8 ff ff fa ff ff fb ff ff fb ff ff 04 00 00 fc ff ff 02 00  ................................
+             0x480  00 fb ff ff fc ff ff fc ff ff fe ff ff fc ff ff ff ff ff f8 ff ff fe ff ff f4 ff ff ff ff ff f6  ................................
+             0x4a0  ff ff fe ff ff fa ff ff fe ff ff fe ff ff ff ff ff 01 00 00 ff ff ff 09 00 00 ff ff ff 0c 00 00  ................................
+             0x4c0  ff ff ff 05 00 00 ff ff ff 02 00 00 03 00 00 03 00 00 07 00 00 03 00 00 05 00 00 03 00 00 01 00  ................................
+             0x4e0  00 03 00 00 fd ff ff 03 00 00 ff ff ff 03 00 00 ff ff ff fe ff ff fe ff ff fa ff ff 03 00 00 fc  ................................
+    chunk: regn, size 92
+    chunk: umid, size 24
+    chunk: DGDA, size 267853
+    chunk:     , size 0
+    
+    
