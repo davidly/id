@@ -22,11 +22,11 @@
 using namespace std;
 
 /*
-   1 = BYTE An 8-bit unsigned integer.,
-   2 = ASCII An 8-bit byte containing one 7-bit ASCII code. The final byte is terminated with NULL.,
-   3 = SHORT A 16-bit (2-byte) unsigned integer,
-   4 = LONG A 32-bit (4-byte) unsigned integer,
-   5 = RATIONAL Two LONGs. The first LONG is the numerator and the second LONG expresses the denominator.,
+   1 = BYTE An 8-bit unsigned integer
+   2 = ASCII An 8-bit byte containing one 7-bit ASCII code. The final byte is terminated with NULL
+   3 = SHORT A 16-bit (2-byte) unsigned integer
+   4 = LONG A 32-bit (4-byte) unsigned integer
+   5 = RATIONAL Two LONGs. The first LONG is the numerator and the second LONG the denominator
    6 = no official definition, but used as an unsigned BYTE
    7 = UNDEFINED An 8-bit byte that can take any value depending on the field definition,
    8 = no official definition. Nokia uses it as an integer to represent ISO. Use as type 4.
@@ -3626,7 +3626,8 @@ struct ICC_PROFILE_Values
     DWORD illuminantY;
     DWORD illuminantZ;
     DWORD creator;
-    BYTE id[ 12 ];
+    BYTE id[ 16 ];
+    BYTE reserved[ 28 ];
 
     void ByteSwap( bool littleEndian )
     {
@@ -3744,6 +3745,261 @@ double ConvertS15Fixed16Number( DWORD d )
     return 1.0 + ( ( (double) d - (double) 0x10000 ) / (double) range ) * maxvalue;
 } //ConvertS15Fixed16Number
 
+const char * GetJPGApp14ColorTransform( byte ct )
+{
+    if ( 0 == ct )
+        return ( "unknown (rgb or cmyk)" );
+
+    if ( 1 == ct )
+        return "YCbCr";
+
+    if ( 2 == ct )
+        return "YCCK";
+
+    return "unknown";
+} //GetJPGApp14ColorTransform
+
+struct ICC_TAG
+{
+    char  sig[4];
+    DWORD dataOffset;
+    DWORD dataSize;
+};
+
+const char * GetICCStandardObserver( DWORD s )
+{
+    if ( 1 == s )
+        return "CIE 1931 standard colorimetric observer";
+
+    if ( 2 == s )
+        return "CIE 1964 standard colorimetric observer";
+
+    return "unknown";
+} //GetICCStandardObserver
+
+const char * GetICCGeometry( DWORD geom )
+{
+    if ( 1 == geom )
+        return "0/45 or 45/0";
+
+    if ( 2 == geom )
+        return "0/d or d/0";
+
+    return "unknown";
+} //GetICCGeometry
+
+const char * GetICCMeasurementFlare( DWORD flare )
+{
+    static char acResult[ 100 ];
+
+    sprintf( acResult, "%lf%%", 100.0 * (double) flare / (double) 0x10000 );
+
+    return acResult;
+} //GetICCMeasurementFlare
+
+const char * GetICCStandardIlluminant( DWORD i )
+{
+    if ( 1 == i )
+        return "D50";
+
+    if ( 2 == i )
+        return "D65";
+
+    if ( 3 == i )
+        return "D93";
+
+    if ( 4 == i )
+        return "F2";
+
+    if ( 5 == i )
+        return "D55";
+
+    if ( 6 == i )
+        return "A";
+
+    if ( 7 == i )
+        return "Equi-Power (E)";
+
+    if ( 8 == i )
+        return "F8";
+
+    return "unknown";
+} //GetICCStandardIlluminant
+
+void PrintICCValue( ICC_TAG & t, DWORD offset )
+{
+    char acTag[ 5 ];
+    acTag[ 4 ] = 0;
+    memcpy( acTag, t.sig, 4 );
+
+    char acType[ 5 ];
+    acType[ 4 ] = 0;
+    GetBytes( offset, acType, 4 );
+
+    if ( g_FullInformation )
+    {
+        printf( "  tag %s, type %s\n", acTag, acType );
+        DumpBinaryData( offset, 0, t.dataSize, 8, offset );
+    }
+
+    if ( !strcmp( acTag, "cprt" ) )
+    {
+        int len = t.dataSize - 8;
+        vector<char> value( len );
+        GetBytes( offset + 8, value.data(), len );
+        printf( "  Copyright:                          %s\n", value.data() );
+    }
+    else if ( !strcmp( acTag, "desc" ) )
+    {
+        int len = t.dataSize - 12;
+        vector<char> value( len );
+        GetBytes( offset + 12, value.data(), len );
+        printf( "  ProfileDescription:                 %s\n", value.data() );
+    }
+    else if ( !strcmp( acTag, "wtpt" ) )
+    {
+        DWORD x = GetDWORD( offset + 8, false );
+        DWORD y = GetDWORD( offset + 12, false );
+        DWORD z = GetDWORD( offset + 16, false );
+        printf( "  MediaWhitePoint:                    %lf %lf %lf\n", ConvertS15Fixed16Number( x ),
+                ConvertS15Fixed16Number( y ), ConvertS15Fixed16Number( z ) );
+    }
+    else if ( !strcmp( acTag, "bkpt" ) )
+    {
+        DWORD x = GetDWORD( offset + 8, false );
+        DWORD y = GetDWORD( offset + 12, false );
+        DWORD z = GetDWORD( offset + 16, false );
+        printf( "  MediaBlackPoint:                    %lf %lf %lf\n", ConvertS15Fixed16Number( x ),
+                ConvertS15Fixed16Number( y ), ConvertS15Fixed16Number( z ) );
+    }
+    else if ( !strcmp( acTag, "rXYZ" ) )
+    {
+        DWORD x = GetDWORD( offset + 8, false );
+        DWORD y = GetDWORD( offset + 12, false );
+        DWORD z = GetDWORD( offset + 16, false );
+        printf( "  RedMatrixColumn:                    %lf %lf %lf\n", ConvertS15Fixed16Number( x ),
+                ConvertS15Fixed16Number( y ), ConvertS15Fixed16Number( z ) );
+    }
+    else if ( !strcmp( acTag, "gXYZ" ) )
+    {
+        DWORD x = GetDWORD( offset + 8, false );
+        DWORD y = GetDWORD( offset + 12, false );
+        DWORD z = GetDWORD( offset + 16, false );
+        printf( "  GreenMatrixColumn:                  %lf %lf %lf\n", ConvertS15Fixed16Number( x ),
+                ConvertS15Fixed16Number( y ), ConvertS15Fixed16Number( z ) );
+    }
+    else if ( !strcmp( acTag, "bXYZ" ) )
+    {
+        DWORD x = GetDWORD( offset + 8, false );
+        DWORD y = GetDWORD( offset + 12, false );
+        DWORD z = GetDWORD( offset + 16, false );
+        printf( "  BlueMatrixColumn:                   %lf %lf %lf\n", ConvertS15Fixed16Number( x ),
+                ConvertS15Fixed16Number( y ), ConvertS15Fixed16Number( z ) );
+    }
+    else if ( !strcmp( acTag, "dmnd" ) )
+    {
+        int len = t.dataSize - 12;
+        vector<char> value( len );
+        GetBytes( offset + 12, value.data(), len );
+        printf( "  DeviceMfgDesc:                      %s\n", value.data() );
+    }
+    else if ( !strcmp( acTag, "dmdd" ) )
+    {
+        int len = t.dataSize - 12;
+        vector<char> value( len );
+        GetBytes( offset + 12, value.data(), len );
+        printf( "  DeviceModelDesc:                    %s\n", value.data() );
+    }
+    else if ( !strcmp( acTag, "vued" ) )
+    {
+        int len = t.dataSize - 12;
+        vector<char> value( len );
+        GetBytes( offset + 12, value.data(), len );
+        printf( "  ViewingCondDesc:                    %s\n", value.data() );
+    }
+    else if ( !strcmp( acTag, "lumi" ) )
+    {
+        DWORD x = GetDWORD( offset + 8, false );
+        DWORD y = GetDWORD( offset + 12, false );
+        DWORD z = GetDWORD( offset + 16, false );
+        printf( "  Luminance:                          %lf %lf %lf\n", ConvertS15Fixed16Number( x ),
+                ConvertS15Fixed16Number( y ), ConvertS15Fixed16Number( z ) );
+    }
+    else if ( !strcmp( acTag, "meas" ) )
+    {
+        struct MeasurementType
+        {
+            DWORD type;
+            DWORD reserved;
+            DWORD standardObserver;
+            DWORD xTriStimulus;
+            DWORD yTriStimulus;
+            DWORD zTriStimulus;
+            DWORD geometry;
+            DWORD flare;
+            DWORD standard;
+        };
+
+        MeasurementType mt;
+        GetBytes( offset, &mt, sizeof mt );
+        mt.standardObserver = _byteswap_ulong( mt.standardObserver );
+        mt.xTriStimulus = _byteswap_ulong( mt.xTriStimulus );
+        mt.yTriStimulus = _byteswap_ulong( mt.yTriStimulus );
+        mt.zTriStimulus = _byteswap_ulong( mt.zTriStimulus );
+        mt.geometry = _byteswap_ulong( mt.geometry );
+        mt.flare = _byteswap_ulong( mt.flare );
+        mt.standard = _byteswap_ulong( mt.standard );
+
+        printf( "  Measurement:\n" );
+        printf( "    standard observer:                %d\n", mt.standardObserver, GetICCStandardObserver( mt.standardObserver ) );
+        printf( "    x tristimulus backing:            %lf\n", ConvertS15Fixed16Number( mt.xTriStimulus ) );
+        printf( "    y tristimulus backing:            %lf\n", ConvertS15Fixed16Number( mt.yTriStimulus ) );
+        printf( "    z tristimulus backing:            %lf\n", ConvertS15Fixed16Number( mt.zTriStimulus ) );
+        printf( "    measurement geometry:             %d (%s)\n", mt.geometry, GetICCGeometry( mt.geometry ) );
+        printf( "    measurement flare:                %d (%s)\n", mt.flare, GetICCMeasurementFlare( mt.flare ) );
+        printf( "    standard illuminant:              %d (%s)\n", mt.standard, GetICCStandardIlluminant( mt.standard ) );
+    }
+    else if ( !strcmp( acTag, "tech" ) )
+    {
+        char acTech[ 5 ];
+        acTech[ 4 ] = 0;
+        GetBytes( offset + 8, acTech, 4 );
+        printf( "  technology:                         %s\n", acTech );
+    }
+    else if ( !strcmp( acTag, "view" ) )
+    {
+        DWORD x = GetDWORD( offset + 8, false );
+        DWORD y = GetDWORD( offset + 12, false );
+        DWORD z = GetDWORD( offset + 16, false );
+        printf( "  ViewingConditions:                  %lf %lf %lf\n", ConvertS15Fixed16Number( x ),
+                ConvertS15Fixed16Number( y ), ConvertS15Fixed16Number( z ) );
+    }
+    else if ( !strcmp( acTag, "rTRC" ) )
+    {
+        DWORD count = GetDWORD( offset + 8, false );
+        printf( "  Red tone reproduction curve #:      %d\n", count );
+    }
+    else if ( !strcmp( acTag, "gTRC" ) )
+    {
+        DWORD count = GetDWORD( offset + 8, false );
+        printf( "  Green tone reproduction curve #:    %d\n", count );
+    }
+    else if ( !strcmp( acTag, "bTRC" ) )
+    {
+        DWORD count = GetDWORD( offset + 8, false );
+        printf( "  Blue tone reproduction curve #:     %d\n", count );
+    }
+    else
+    {
+        if ( !g_FullInformation )
+        {
+            printf( "  tag %s, type %s\n", acTag, acType );
+            DumpBinaryData( offset, 0, t.dataSize, 8, offset );
+        }
+    }
+
+} //PrintICCValue
+
 int ParseOldJpg()
 {
     printf( "mimetype:                             image/jpeg\n" );
@@ -3765,10 +4021,12 @@ int ParseOldJpg()
     const BYTE MARKER_EOI   = 0xd9;          // end of image
     const BYTE MARKER_SOS   = 0xda;          // start of scan
     const BYTE MARKER_DQT   = 0xdb;          // Quantization table
+    const BYTE MARKER_DRI   = 0xdd;          // 
     const BYTE MARKER_APP0  = 0xe0;          // JFIF application segment
     const BYTE MARKER_APP1  = 0xe1;          // Exif or adobe segment
     const BYTE MARKER_APP2  = 0xe2;          // ICC_PROFILE
     const BYTE MARKER_PS3   = 0xed;          // Photoshop 3.08BIM
+    const BYTE MARKER_APP14 = 0xee;          // Adobe  JPEG::Adobe directory
     const BYTE MARKER_COM   = 0xfe;          // comment
 
     do
@@ -3795,6 +4053,7 @@ int ParseOldJpg()
         }
 
         WORD length = GetWORD( offset + 2, false );
+        WORD data_length = length - 2;
 
         if ( g_FullInformation )
             printf( "  segment length %d\n", length );
@@ -3804,21 +4063,18 @@ int ParseOldJpg()
             if ( length < 67 )
                 return exifOffset;
 
-            int total = length - 2;
-
-            if ( 0 != ( total % 65 ) )
+            if ( 0 != ( data_length % 65 ) )
                 return exifOffset;
 
-            total = total / 65;
+            DQTSegmentCount = data_length / 65;
 
             if ( g_FullInformation )
-                printf( "  dqt segments: %d\n", total );
+                printf( "  dqt segments: %d\n", DQTSegmentCount );
 
             int o = offset + 4;
-            pDQTSegs = new QuantizationTableSegment[ total ];
-            DQTSegmentCount = total;
+            pDQTSegs = new QuantizationTableSegment[ DQTSegmentCount ];
 
-            for ( int i = 0; i < total; i++ )
+            for ( int i = 0; i < DQTSegmentCount; i++ )
             {
                 BYTE dqtInfo = GetBYTE( o++ );
                 pDQTSegs[ i ].Pq = dqtInfo & 0xf;
@@ -3830,12 +4086,12 @@ int ParseOldJpg()
         }
         else if ( MARKER_COM == segment )
         {
-            unique_ptr<char> comment( new char[ length + 1 ] );
+            unique_ptr<char> comment( new char[ data_length + 1 ] );
 
-            for ( int i = 0; i < length; i++ )
+            for ( int i = 0; i < data_length; i++ )
                 comment.get()[i] = GetBYTE( offset + 4 + i );
 
-            comment.get()[ length ] = 0;
+            comment.get()[ data_length ] = 0;
 
             printf( "comment:                           %s\n", comment.get() );
         }
@@ -3925,18 +4181,19 @@ int ParseOldJpg()
         }
         else if ( MARKER_APP2 == segment )
         {
-            //printf( "app2 offset %d\n", offset );
+            //printf( "app2 offset %#x\n", offset );
 
             char acHeader[ 13 ];
             acHeader[ 12 ] = 0;
             GetBytes( offset + 4, &acHeader, 12 );
-
             printf( "Color Profile header %s\n", acHeader );
 
+            int icc_offset = offset + 4 + 14;
             ICC_PROFILE_Values icc;
-            GetBytes( offset + 4 + 14, &icc, sizeof icc );
+            GetBytes( icc_offset, &icc, sizeof icc );
             icc.ByteSwap( false );
 
+            //printf( "data_length %d, sizeof icc %d\n", data_length, (int) sizeof icc );
             printf( "  size:                           %5d\n", icc.size );
 
             memcpy( acHeader, &icc.cmmType, 4 );
@@ -3992,6 +4249,34 @@ int ParseOldJpg()
             for ( size_t i = 0; i < _countof( icc.id ); i++ )
                 printf( "%#x", icc.id[ i ] );
             printf( "\n" );
+
+            //printf( "data_length and sizeof icc: %d %d\n", data_length, (int) sizeof icc );
+
+            if ( data_length > (int) sizeof icc )
+            {
+                // A tag table follows
+
+                DWORD currentOffset = offset + 4 + 14 + sizeof icc;
+
+                DWORD tagCount = GetDWORD( currentOffset, false );
+                currentOffset += 4;
+                printf( "ICC tag table has %d entries\n", tagCount );
+
+                for ( DWORD tag = 0; tag < tagCount; tag++ )
+                {
+                    ICC_TAG t;
+                    t.sig[0] = GetBYTE( currentOffset );
+                    t.sig[1] = GetBYTE( currentOffset + 1 );
+                    t.sig[2] = GetBYTE( currentOffset + 2 );
+                    t.sig[3] = GetBYTE( currentOffset + 3 );
+                    t.dataOffset = GetDWORD( currentOffset + 4, false );
+                    t.dataSize = GetDWORD( currentOffset + 8, false );
+
+                    DWORD value_offset = icc_offset + t.dataOffset;
+                    PrintICCValue( t, value_offset );
+                    currentOffset += sizeof t;
+                }
+            }
         }
         else if ( MARKER_SOS == segment )
         {
@@ -4030,7 +4315,7 @@ int ParseOldJpg()
         {
             printf( "photoshop irb data:\n" );
 
-            DumpBinaryData( offset + 4, 0, length, 8, 0 );
+            DumpBinaryData( offset + 4, 0, data_length, 8, 0 );
         }
         else if ( MARKER_APP1 == segment )
         {
@@ -4045,23 +4330,47 @@ int ParseOldJpg()
             {
                 // just return the exifoffset so it can be parsed later
 
-                //DumpBinaryData( offset + 4, 0, length, 8, 0 );
+                //DumpBinaryData( offset + 4, 0, data_length, 8, 0 );
                 exifOffset = offset + 8;
             }
             else if ( !stricmp( app1Header, "http" ) )
             {
-                //DumpBinaryData( offset + 4, 0, length, 8, 0 );
+                //DumpBinaryData( offset + 4, 0, data_length, 8, 0 );
 
-                unique_ptr<char> bytes( new char[ length + 1 ] );
-                GetBytes( (__int64) offset + 4, bytes.get(), length );
-                bytes.get()[ length ] = 0;
+                unique_ptr<char> bytes( new char[ data_length + 1 ] );
+                GetBytes( (__int64) offset + 4, bytes.get(), data_length );
+                bytes.get()[ data_length ] = 0;
 
                 int headerlen = strlen( bytes.get() );
 
                 printf( "adobe header: %s\n", bytes.get() );
                 printf( "adobe data:   %s\n", bytes.get() + headerlen + 1 );
             }
+        }
+        else if ( MARKER_DRI == segment )
+        {
+            WORD restart_interval = GetWORD( offset + 4, false );
+            printf( "define restart interval:   %12d\n", restart_interval );
+        }
+        else if ( MARKER_APP14 == segment )
+        {
+            DWORD app14_offset = offset + 4 + 5;
 
+            WORD DCTEncodeVersion = GetWORD( app14_offset, false );
+            WORD App14Flags0 = GetWORD( app14_offset + 2, false );
+            WORD App14Flags1 = GetWORD( app14_offset + 4, false );
+            WORD ColorTransform = GetBYTE( app14_offset + 5 );
+
+            printf( "app14 Adobe data:\n" );
+            printf( "  DCT encode version:      %12d\n", DCTEncodeVersion );
+            printf( "  app14 flags0:            %12d\n", App14Flags0 );
+            printf( "  app14 flags1:            %12d\n", App14Flags1 );
+            printf( "  color transform:         %12d (%s)\n", ColorTransform, GetJPGApp14ColorTransform( ColorTransform ) );
+        }
+        else
+        {
+            printf( "unparsed segment %#x data_length %d\n", segment, data_length );
+            DumpBinaryData( offset + 4, 0, data_length, 8, offset + 4 );
         }
 
         if ( 0 == length )
@@ -5901,7 +6210,7 @@ void EnumerateIFD0( int depth, __int64 IFDOffset, __int64 headerBase, bool littl
     }
 } //EnumerateIFD0
 
-const char * GetColorType( BYTE ct )
+const char * GetPNGColorType( byte ct )
 {
     if ( 0 == ct )
         return "grayscale";
@@ -5919,9 +6228,9 @@ const char * GetColorType( BYTE ct )
         return "RGBA";
 
     return "unknown";
-} //GetColorType
+} //GetPNGColorType
 
-const char * GetRenderingIntent( BYTE ri )
+const char * GetPNGRenderingIntent( byte ri )
 {
     if ( 0 == ri )
         return "perceptual";
@@ -5936,7 +6245,7 @@ const char * GetRenderingIntent( BYTE ri )
         return "absolute colorimetric";
 
     return "unknown";
-} //GetRenderingIntent
+} //GetPNGRenderingIntent
 
 const char * GetPNGUnitSpecifier( byte b )
 {
@@ -5968,6 +6277,17 @@ const char * GetPNGFilterMethod( byte fm )
     return "unknown";
 } //GetPNGFilterMethod
 
+const char * GetPNGInterlaceMethod( byte im )
+{
+    if ( 0 == im )
+        return "sequential";
+
+    if ( 1 == im )
+        return "adam7 interlaced";
+
+    return "unknown";
+} //GetPNGInterlaceMethod
+
 // https://en.wikipedia.org/wiki/Portable_Network_Graphics
 // http://www.libpng.org/pub/png/spec/1.2/PNG-Chunks.html
 // PNG files are big-endian. 8-byte header then records of:
@@ -5989,7 +6309,9 @@ void ParsePNG()
 
     DWORD offset = 8;
     DWORD width, height;
-    BYTE bitDepth, colorType, compressionMethod, filterMethod, interlaceMethod;
+    byte bitDepth, colorType, compressionMethod, filterMethod, interlaceMethod;
+    DWORD idatSegments = 0;
+    DWORD idatSize = 0;
 
     printf( "mimetype:                             image/png\n" );
 
@@ -6027,7 +6349,7 @@ void ParsePNG()
             if ( g_FullInformation )
                 printf( "offset of IEND chunk: %d\n", offset );
 
-            return;
+            break;
         }
         else if ( 0x49484452 == type ) // IHDR   header
         {
@@ -6042,16 +6364,16 @@ void ParsePNG()
             printf( "image width:           %16d\n", width );
             printf( "image height:          %16d\n", height );
             printf( "bit depth:             %16d\n", bitDepth );
-            printf( "color type:            %16d (%s)\n", colorType, GetColorType( colorType) );
+            printf( "color type:            %16d (%s)\n", colorType, GetPNGColorType( colorType) );
             printf( "compression method:    %16d\n", compressionMethod );
             printf( "filter method:         %16d (%s)\n", filterMethod, GetPNGFilterMethod( filterMethod ) );
-            printf( "interlace method:      %16d\n", interlaceMethod );
+            printf( "interlace method:      %16d (%s)\n", interlaceMethod, GetPNGInterlaceMethod( interlaceMethod ) );
         }
         else if ( 0x73524742 == type ) // sRGB
         {
             BYTE renderingIntent = GetBYTE( offset + 8 );
 
-            printf( "sRGB rendering intent: %16d (%s)\n", renderingIntent, GetRenderingIntent( renderingIntent ) );
+            printf( "sRGB rendering intent: %16d (%s)\n", renderingIntent, GetPNGRenderingIntent( renderingIntent ) );
         }
         else if ( 0x67414d41 == type ) // gAMA
         {
@@ -6075,6 +6397,9 @@ void ParsePNG()
 
             if ( g_FullInformation )
                 printf( "flac image data length:     %16d\n", len );
+
+            idatSegments++;
+            idatSize += len;
         }
         else if ( 0x6348524d == type ) // cHRM
         {
@@ -6217,6 +6542,9 @@ void ParsePNG()
 
         offset += ( 12 + len );
     } while( true );
+
+    printf( "IDAT segments:         %16d\n", idatSegments );
+    printf( "IDAT data bytes:       %16d\n", idatSize );
 } //ParsePNG
 
 const char * BmpCompression( DWORD c )
