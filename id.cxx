@@ -4000,6 +4000,29 @@ void PrintICCValue( ICC_TAG & t, DWORD offset )
 
 } //PrintICCValue
 
+void PrintXMPData( const char * pcIn )
+{
+    // look for known xml tags rather than exhaustively parse the xml
+
+    const char * pcTag = "xmp:Rating>";
+    const char * pcRating = strstr( pcIn, pcTag );
+
+    if ( !pcRating )
+    {
+        // jpg and Sony RAW ARW files will have this form
+
+        pcTag = "xmp:Rating=\"";
+        pcRating = strstr( pcIn, pcTag );
+    }
+
+    if ( pcRating )
+    {
+        pcRating += strlen( pcTag );
+        if ( isdigit( *pcRating ) )          // doesn't handle Adobe Bridge's -1
+            printf( "Rating:                               %c\n", *pcRating );
+    }
+} //PrintXMPData
+
 int ParseOldJpg()
 {
     printf( "mimetype:                             image/jpeg\n" );
@@ -4182,6 +4205,7 @@ int ParseOldJpg()
         else if ( MARKER_APP2 == segment )
         {
             //printf( "app2 offset %#x\n", offset );
+            // https://www.color.org/ICC1V42.pdf
 
             char acHeader[ 13 ];
             acHeader[ 12 ] = 0;
@@ -4335,16 +4359,18 @@ int ParseOldJpg()
             }
             else if ( !stricmp( app1Header, "http" ) )
             {
+                // there will be a null-terminated header string then another string with xmp data
+
                 //DumpBinaryData( offset + 4, 0, data_length, 8, 0 );
 
                 unique_ptr<char> bytes( new char[ data_length + 1 ] );
                 GetBytes( (__int64) offset + 4, bytes.get(), data_length );
                 bytes.get()[ data_length ] = 0;
-
                 int headerlen = strlen( bytes.get() );
 
                 printf( "adobe header: %s\n", bytes.get() );
                 printf( "adobe data:   %s\n", bytes.get() + headerlen + 1 );
+                PrintXMPData( bytes.get() + headerlen + 1 );
             }
         }
         else if ( MARKER_DRI == segment )
@@ -4779,13 +4805,19 @@ void EnumerateBoxes( HeifStream & hs, DWORD depth )
         tag[ 1 ] = ( dwTag >> 16 ) & 0xff;
         tag[ 0 ] = ( dwTag >> 24 ) & 0xff;
         tag[ 4 ] = 0;
-    
+
         if ( 1 == boxLen )
         {
             ULONGLONG high = hs.GetDWORD( offset, false );
             ULONGLONG low = hs.GetDWORD( offset, false );
 
             boxLen = ( high << 32 ) | low;
+        }
+
+        if ( boxLen > hs.Length() )
+        {
+            printf( "box length %lld is greater than the substream length %lld\n", boxLen, hs.Length() );
+            break;
         }
 
         if ( g_FullInformation )
@@ -5079,6 +5111,21 @@ void EnumerateBoxes( HeifStream & hs, DWORD depth )
                 HeifStream hsChild( hs.Stream(), hs.Offset() + offset, boxLen - ( offset - boxOffset ) );
 
                 EnumerateBoxes( hsChild, depth + 1 );
+            }
+
+            if ( !strcmp( "be7acfcb97a942e89c71999491e3afac", acGUID ) )
+            {
+                // printf( "found cr3 xmp data box\n" );
+
+                ULONGLONG xmpLen = boxLen - ( offset - boxOffset );
+                //printf( "xmpLen: %lld\n", xmpLen );
+
+                unique_ptr<char> bytes( new char[ xmpLen + 1 ] );
+                hs.GetBytes( offset, bytes.get(), xmpLen );
+                bytes.get()[ xmpLen ] = 0; // ensure it'll be null-terminated
+                //DumpBinaryData( bytes.get(), xmpLen, 8 );
+
+                PrintXMPData( bytes.get() );
             }
         }
         else if ( !strcmp( tag, "CMT1" ) )
@@ -5633,6 +5680,11 @@ void EnumerateIFD0( int depth, __int64 IFDOffset, __int64 headerBase, bool littl
                 printf( "XMP:                                  %d bytes at offset %d\n", head.count, head.offset );
 
                 DumpBinaryData( head.offset, headerBase, head.count, 4, IFDOffset - 4 );
+
+                unique_ptr<char> bytes( new char[ head.count + 1 ] );
+                bytes.get()[ head.count ] = 0; // ensure it'll be null-terminated
+                GetBytes( head.offset + headerBase, bytes.get(), head.count );
+                PrintXMPData( bytes.get() );
             }
             else if ( 769 == head.id && 5 == head.type && 1 == head.count )
             {
