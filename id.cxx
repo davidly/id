@@ -504,6 +504,16 @@ void EnumerateFujifilmMakernotes( int depth, __int64 IFDOffset, __int64 headerBa
                 GetString( stringOffset + tagHeaderBase + headerBase, acBuffer, _countof( acBuffer ), head.count );
                 printf( "fujifilm makernote Quality:          %s\n", acBuffer );
             }
+            else if ( 4097 == head.id && 4 == head.type )
+                printf( "Fujifilm Sharpness:                  %d\n", head.offset );
+            else if ( 4098 == head.id && 4 == head.type )
+                printf( "Fujifilm WhiteBalance:               %d\n", head.offset );
+            else if ( 4099 == head.id && 4 == head.type )
+                printf( "Fujifilm Saturation:                 %d\n", head.offset );
+            else if ( 5169 == head.id && 4 == head.type )
+            {
+                printf( "Fujifilm Rating:                     %d\n", head.offset );
+            }
             else
             {
                 printf( "fujifilm makernote tag %d ID %d==%#x, type %d, count %d, offset/value %d", i, head.id, head.id, head.type, head.count, head.offset );
@@ -4018,16 +4028,20 @@ void PrintXMPData( const char * pcIn )
     if ( pcRating )
     {
         pcRating += strlen( pcTag );
-        if ( isdigit( *pcRating ) )          // doesn't handle Adobe Bridge's -1
-            printf( "Rating:                               %c\n", *pcRating );
+        int rating = *pcRating;
+
+        if ( rating >= '0' && rating <= '5' )          // doesn't handle Adobe Bridge's -1
+            printf( "Rating:                               %c\n", rating );
+        else
+            printf( "XMP Rating value isn't 0-5: '%c' == %#x\n", rating, rating );
     }
 } //PrintXMPData
 
-int ParseOldJpg()
+int ParseOldJpg( DWORD startingOffset = 0 )
 {
     printf( "mimetype:                             image/jpeg\n" );
 
-    DWORD offset = 2;
+    DWORD offset = 2 + startingOffset;
     WORD width = 0;
     WORD height = 0;
     int DQTSegmentCount;
@@ -4061,7 +4075,7 @@ int ParseOldJpg()
         BYTE segment = GetBYTE( offset + 1 );
 
         if ( g_FullInformation )
-            printf( "offset %d, segment %#x\n", offset, segment );
+            printf( "jpg offset %d, segment %#x\n", offset, segment );
 
         if ( MARKER_EOI == segment )
         {
@@ -8650,6 +8664,93 @@ void ParseWav()
     #pragma pack(pop)
 } //ParseWav
 
+struct RafHeader
+{
+    char      magic[ 16 ];
+    char      formatVersion[ 4 ];
+    char      cameraNumberID[ 8 ];
+    char      camerabodyname[ 32 ];
+    char      subVersion[ 4 ];
+    char      unknown[ 20 ];
+    DWORD     jpgOffset;
+    DWORD     jpgLength;
+    DWORD     cfaHeaderOffset;
+    DWORD     cfaHeaderLength;
+    DWORD     cfaOffset;
+    DWORD     cfaLength;
+
+    void littleEndian()
+    {
+        jpgOffset = _byteswap_ulong( jpgOffset );
+        jpgLength = _byteswap_ulong( jpgLength );
+        cfaHeaderOffset = _byteswap_ulong( cfaHeaderOffset );
+        cfaHeaderLength = _byteswap_ulong( cfaHeaderLength );
+        cfaOffset = _byteswap_ulong( cfaOffset );
+        cfaLength = _byteswap_ulong( cfaLength );
+    }
+};
+
+void AttemptFujifilmParse()
+{
+    printf( "Fujifilm RAF raw file:\n" );
+    RafHeader raf = { 0 };
+    GetBytes( 0, &raf, sizeof raf );
+    raf.littleEndian();
+
+    printf( "  RAF magic:                          " );
+    for ( int i = 0; i < sizeof raf.magic; i++ )
+        printf( "%c", raf.magic[ i ] );
+    printf( "\n" );
+
+    printf( "  RAF format version:                 " );
+    for ( int i = 0; i < sizeof raf.formatVersion; i++ )
+        printf( "%c", raf.formatVersion[ i ] );
+    printf( "\n" );
+
+    printf( "  RAF camera number ID:               " );
+    for ( int i = 0; i < sizeof raf.cameraNumberID; i++ )
+        printf( "%c", raf.cameraNumberID[ i ] );
+    printf( "\n" );
+
+    printf( "  RAF camera body name:               %s\n", raf.camerabodyname );
+
+    printf( "  RAF sub version:                    " );
+    for ( int i = 0; i < sizeof raf.subVersion; i++ )
+        printf( "%c", raf.subVersion[ i ] );
+    printf( "\n" );
+
+    printf( "  RAF jpg offset:                     %#x\n", raf.jpgOffset );
+    printf( "  RAF jpg length:                     %#x\n", raf.jpgLength );
+    printf( "  RAF cfa header offset:              %#x\n", raf.cfaHeaderOffset );
+    printf( "  RAF cfa header length:              %#x\n", raf.cfaHeaderLength );
+    printf( "  RAF cfa offset:                     %#x\n", raf.cfaOffset );
+    printf( "  RAF cfa length:                     %#x\n", raf.cfaLength );
+
+    DWORD recordCount = GetDWORD( raf.cfaHeaderOffset, false );
+    printf( "  RAF count of records:               %d\n", recordCount );
+
+    DWORD recordOffset = raf.cfaHeaderOffset + sizeof DWORD;
+
+    for ( DWORD r = 0; r < recordCount; r++ )
+    {
+        WORD tagID = GetWORD( recordOffset, false );
+        recordOffset += sizeof WORD;
+        WORD size = GetWORD( recordOffset, false );
+        recordOffset += sizeof WORD;
+
+        printf( "    RAF cfa record tag                %d == %#x\n", tagID, tagID );
+        printf( "    RAF cfa record size               %d\n", size );
+
+        if ( 4 == size )
+        {
+            DWORD val = GetDWORD( recordOffset, false );
+            printf( "    RAF cfa record value:             %#x\n", val );
+        }
+
+        recordOffset += size;
+    }
+} //AttemptFujifilmParse
+
 void EnumerateImageData( WCHAR const * pwc )
 {
     g_pStream = new CStream( pwc );
@@ -8866,9 +8967,11 @@ void EnumerateImageData( WCHAR const * pwc )
     }
     else if ( 0x494a5546 == header )
     {
-        // RAF files aren't like TIFF files. They have their own format which isn't documented and this app can't parse.
+        // Fujifilm RAF files aren't like TIFF files. They have their own format.
         // But RAF files have an embedded JPG with full properties, so show those.
         // https://libopenraw.freedesktop.org/formats/raf/
+
+        AttemptFujifilmParse();
 
         DWORD jpgOffset = GetDWORD( 84, false );
         DWORD jpgLength = GetDWORD( 88, false );
@@ -8881,6 +8984,8 @@ void EnumerateImageData( WCHAR const * pwc )
             return;
         }
 
+        printf( "Embedded JPG in RAF:\n" );
+        int exifMaybe = ParseOldJpg( jpgOffset );
         DWORD exifSig = GetDWORD( jpgOffset + exifHeaderOffset, true );
         //printf( "jpg exif Sig: %#x\n", exifSig );
 
