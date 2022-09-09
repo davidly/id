@@ -4224,95 +4224,102 @@ int ParseOldJpg( DWORD startingOffset = 0 )
             char acHeader[ 13 ];
             acHeader[ 12 ] = 0;
             GetBytes( offset + 4, &acHeader, 12 );
-            printf( "Color Profile header %s\n", acHeader );
+            printf( "APP2 header %s\n", acHeader );
 
-            int icc_offset = offset + 4 + 14;
-            ICC_PROFILE_Values icc;
-            GetBytes( icc_offset, &icc, sizeof icc );
-            icc.ByteSwap( false );
-
-            //printf( "data_length %d, sizeof icc %d\n", data_length, (int) sizeof icc );
-            printf( "  size:                           %5d\n", icc.size );
-
-            memcpy( acHeader, &icc.cmmType, 4 );
-            acHeader[ 4 ] = 0;
-            printf( "  cmm type:                           %s (%#x)\n", acHeader, icc.cmmType );
-
-            printf( "  version:                            %d.%d.%d\n", icc.version & 0xff, ( icc.version >> 12 ) & 0xf, ( icc.version >> 8 ) & 0xf );
-            printf( "  profile class:                      %s (%#x)\n", GetICCProfileClass( icc.profileClass ), icc.profileClass );
-
-            memcpy( acHeader, &icc.colorSpace, 4 );
-            acHeader[ 4 ] = 0;
-            printf( "  color space:                        %s (%#x)\n", acHeader, icc.colorSpace );
-
-            memcpy( acHeader, &icc.pcs, 4 );
-            acHeader[ 4 ] = 0;
-            printf( "  connection space:                   %s (%#x)\n", acHeader, icc.pcs );
-
-            printf( "  dd/mm/yyyy hh:mm:ss:                %02d/%02d/%04d %02d:%02d:%02d\n", icc.day, icc.month, icc.year, icc.hours, icc.minutes, icc.seconds );
-
-            memcpy( acHeader, &icc.signature, 4 );
-            acHeader[ 4 ] = 0;
-            printf( "  signature:                          %s (%#x)\n", acHeader, icc.signature );
-
-            memcpy( acHeader, &icc.platform, 4 );
-            acHeader[ 4 ] = 0;
-            printf( "  primary platform:                   %s (%#x)\n", acHeader, icc.platform );
-
-            printf( "  cmm flags:                          %s, %s\n", ( icc.options & 0x1 ) ? "embedded" : "not embedded", ( icc.options & 0x2 ) ? "not independent" : "independent" );
-
-            memcpy( acHeader, &icc.manufacturer, 4 );
-            acHeader[ 4 ] = 0;
-            printf( "  manufacturer:                       %s (%#x)\n", acHeader, icc.manufacturer );
-
-            memcpy( acHeader, &icc.model, 4 );
-            acHeader[ 4 ] = 0;
-            printf( "  model:                              %s (%#x)\n", acHeader, icc.model );
-
-            printf( "  attributes:                         %s, %s, %s, %s\n", ( icc.attributes & 0x1 ) ? "transparency" : "reflective",
-                                                                              ( icc.attributes & 0x2 ) ? "matte" : "glossy",
-                                                                              ( icc.attributes & 0x4 ) ? "polarity negative" : "polarity positive",
-                                                                              ( icc.attributes & 0x8 ) ? "black and white media" : "color media" );
-
-            printf( "  rendering intent:                   %s\n", GetICCRenderingIntent( icc.intent & 0xffff ) );
-
-            printf( "  illuminant:                         %lf, %lf, %lf\n", ConvertS15Fixed16Number( icc.illuminantX ),
-                                                                             ConvertS15Fixed16Number( icc.illuminantY ),
-                                                                             ConvertS15Fixed16Number( icc.illuminantZ ) );
-            memcpy( acHeader, &icc.creator, 4 );
-            acHeader[ 4 ] = 0;
-            printf( "  creator:                            %s (%#x)\n", acHeader, icc.creator );
-
-            printf( "  profile id:                         " );
-            for ( size_t i = 0; i < _countof( icc.id ); i++ )
-                printf( "%#x", icc.id[ i ] );
-            printf( "\n" );
-
-            //printf( "data_length and sizeof icc: %d %d\n", data_length, (int) sizeof icc );
-
-            if ( data_length > (int) sizeof icc )
+            if ( !stricmp( acHeader, "FPXR" ) )
             {
-                // A tag table follows
-
-                DWORD currentOffset = offset + 4 + 14 + sizeof icc;
-
-                DWORD tagCount = GetDWORD( currentOffset, false );
-                currentOffset += 4;
-                printf( "ICC tag table has %d entries\n", tagCount );
-
-                for ( DWORD tag = 0; tag < tagCount; tag++ )
+                // fujifilm-specific header
+            }
+            else if ( !stricmp( acHeader, "ICC_PROFILE" ) )
+            {
+                int icc_offset = offset + 4 + 14;
+                ICC_PROFILE_Values icc;
+                GetBytes( icc_offset, &icc, sizeof icc );
+                icc.ByteSwap( false );
+    
+                //printf( "data_length %d, sizeof icc %d\n", data_length, (int) sizeof icc );
+                printf( "  size:                           %5d\n", icc.size );
+    
+                memcpy( acHeader, &icc.cmmType, 4 );
+                acHeader[ 4 ] = 0;
+                printf( "  cmm type:                           %s (%#x)\n", acHeader, icc.cmmType );
+    
+                printf( "  version:                            %d.%d.%d\n", icc.version & 0xff, ( icc.version >> 12 ) & 0xf, ( icc.version >> 8 ) & 0xf );
+                printf( "  profile class:                      %s (%#x)\n", GetICCProfileClass( icc.profileClass ), icc.profileClass );
+    
+                memcpy( acHeader, &icc.colorSpace, 4 );
+                acHeader[ 4 ] = 0;
+                printf( "  color space:                        %s (%#x)\n", acHeader, icc.colorSpace );
+    
+                memcpy( acHeader, &icc.pcs, 4 );
+                acHeader[ 4 ] = 0;
+                printf( "  connection space:                   %s (%#x)\n", acHeader, icc.pcs );
+    
+                printf( "  dd/mm/yyyy hh:mm:ss:                %02d/%02d/%04d %02d:%02d:%02d\n", icc.day, icc.month, icc.year, icc.hours, icc.minutes, icc.seconds );
+    
+                memcpy( acHeader, &icc.signature, 4 );
+                acHeader[ 4 ] = 0;
+                printf( "  signature:                          %s (%#x)\n", acHeader, icc.signature );
+    
+                memcpy( acHeader, &icc.platform, 4 );
+                acHeader[ 4 ] = 0;
+                printf( "  primary platform:                   %s (%#x)\n", acHeader, icc.platform );
+    
+                printf( "  cmm flags:                          %s, %s\n", ( icc.options & 0x1 ) ? "embedded" : "not embedded", ( icc.options & 0x2 ) ? "not independent" : "independent" );
+    
+                memcpy( acHeader, &icc.manufacturer, 4 );
+                acHeader[ 4 ] = 0;
+                printf( "  manufacturer:                       %s (%#x)\n", acHeader, icc.manufacturer );
+    
+                memcpy( acHeader, &icc.model, 4 );
+                acHeader[ 4 ] = 0;
+                printf( "  model:                              %s (%#x)\n", acHeader, icc.model );
+    
+                printf( "  attributes:                         %s, %s, %s, %s\n", ( icc.attributes & 0x1 ) ? "transparency" : "reflective",
+                                                                                  ( icc.attributes & 0x2 ) ? "matte" : "glossy",
+                                                                                  ( icc.attributes & 0x4 ) ? "polarity negative" : "polarity positive",
+                                                                                  ( icc.attributes & 0x8 ) ? "black and white media" : "color media" );
+    
+                printf( "  rendering intent:                   %s\n", GetICCRenderingIntent( icc.intent & 0xffff ) );
+    
+                printf( "  illuminant:                         %lf, %lf, %lf\n", ConvertS15Fixed16Number( icc.illuminantX ),
+                                                                                 ConvertS15Fixed16Number( icc.illuminantY ),
+                                                                                 ConvertS15Fixed16Number( icc.illuminantZ ) );
+                memcpy( acHeader, &icc.creator, 4 );
+                acHeader[ 4 ] = 0;
+                printf( "  creator:                            %s (%#x)\n", acHeader, icc.creator );
+    
+                printf( "  profile id:                         " );
+                for ( size_t i = 0; i < _countof( icc.id ); i++ )
+                    printf( "%#x", icc.id[ i ] );
+                printf( "\n" );
+    
+                //printf( "data_length and sizeof icc: %d %d\n", data_length, (int) sizeof icc );
+    
+                if ( data_length > (int) sizeof icc )
                 {
-                    ICC_TAG t;
-                    t.sig[0] = GetBYTE( currentOffset );
-                    t.sig[1] = GetBYTE( currentOffset + 1 );
-                    t.sig[2] = GetBYTE( currentOffset + 2 );
-                    t.sig[3] = GetBYTE( currentOffset + 3 );
-                    t.dataOffset = GetDWORD( currentOffset + 4, false );
-                    t.dataSize = GetDWORD( currentOffset + 8, false );
-
-                    DWORD value_offset = icc_offset + t.dataOffset;
-                    PrintICCValue( t, value_offset );
-                    currentOffset += sizeof t;
+                    // A tag table follows
+    
+                    DWORD currentOffset = offset + 4 + 14 + sizeof icc;
+    
+                    DWORD tagCount = GetDWORD( currentOffset, false );
+                    currentOffset += 4;
+                    printf( "ICC tag table has %d entries\n", tagCount );
+    
+                    for ( DWORD tag = 0; tag < tagCount; tag++ )
+                    {
+                        ICC_TAG t;
+                        t.sig[0] = GetBYTE( currentOffset );
+                        t.sig[1] = GetBYTE( currentOffset + 1 );
+                        t.sig[2] = GetBYTE( currentOffset + 2 );
+                        t.sig[3] = GetBYTE( currentOffset + 3 );
+                        t.dataOffset = GetDWORD( currentOffset + 4, false );
+                        t.dataSize = GetDWORD( currentOffset + 8, false );
+    
+                        DWORD value_offset = icc_offset + t.dataOffset;
+                        PrintICCValue( t, value_offset );
+                        currentOffset += sizeof t;
+                    }
                 }
             }
         }
@@ -6788,7 +6795,7 @@ bool isValidMP3Frame( char const * pc )
                 continue;
         }
 
-        if ( ( c > 'Z' || c < 'A' )  && ( c > '9' || c < '0' ) )
+        if ( ( c > 'Z' || c < 'A' ) && ( c > '9' || c < '0' ) )
             return false;
     }
 
