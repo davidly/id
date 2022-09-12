@@ -4025,6 +4025,14 @@ void PrintXMPData( const char * pcIn )
         pcRating = strstr( pcIn, pcTag );
     }
 
+    if ( !pcRating )
+    {
+        // Hasselblad RAW files have this form
+
+        pcTag = "xap:Rating>";
+        pcRating = strstr( pcIn, pcTag );
+    }
+
     if ( pcRating )
     {
         pcRating += strlen( pcTag );
