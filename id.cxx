@@ -7,6 +7,7 @@
 
 #include <stdlib.h>
 #include <stdio.h>
+#include <time.h>
 #include <io.h>
 #include <limits.h>
 #include <float.h>
@@ -8594,6 +8595,21 @@ void ParseWav()
         GUID  subFormat;          // the extended format of the data
     };
 
+    struct PositionPeak
+    {
+        float value;              // signed value of the peak
+        DWORD position;           // sample frame for the peak
+    };
+
+    struct WavPeakchunk
+    {
+        DWORD format;             // e.g. "fmt" or "JUNK" or "bext"
+        DWORD formatSize;         // size of format data
+        DWORD version;            // version of this chunk format. 1 is known
+        DWORD timeStamp;          // seconds since 1/1/1970
+        PositionPeak peak[ 0 ];   // actual size is the # of channels in the WavSubchunk
+    };
+
     WavHeader header;
 
     __int64 len = g_pStream->Length();
@@ -8622,7 +8638,7 @@ void ParseWav()
 
     __int64 offset = sizeof header;
 
-    WavSubchunk fmtSubchunk;
+    WavSubchunk fmtSubchunk = {0};
 
     while ( offset < len )
     {
@@ -8671,6 +8687,39 @@ void ParseWav()
             GetBytes( offset + 8, bytes.get(), chunk.formatSize );
 
             DumpBinaryData( offset + 8, 0, chunk.formatSize, 4, offset + 8 );
+        }
+        else if ( !memcmp( &chunk.format, "fact", 4 ) )
+        {
+            if ( chunk.formatSize >= 4 )
+            {
+                DWORD samplesPerChannel;
+                memcpy( &samplesPerChannel, &chunk.formatType, sizeof( samplesPerChannel ) );
+                printf( "  samples per channel:       %u\n", samplesPerChannel );
+            }
+        }
+        else if ( !memcmp( &chunk.format, "PEAK", 4 ) )
+        {
+            size_t chunkSize = 12 + chunk.formatSize;
+            unique_ptr<byte> bytes( new byte[ chunkSize ] );
+            WavPeakchunk * ppeak = (WavPeakchunk *) bytes.get();
+
+            if ( chunk.formatSize != ( sizeof( WavPeakchunk::version ) +
+                                       sizeof( WavPeakchunk::timeStamp ) +
+                                       fmtSubchunk.channels * sizeof( PositionPeak ) ) )
+                printf( "peak chunk is malformed\n" );
+            else
+            {
+                GetBytes( offset, ppeak, chunkSize );
+                printf( "  version:                   %d\n", ppeak->version );
+                if ( 1 == ppeak->version )
+                {
+                    time_t the_time_t = (time_t) ppeak->timeStamp;
+                    struct tm the_tm = * localtime( & the_time_t );
+                    printf( "  timestamp:                 %#x == %s", ppeak->timeStamp, asctime( & the_tm ) );
+                    for ( DWORD c = 0; c < fmtSubchunk.channels; c++ )
+                        printf( "  channel %d:                 value %f and position %u\n", c, ppeak->peak[ c ].value, ppeak->peak[ c ].position );
+                }
+            }
         }
 
         offset += chunk.formatSize + 8;
