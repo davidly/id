@@ -8633,8 +8633,8 @@ void ParseWav()
         return;
     }
 
-    printf( "WAV file is RIFF and WAVE. Size - 8: %d\n", header.size );
-    printf( "mimetype:                    audio/x-wav\n" );
+    printf( "header.size (file size - 8):   %d\n", header.size );
+    printf( "mimetype:                      audio/x-wav\n" );
 
     __int64 offset = sizeof header;
 
@@ -8645,25 +8645,28 @@ void ParseWav()
         WavSubchunk chunk;
         GetBytes( offset, &chunk, sizeof chunk );
 
+        if ( 0 == chunk.format )
+            break;
+
         printf( "chunk: %c%c%c%c, size %d\n", chunk.format & 0xff, ( chunk.format >> 8 ) & 0xff,
                                               ( chunk.format >> 16 ) & 0xff, ( chunk.format >> 24 ) & 0xff,
                                               chunk.formatSize );
 
         if ( !memcmp( &chunk.format, "fmt ", 4 ) )
         {
-            printf( "  type of format:            %d -- %s\n",    chunk.formatType, WavFormatType( chunk.formatType ) );
+            printf( "  type of format:              %d -- %s\n",    chunk.formatType, WavFormatType( chunk.formatType ) );
             if ( 0xfffe == chunk.formatType )
             {
-                printf( "  extended format:           %s\n", WavExtendedFormatType( chunk.subFormat ) );
-                printf( "                             " );
+                printf( "  extended format:             %s\n", WavExtendedFormatType( chunk.subFormat ) );
+                printf( "                               " );
                 PrintGUID( chunk.subFormat );
                 printf( "\n" );
             }
-            printf( "  channels:                  %d\n", chunk.channels );
-            printf( "  sample rate (samples/sec): %d\n", chunk.sampleRate );
-            printf( "  dataRate (Bytes/sec):      %d\n", chunk.dataRate );
-            printf( "  blockAlign:                %d\n", chunk.blockAlign );
-            printf( "  bits per sample:           %d\n", chunk.bitsPerSample );
+            printf( "  channels:                    %d\n", chunk.channels );
+            printf( "  sample rate (samples/sec):   %d\n", chunk.sampleRate );
+            printf( "  dataRate (Bytes/sec):        %d\n", chunk.dataRate );
+            printf( "  blockAlign:                  %d\n", chunk.blockAlign );
+            printf( "  bits per sample:             %d\n", chunk.bitsPerSample );
 
             fmtSubchunk = chunk;
         }
@@ -8671,22 +8674,15 @@ void ParseWav()
         {
             int samples = chunk.formatSize / fmtSubchunk.blockAlign;
 
-            printf( "  data size:                 %d\n", chunk.formatSize );
-            printf( "  sample count:              %d\n", samples );
-            printf( "  seconds:                   %lf\n", (double) samples / (double) fmtSubchunk.sampleRate );
+            printf( "  data size:                   %d\n", chunk.formatSize );
+            printf( "  sample count:                %d\n", samples );
+            printf( "  seconds:                     %lf\n", (double) samples / (double) fmtSubchunk.sampleRate );
 
-            unique_ptr<byte> bytes( new byte[ chunk.formatSize ] );
-            GetBytes( offset + 8, bytes.get(), chunk.formatSize );
-
-            DumpBinaryData( offset + 8, 0, chunk.formatSize, 4, offset + 8 );
+            DumpBinaryData( offset + 8, 0, chunk.formatSize, 2, offset + 8 );
         }
         else if ( !memcmp( &chunk.format, "LIST", 4 ) )
         {
-            printf( "LIST chunk\n" );
-            unique_ptr<byte> bytes( new byte[ chunk.formatSize ] );
-            GetBytes( offset + 8, bytes.get(), chunk.formatSize );
-
-            DumpBinaryData( offset + 8, 0, chunk.formatSize, 4, offset + 8 );
+            DumpBinaryData( offset + 8, 0, chunk.formatSize, 2, offset + 8 );
         }
         else if ( !memcmp( &chunk.format, "fact", 4 ) )
         {
@@ -8694,7 +8690,7 @@ void ParseWav()
             {
                 DWORD samplesPerChannel;
                 memcpy( &samplesPerChannel, &chunk.formatType, sizeof( samplesPerChannel ) );
-                printf( "  samples per channel:       %u\n", samplesPerChannel );
+                printf( "  samples per channel:         %u\n", samplesPerChannel );
             }
         }
         else if ( !memcmp( &chunk.format, "PEAK", 4 ) )
@@ -8715,12 +8711,14 @@ void ParseWav()
                 {
                     time_t the_time_t = (time_t) ppeak->timeStamp;
                     struct tm the_tm = * localtime( & the_time_t );
-                    printf( "  timestamp:                 %#x == %s", ppeak->timeStamp, asctime( & the_tm ) );
+                    printf( "  timestamp:                   %#x == %s", ppeak->timeStamp, asctime( & the_tm ) );
                     for ( DWORD c = 0; c < fmtSubchunk.channels; c++ )
-                        printf( "  channel %d:                 value %f and position %u\n", c, ppeak->peak[ c ].value, ppeak->peak[ c ].position );
+                        printf( "  channel %d:                   value %f and position %u\n", c, ppeak->peak[ c ].value, ppeak->peak[ c ].position );
                 }
             }
         }
+        else
+            DumpBinaryData( offset + 8, 0, chunk.formatSize, 2, offset + 8 );
 
         offset += chunk.formatSize + 8;
     }
