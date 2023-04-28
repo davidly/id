@@ -3145,7 +3145,9 @@ void EnumerateExifTags( int depth, __int64 IFDOffset, __int64 headerBase, bool l
                 DWORD num = GetDWORD( head.offset + headerBase, littleEndian );
                 DWORD den = GetDWORD( head.offset + 4 + headerBase, littleEndian );
 
-                printf( "exif ApertureValue:                 %d / %d = %lf\n", num, den, (double) num / (double) den );
+                double aperture = (double) num / (double) den;
+                double fnumber = pow( sqrt( 2.0 ), aperture );
+                printf( "exif ApertureValue:                 %d / %d = %lf == f / %lf\n", num, den, aperture, fnumber );
             }
             else if ( 37379 == head.id && 10 == head.type )
             {
@@ -7378,7 +7380,7 @@ void ParseMP3()
             bool extendedHeaderExists = 0 != ( start.flags & 0x20 );
             if ( extendedHeaderExists )
             {
-                // untested: I haven't see a file that uses this code
+                // untested: I haven't seen a file that uses this code
         
                 GetBytes( firstFrameOffset, &extendedHeader, sizeof extendedHeader );
                 firstFrameOffset += sizeof extendedHeader;
