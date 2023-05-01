@@ -8728,6 +8728,91 @@ void ParseWav()
     #pragma pack(pop)
 } //ParseWav
 
+const char * IcoType( byte type )
+{
+    if ( 1 == type )
+        return "icon";
+    if ( 2 == type )
+        return "cursor";
+    return "unknown";
+} //IcoType
+
+void ParseICO()
+{
+    struct IcoHeader
+    {
+        WORD reserved0;
+        WORD type; // 1 for icon 2 for cursor
+        WORD count; // # of images in the file
+    };
+
+    struct IcoDirectoryEntry
+    {
+        byte width;
+        byte height;
+        byte paletteColors; // 0 if no palette
+        byte reserved0;
+        WORD colorPlanes;   // horizontal coordinate of hotspot for .cur files from left
+        WORD bpp;           // vertical coordinate of hotspot for .cur files from top
+        DWORD dataSize;
+        DWORD dataOffset;
+    };
+
+    IcoHeader header;
+
+    __int64 len = g_pStream->Length();
+    if ( len < sizeof header )
+    {
+        printf( "Ico/Cur file is too small\n" );
+        return;
+    }
+
+    GetBytes( 0, &header, sizeof header );
+
+    if ( 0 != header.reserved0 )
+    {
+        printf( "Ico/Cur file's first byte isn't 0\n" );
+        return;
+    }
+
+    printf( "mimetype:                             image/ico\n" );
+    printf( "file type:                            %u == %s\n", header.type, IcoType( header.type ) );
+    printf( "image count:                          %u\n", header.count );
+
+    for ( WORD d = 0; d < header.count; d++ )
+    {
+        IcoDirectoryEntry entry;
+
+        GetBytes( sizeof( IcoHeader ) + d * sizeof( IcoDirectoryEntry ), &entry, sizeof entry );
+
+        printf( "  directory entry                     %u\n", d );
+        printf( "    width                             %u\n", entry.width );
+        printf( "    height                            %u\n", entry.height );
+        printf( "    palette colors                    %u\n", entry.paletteColors );
+        printf( "    reserved                          %u\n", entry.reserved0 );
+
+        if ( 1 == header.type )
+        {
+            printf( "    color planes                      %u\n", entry.colorPlanes );
+            printf( "    bits per pixel                    %u\n", entry.bpp );
+        }
+        else if ( 2 == header.type )
+        {
+            printf( "    horizontal hotspot from left      %u\n", entry.colorPlanes );
+            printf( "    vertical hotspot from top         %u\n", entry.bpp );
+        }
+
+        printf( "    image data size                   %u\n", entry.dataSize );
+        printf( "    image data offset                 %u\n", entry.dataOffset );
+
+
+        DWORD dwHeader0 = GetDWORD( entry.dataOffset, false );
+        DWORD dwHeader4 = GetDWORD( 4 + entry.dataOffset, false );
+        printf( "    image format                      %s\n", ( 0x89504e47 == dwHeader0 && 0xd0a1a0a == dwHeader4 ) ? "PNG" : "BMP" );
+    }
+
+} //ParseICO
+
 struct RafHeader
 {
     char      magic[ 16 ];
@@ -8884,6 +8969,11 @@ void EnumerateImageData( WCHAR const * pwc )
     else if ( !wcsicmp( pwcExt, L".m4a" ) )
     {
         EnumerateHeif( g_pStream );
+        return;
+    }
+    else if ( !wcsicmp( pwcExt, L".ico" ) || !wcsicmp( pwcExt, L".cur" ) )
+    {
+        ParseICO();
         return;
     }
 
