@@ -10,6 +10,7 @@
 #include <time.h>
 #include <io.h>
 #include <limits.h>
+#include <locale.h>
 #include <float.h>
 #include <eh.h>
 #include <math.h>
@@ -7827,7 +7828,7 @@ void ParseMP3()
                 // byte[3]:         language
                 // string           description
                 // string           lyrics
-    
+
                 ReadMP3String( frameOffset + frameHeaderSize, awcField, _countof( awcField ), frameHeader.size, true, true, false );
 
                 if ( wcschr( awcField, L'\n' ) || wcschr( awcField, L'\r' ) || wcschr( awcField, 0xa ) )
@@ -9284,6 +9285,9 @@ void EnumerateImageData( WCHAR const * pwc )
 
 extern "C" int __cdecl wmain( int argc, WCHAR * argv[] )
 {
+    setlocale( LC_ALL, "en_US.UTF-8" );
+    freopen( 0, "w", stdout );
+
     if ( argc < 2 )
         Usage();
 
