@@ -169,6 +169,27 @@ void Usage()
     exit( 1 );
 } //Usage
 
+void printWide( WCHAR const * pwc )
+{
+    fflush( 0 ); // make sure the C runtime is caught up
+
+    HANDLE h = GetStdHandle( STD_OUTPUT_HANDLE );
+    DWORD mode;
+
+    if ( GetConsoleMode( h, &mode ) )
+        WriteConsole( GetStdHandle( STD_OUTPUT_HANDLE ), pwc, wcslen( pwc ), 0, 0 );
+    else
+    {
+        int c = WideCharToMultiByte( CP_UTF8, 0, pwc, -1, 0, 0, 0, 0 );
+        if ( c > 1 )
+        {
+            vector<char> u8( c );
+            WideCharToMultiByte( CP_UTF8, 0, pwc, -1, u8.data(), c, 0, 0 );
+            WriteFile( h, u8.data(), c - 1, 0, 0 );
+        }
+    }
+} //printWide
+
 __int64 GetStreamLength() { return g_pStream->Length(); }
 
 unsigned long long GetULONGLONG( __int64 offset, bool littleEndian )
@@ -4621,9 +4642,17 @@ void EnumerateFlac()
                         const WCHAR * value = equal + 1;
 
                         if ( !wcscmp( pwcName, L"Lyrics" ) )// && ( !wcschr( value, L'\r' ) || !wcschr( value, L'\n' ) ) )
-                            wprintf( L"  %-15ws\n%ws\n", pwcName, value );
+                        {
+                            wprintf( L"  %-15ws\n", pwcName );
+                            printWide( value );
+                            wprintf( L"\n" );
+                        }
                         else
-                            wprintf( L"  %-15ws                     %ws\n", pwcName, value );
+                        {
+                            wprintf( L"  %-15ws                     ", pwcName );
+                            printWide( value );
+                            wprintf( L"\n" );
+                        }
                     }
                 }
             }
@@ -9354,7 +9383,9 @@ extern "C" int __cdecl wmain( int argc, WCHAR * argv[] )
 
     try
     {
-        printf( "parsing input file %ws\n", awcFilename );
+        printf( "parsing input file " );
+        printWide( awcFilename );
+        printf( "\n" );
 
         EnumerateImageData( awcFilename );
 
