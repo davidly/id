@@ -145,39 +145,19 @@ struct IFDHeader
         } //AdjustOffset
 };
     
-void Usage()
-{
-    printf( "usage: id [-e:name.jpg] [-f] [filename]\n" );
-    printf( "  image data enumeration\n" );
-    printf( "       filename       filename of the image to check\n" );
-    printf( "       -f             Full information is displayed (all binary data, all field values, etc.)\n" );
-    printf( "       -e:<output>    Extract highest-resolution embedded image (if one exists) to the file specified.\n" );
-    printf( "\n" );
-    printf( "  examples:\n" );
-    printf( "      id img_0178.cr2\n" ); 
-    printf( "      id -f img_0178.cr2\n" ); 
-    printf( "      id img_0178.cr2 /e:178.jpg\n" ); 
-    printf( "      id track.flac /e:track.png\n" ); 
-    printf( "\n" );
-    printf( "  notes:\n" );
-    printf( "      Most image formats are supported: CR2, NEF, RW2, DNG, PNG, TIFF, JPG, ARW, HEIC, HIF, CR3, BMP, ORF\n" );
-    printf( "      Some non-image formats are supported: FLAC, WAV, MP3, WMA, WMV\n" );
-    printf( "      Some image formats aren't supported yet: presumably many others\n" );
-    printf( "      By default, just the first 256 bytes of binary data is displayed. Use -f for all data\n" );
-    printf( "      Embedded images may be JPG, PNG, HIF, or some other format\n" );
-    printf( "      Fujifilm RAF files are only supported in that the embedded JPG is parsed\n" );
-    exit( 1 );
-} //Usage
-
 void printWide( WCHAR const * pwc )
 {
     fflush( 0 ); // make sure the C runtime is caught up
-
     HANDLE h = GetStdHandle( STD_OUTPUT_HANDLE );
     DWORD mode;
 
     if ( GetConsoleMode( h, &mode ) )
+    {
+        // This is the only way I can get Korean characters to show up in the console window.
+        // No form of printf with various locale/codepage settings seem to work.
+
         WriteConsole( GetStdHandle( STD_OUTPUT_HANDLE ), pwc, wcslen( pwc ), 0, 0 );
+    }
     else
     {
         int c = WideCharToMultiByte( CP_UTF8, 0, pwc, -1, 0, 0, 0, 0 );
@@ -185,10 +165,92 @@ void printWide( WCHAR const * pwc )
         {
             vector<char> u8( c );
             WideCharToMultiByte( CP_UTF8, 0, pwc, -1, u8.data(), c, 0, 0 );
-            WriteFile( h, u8.data(), c - 1, 0, 0 );
+            char * p = u8.data();
+
+            while ( 0 != *p )
+            {
+                char * plf = strchr( p, '\n' );
+                if ( 0 != plf )
+                {
+                    size_t l = plf - p;
+                    WriteFile( h, p, l, 0, 0 );
+                    char * pcrlf = "\r\n";
+                    WriteFile( h, pcrlf, 2, 0, 0 );
+                    p = plf + 1;
+                }
+                else
+                {
+                    WriteFile( h, p, strlen( p ), 0, 0 );
+                    break;
+                }
+            }
         }
     }
 } //printWide
+
+void printNarrow( char const * pc )
+{
+    HANDLE h = GetStdHandle( STD_OUTPUT_HANDLE );
+    DWORD mode;
+    int len = strlen( pc );
+
+    if ( 0 != len )
+    {
+        if ( GetConsoleMode( h, &mode ) )
+        {
+            fflush( 0 ); // make sure the C runtime is caught up
+            WriteConsoleA( GetStdHandle( STD_OUTPUT_HANDLE ), pc, len, 0, 0 );
+        }
+        else
+            printf( "%s", pc ); // need printf to do /n to /r/n processing
+    }
+} //printNarrow
+
+void prf( const char * format, ... )
+{
+    static char buf[ 65536 ];
+    va_list args;
+    va_start( args, format );
+    _vsnprintf_s( buf, _countof( buf ), _countof( buf ) - 1, format, args );
+    va_end( args );
+
+    printNarrow( buf );
+} //prf
+
+void wprf( const WCHAR * format, ... )
+{
+    static WCHAR buf[ 65536 ];
+    va_list args;
+    va_start( args, format );
+    _vsnwprintf_s( buf, _countof( buf ), _countof( buf ) - 1, format, args );
+    va_end( args );
+
+    printWide( buf );
+} //wprf
+
+void Usage()
+{
+    prf( "usage: id [-e:name.jpg] [-f] [filename]\n" );
+    prf( "  image data enumeration\n" );
+    prf( "       filename       filename of the image to check\n" );
+    prf( "       -f             Full information is displayed (all binary data, all field values, etc.)\n" );
+    prf( "       -e:<output>    Extract highest-resolution embedded image (if one exists) to the file specified.\n" );
+    prf( "\n" );
+    prf( "  examples:\n" );
+    prf( "      id img_0178.cr2\n" ); 
+    prf( "      id -f img_0178.cr2\n" ); 
+    prf( "      id img_0178.cr2 /e:178.jpg\n" ); 
+    prf( "      id track.flac /e:track.png\n" ); 
+    prf( "\n" );
+    prf( "  notes:\n" );
+    prf( "      Most image formats are supported: CR2, NEF, RW2, DNG, PNG, TIFF, JPG, ARW, HEIC, HIF, CR3, BMP, ORF\n" );
+    prf( "      Some non-image formats are supported: FLAC, WAV, MP3, WMA, WMV\n" );
+    prf( "      Some image formats aren't supported yet: presumably many others\n" );
+    prf( "      By default, just the first 256 bytes of binary data is displayed. Use -f for all data\n" );
+    prf( "      Embedded images may be JPG, PNG, HIF, or some other format\n" );
+    prf( "      Fujifilm RAF files are only supported in that the embedded JPG is parsed\n" );
+    exit( 1 );
+} //Usage
 
 __int64 GetStreamLength() { return g_pStream->Length(); }
 
@@ -274,7 +336,7 @@ bool GetIFDHeaders( __int64 offset, IFDHeader * pHeader, WORD numHeaders, bool l
 
         if ( pHeader[i].type > 13 )
         {
-            printf( "(warning) record %d has invalid type %#x\n", i, pHeader[i].type );
+            prf( "(warning) record %d has invalid type %#x\n", i, pHeader[i].type );
             ok = false;
             break;
         }
@@ -327,21 +389,21 @@ WCHAR * GetUTF8( __int64 offset, DWORD length )
     bytes.get()[ length ] = 0;
 
     #if false
-        printf( "field %d bytes read: %s\n", length, bytes.get() );
+        prf( "field %d bytes read: %s\n", length, bytes.get() );
         
         for ( int i = 0; i < length; i++ )
         {
             if ( 0 == ( i % 16 ) )
             {
                 if ( 0 != i )
-                    printf( "\n" );
+                    prf( "\n" );
         
-                printf( "offset %#x", i );
+                prf( "offset %#x", i );
             }
         
-            printf( " %#x", (DWORD) (BYTE) bytes.get()[i] );
+            prf( " %#x", (DWORD) (BYTE) bytes.get()[i] );
         }
-        printf( "\n" );
+        prf( "\n" );
     #endif
 
     int cwc = MultiByteToWideChar( CP_UTF8, 0, bytes.get(), length + 1, NULL, 0 );
@@ -372,7 +434,7 @@ void Space( int depth )
     int x = 2 * depth;
 
     for ( int i = 0; i < x; i++ )
-        printf( " " );
+        prf( " " );
 } //Space
 
 void DumpBinaryData( __int64 initialOffset, __int64 headerBase, DWORD length, DWORD indent, DWORD offsetOfSmallValue )
@@ -394,9 +456,9 @@ void DumpBinaryData( __int64 initialOffset, __int64 headerBase, DWORD length, DW
     while ( offset < beyond )
     {
         for ( int i = 0; i < indent; i++ )
-            printf( " " );
+            prf( " " );
 
-        printf( "%#10llx  ", offset );
+        prf( "%#10llx  ", offset );
 
         __int64 cap = __min( offset + bytesPerRow, beyond );
         __int64 toread = ( ( offset + bytesPerRow ) > beyond ) ? ( length % bytesPerRow ) : bytesPerRow;
@@ -404,12 +466,12 @@ void DumpBinaryData( __int64 initialOffset, __int64 headerBase, DWORD length, DW
         GetBytes( offset, buf, toread );
 
         for ( __int64 o = offset; o < cap; o++ )
-            printf( "%02x ", buf[ o - offset ] );
+            prf( "%02x ", buf[ o - offset ] );
 
         DWORD spaceNeeded = ( bytesPerRow - ( cap - offset ) ) * 3;
 
         for ( ULONG sp = 0; sp < ( 1 + spaceNeeded ); sp++ )
-            printf( " " );
+            prf( " " );
 
         for ( __int64 o = offset; o < cap; o++ )
         {
@@ -417,12 +479,12 @@ void DumpBinaryData( __int64 initialOffset, __int64 headerBase, DWORD length, DW
 
             if ( ch < ' ' || 127 == ch )
                 ch = '.';
-            printf( "%c", ch );
+            prf( "%c", ch );
         }
 
         offset += bytesPerRow;
 
-        printf( "\n" );
+        prf( "\n" );
     }
 } //DumpBinaryData
 
@@ -436,9 +498,9 @@ void DumpBinaryData( byte * pData, DWORD length, DWORD indent )
     while ( offset < beyond )
     {
         for ( int i = 0; i < indent; i++ )
-            printf( " " );
+            prf( " " );
 
-        printf( "%#10llx  ", offset );
+        prf( "%#10llx  ", offset );
 
         __int64 cap = __min( offset + bytesPerRow, beyond );
         __int64 toread = ( ( offset + bytesPerRow ) > beyond ) ? ( length % bytesPerRow ) : bytesPerRow;
@@ -446,12 +508,12 @@ void DumpBinaryData( byte * pData, DWORD length, DWORD indent )
         memcpy( buf, pData + offset, toread );
 
         for ( __int64 o = offset; o < cap; o++ )
-            printf( "%02x ", buf[ o - offset ] );
+            prf( "%02x ", buf[ o - offset ] );
 
         DWORD spaceNeeded = ( bytesPerRow - ( cap - offset ) ) * 3;
 
         for ( ULONG sp = 0; sp < ( 1 + spaceNeeded ); sp++ )
-            printf( " " );
+            prf( " " );
 
         for ( __int64 o = offset; o < cap; o++ )
         {
@@ -459,12 +521,12 @@ void DumpBinaryData( byte * pData, DWORD length, DWORD indent )
 
             if ( ch < ' ' || 127 == ch )
                 ch = '.';
-            printf( "%c", ch );
+            prf( "%c", ch );
         }
 
         offset += bytesPerRow;
 
-        printf( "\n" );
+        prf( "\n" );
     }
 } //DumpBinaryData
 
@@ -483,20 +545,20 @@ void EnumerateFujifilmMakernotes( int depth, __int64 IFDOffset, __int64 headerBa
     {
         WORD NumTags = GetWORD( IFDOffset + headerBase, littleEndian );
         Space( depth );
-        printf( "makernote IFDOffset %lld, NumTags %d, headerBase %lld, tagHeaderBase %d\n", IFDOffset, NumTags, headerBase, tagHeaderBase );
+        prf( "makernote IFDOffset %lld, NumTags %d, headerBase %lld, tagHeaderBase %d\n", IFDOffset, NumTags, headerBase, tagHeaderBase );
         IFDOffset += 2;
 
         if ( NumTags > MaxIFDHeaders )
         {
             Space( depth );
-            printf( "numtags is > 200; it's likely not in EXIF format, so the data may be noise. skipping (%d)\n", NumTags );
+            prf( "numtags is > 200; it's likely not in EXIF format, so the data may be noise. skipping (%d)\n", NumTags );
             break;
         }
     
         if ( !GetIFDHeaders( IFDOffset + headerBase, aHeaders.data(), NumTags, littleEndian ) )
         {
             Space( depth );
-            printf( "fujifilm makernotes has a tag that's invalid. skipping\n" );
+            prf( "fujifilm makernotes has a tag that's invalid. skipping\n" );
             break;
         }
 
@@ -508,47 +570,47 @@ void EnumerateFujifilmMakernotes( int depth, __int64 IFDOffset, __int64 headerBa
             if ( g_FullInformation )
             {
                 Space( depth );
-                printf( "makernote tag %d ID %d, type %d, count %d, offset/value %d\n", i, head.id, head.type, head.count, head.offset );
+                prf( "makernote tag %d ID %d, type %d, count %d, offset/value %d\n", i, head.id, head.type, head.count, head.offset );
             }
 
             Space( depth );
 
             if ( 0 == head.id )
-                printf( "fujifilm makernote Version           %d\n", head.offset );
+                prf( "fujifilm makernote Version           %d\n", head.offset );
             else if ( 16 == head.id )
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + tagHeaderBase + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "fujifilm makernote Serial #:         %s\n", acBuffer );
+                prf( "fujifilm makernote Serial #:         %s\n", acBuffer );
             }
             else if ( 4096 == head.id )
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + tagHeaderBase + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "fujifilm makernote Quality:          %s\n", acBuffer );
+                prf( "fujifilm makernote Quality:          %s\n", acBuffer );
             }
             else if ( 4097 == head.id && 4 == head.type )
-                printf( "Fujifilm Sharpness:                  %d\n", head.offset );
+                prf( "Fujifilm Sharpness:                  %d\n", head.offset );
             else if ( 4098 == head.id && 4 == head.type )
-                printf( "Fujifilm WhiteBalance:               %d\n", head.offset );
+                prf( "Fujifilm WhiteBalance:               %d\n", head.offset );
             else if ( 4099 == head.id && 4 == head.type )
-                printf( "Fujifilm Saturation:                 %d\n", head.offset );
+                prf( "Fujifilm Saturation:                 %d\n", head.offset );
             else if ( 5169 == head.id && 4 == head.type )
             {
-                printf( "Fujifilm Rating:                     %d\n", head.offset );
+                prf( "Fujifilm Rating:                     %d\n", head.offset );
             }
             else
             {
-                printf( "fujifilm makernote tag %d ID %d==%#x, type %d, count %d, offset/value %d", i, head.id, head.id, head.type, head.count, head.offset );
+                prf( "fujifilm makernote tag %d ID %d==%#x, type %d, count %d, offset/value %d", i, head.id, head.id, head.type, head.count, head.offset );
 
                 if ( 2 == head.type )
                 {
                     ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                     GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                    printf( " %s", acBuffer );
+                    prf( " %s", acBuffer );
                 }
 
-                printf( "\n" );
+                prf( "\n" );
 
                 if ( 7 == head.type )
                     DumpBinaryData( head.offset, headerBase, head.count, 4, IFDOffset - 4 );
@@ -846,20 +908,20 @@ void EnumerateGenericIFD( int depth, __int64 IFDOffset, __int64 headerBase, bool
         provisionalJPGFromRAWOffset = 0;
 
         WORD NumTags = GetWORD( IFDOffset + headerBase, littleEndian );
-        printf( "  GenericIFD (%d) IFDOffset %lld, NumTags %d\n", currentIFD, IFDOffset, NumTags );
+        prf( "  GenericIFD (%d) IFDOffset %lld, NumTags %d\n", currentIFD, IFDOffset, NumTags );
         IFDOffset += 2;
 
         if ( NumTags > MaxIFDHeaders )
         {
             Space( depth );
-            printf( "numtags is > 200; it's likely not in EXIF format, so the data may be noise. skipping\n" );
+            prf( "numtags is > 200; it's likely not in EXIF format, so the data may be noise. skipping\n" );
             break;
         }
     
         if ( !GetIFDHeaders( IFDOffset + headerBase, aHeaders.data(), NumTags, littleEndian ) )
         {
             Space( depth );
-            printf( "generic IFD has a tag that's invalid. skipping\n" );
+            prf( "generic IFD has a tag that's invalid. skipping\n" );
             break;
         }
 
@@ -871,7 +933,7 @@ void EnumerateGenericIFD( int depth, __int64 IFDOffset, __int64 headerBase, bool
             if ( g_FullInformation )
             {
                 Space( depth );
-                printf( "GenericIFD tag %d ID %d, type %d, count %d, offset/value %d\n", i, head.id, head.type, head.count, head.offset );
+                prf( "GenericIFD tag %d ID %d, type %d, count %d, offset/value %d\n", i, head.id, head.type, head.count, head.offset );
             }
 
             Space( depth );
@@ -879,24 +941,24 @@ void EnumerateGenericIFD( int depth, __int64 IFDOffset, __int64 headerBase, bool
             if ( 254 == head.id && 4 == head.type )
             {
                 likelyRAW = ( 0 == ( 1 & head.offset ) );
-                printf( "NewSubfileType:                     %#x (%s)\n", head.offset, likelyRAW ? "main RAW image" : "reduced resolution copy" );
+                prf( "NewSubfileType:                     %#x (%s)\n", head.offset, likelyRAW ? "main RAW image" : "reduced resolution copy" );
             }
             else if ( 256 == head.id && IsIntType( head.type ) )
-                printf( "ImageWidth:                         %d\n", head.offset );
+                prf( "ImageWidth:                         %d\n", head.offset );
             else if ( 257 == head.id && IsIntType( head.type ) )   
-                printf( "ImageHeight:                        %d\n", head.offset );
+                prf( "ImageHeight:                        %d\n", head.offset );
             else if ( 258 == head.id && 3 == head.type && 3 == head.count )
-                printf( "BitsPerSample:                      %d, %d, %d\n", GetWORD( head.offset + headerBase, littleEndian ),
+                prf( "BitsPerSample:                      %d, %d, %d\n", GetWORD( head.offset + headerBase, littleEndian ),
                         GetWORD( head.offset + headerBase + 2, littleEndian ), GetWORD( head.offset + headerBase + 4, littleEndian ) );
             else if ( 258 == head.id && 3 == head.type && 1 == head.count )
-                printf( "BitsPerSample:                      %d\n", head.offset );
+                prf( "BitsPerSample:                      %d\n", head.offset );
             else if ( 259 == head.id && IsIntType( head.type ) )
-                printf( "Compression:                        %d (%s)\n", head.offset, CompressionType( head.offset ) );
+                prf( "Compression:                        %d (%s)\n", head.offset, CompressionType( head.offset ) );
             else if ( 262 == head.id && IsIntType( head.type ) )
-                printf( "PhotometricIntperpretation:         %d (%s)\n", head.offset, PhotometricInterpretationString( head.offset ) );
+                prf( "PhotometricIntperpretation:         %d (%s)\n", head.offset, PhotometricInterpretationString( head.offset ) );
             else if ( 273 == head.id && IsIntType( head.type ) )
             {
-                printf( "StripOffsets:                       %d\n", head.offset );
+                prf( "StripOffsets:                       %d\n", head.offset );
 
                 //printf( "embedded jpg offset perhaps %d, likelyraw %d\n", IsPerhapsAnImage( head.offset, headerBase ), likelyRAW );
 
@@ -904,14 +966,14 @@ void EnumerateGenericIFD( int depth, __int64 IFDOffset, __int64 headerBase, bool
                     provisionalJPGOffset = head.offset + headerBase;
             }
             else if ( 274 == head.id && IsIntType( head.type ) )
-                printf( "Orientation:                        %d\n", head.offset );
+                prf( "Orientation:                        %d\n", head.offset );
             else if ( 277 == head.id && IsIntType( head.type ) )
-                printf( "SamplesPerPixel:                    %d\n", head.offset );
+                prf( "SamplesPerPixel:                    %d\n", head.offset );
             else if ( 278 == head.id && IsIntType( head.type ) )
-                printf( "RowsPerStrip:                       %d\n", head.offset );
+                prf( "RowsPerStrip:                       %d\n", head.offset );
             else if ( 279 == head.id && IsIntType( head.type ) )
             {
-                printf( "StripByteCounts:                    %d\n", head.offset );
+                prf( "StripByteCounts:                    %d\n", head.offset );
 
                 //printf( "provisional offset %d, embedded length: %I64d\n", provisionalJPGOffset, g_Embedded_Image_Length );
 
@@ -923,35 +985,35 @@ void EnumerateGenericIFD( int depth, __int64 IFDOffset, __int64 headerBase, bool
                 }
             }
             else if ( 280 == head.id && IsIntType( head.type ) )
-                printf( "MinSampleValue:                     %d\n", head.offset );
+                prf( "MinSampleValue:                     %d\n", head.offset );
             else if ( 281 == head.id && 7 == head.type )
             {
-                printf( "MaxSampleValue:                     %d bytes\n", head.count );
+                prf( "MaxSampleValue:                     %d bytes\n", head.count );
                 DumpBinaryData( head.offset, headerBase, head.count, 4, IFDOffset - 4 );
             }
             else if ( 282 == head.id && 3 == head.type )
-                printf( "XResolution:                        %d\n", head.offset );
+                prf( "XResolution:                        %d\n", head.offset );
             else if ( 282 == head.id && 5 == head.type )
             {
                 DWORD num = GetDWORD( head.offset + headerBase, littleEndian );
                 DWORD den = GetDWORD( head.offset + headerBase + 4, littleEndian );
-                printf( "XResolution:                        %d / %d = %lf\n", num, den, (double) num / (double) den );
+                prf( "XResolution:                        %d / %d = %lf\n", num, den, (double) num / (double) den );
             }
             else if ( 283 == head.id && 5 == head.type )
             {
                 DWORD num = GetDWORD( head.offset + headerBase, littleEndian );
                 DWORD den = GetDWORD( head.offset + headerBase + 4, littleEndian );
-                printf( "YResolution:                        %d / %d = %lf\n", num, den, (double) num / (double) den );
+                prf( "YResolution:                        %d / %d = %lf\n", num, den, (double) num / (double) den );
             }
             else if ( 284 == head.id && IsIntType( head.type ) )
-                printf( "PlanarConfiguration:                %d\n", head.offset );
+                prf( "PlanarConfiguration:                %d\n", head.offset );
             else if ( 296 == head.id && IsIntType( head.type ) )
-                printf( "ResolutionUnit:                     %s (%d)\n", ResolutionUnit( head.offset ), head.offset );
+                prf( "ResolutionUnit:                     %s (%d)\n", ResolutionUnit( head.offset ), head.offset );
             else if ( 315 == head.id && 2 == head.type )
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "HostComputer:                       %s\n", acBuffer );
+                prf( "HostComputer:                       %s\n", acBuffer );
             }
             else if ( 318 == head.id && 5 == head.type && 2 == head.count )
             {
@@ -963,7 +1025,7 @@ void EnumerateGenericIFD( int depth, __int64 IFDOffset, __int64 headerBase, bool
                 LONG den2 = GetDWORD( head.offset + 12 + headerBase, littleEndian );
                 double d2 = (double) num2 / (double) den2;
 
-                printf( "WhitePoint:                         %lf, %lf\n", d1, d2 );
+                prf( "WhitePoint:                         %lf, %lf\n", d1, d2 );
             }
             else if ( 319 == head.id && 5 == head.type && 6 == head.count )
             {
@@ -991,25 +1053,25 @@ void EnumerateGenericIFD( int depth, __int64 IFDOffset, __int64 headerBase, bool
                 LONG den6 = GetDWORD( head.offset + 44 + headerBase, littleEndian );
                 double d6 = (double) num6 / (double) den6;
 
-                printf( "PrimaryChromaticities:              %lf, %lf, %lf, %lf, %lf, %lf\n", d1, d2, d3, d4, d5, d6 );
+                prf( "PrimaryChromaticities:              %lf, %lf, %lf, %lf, %lf, %lf\n", d1, d2, d3, d4, d5, d6 );
             }
             else if ( 322 == head.id && 4 == head.type )
-                printf( "TileWidth:                          %d\n", head.offset );
+                prf( "TileWidth:                          %d\n", head.offset );
             else if ( 323 == head.id && 4 == head.type )
-                printf( "TileLength:                         %d\n", head.offset );
+                prf( "TileLength:                         %d\n", head.offset );
             else if ( 324 == head.id && 4 == head.type )
             {
-                printf( "TileOffsets:                        type %d count %d\n", head.type, head.count );
+                prf( "TileOffsets:                        type %d count %d\n", head.type, head.count );
                 DumpBinaryData( head.offset, headerBase, head.count / 4, 4, IFDOffset - 4 );
             }
             else if ( 325 == head.id && 4 == head.type )
             {
-                printf( "TileByteCounts:                     type %d count %d\n", head.type, head.count );
+                prf( "TileByteCounts:                     type %d count %d\n", head.type, head.count );
                 DumpBinaryData( head.offset, headerBase, head.count / 4, 4, IFDOffset - 4 );
             }
             else if ( 513 == head.id && IsIntType( head.type ) )
             {
-                printf( "JPGFromRAWStart:                    %d\n", head.offset );
+                prf( "JPGFromRAWStart:                    %d\n", head.offset );
 
                 if ( 0 != head.offset && 0xffffffff != head.offset && !likelyRAW && IsPerhapsAnImage( head.offset, headerBase ) && !likelyRAW ) 
                     provisionalJPGFromRAWOffset = head.offset + headerBase;
@@ -1017,7 +1079,7 @@ void EnumerateGenericIFD( int depth, __int64 IFDOffset, __int64 headerBase, bool
             }
             else if ( 514 == head.id && IsIntType( head.type ) )
             {
-                printf( "JPGFromRAWLength:                   %d\n", head.offset );
+                prf( "JPGFromRAWLength:                   %d\n", head.offset );
 
                 //printf( "non-strip offset %d, length %d\n", provisionalEmbeddedJPGFromRAWOffset, head.offset );
 
@@ -1042,56 +1104,56 @@ void EnumerateGenericIFD( int depth, __int64 IFDOffset, __int64 headerBase, bool
                 LONG den3 = GetDWORD( head.offset + 20 + headerBase, littleEndian );
                 double d3 = (double) num3 / (double) den3;
 
-                printf( "YCbCrCoefficients:                  %lf, %lf, %lf\n", d1, d2, d3 );
+                prf( "YCbCrCoefficients:                  %lf, %lf, %lf\n", d1, d2, d3 );
             }
             else if ( 530 == head.id && 3 == head.type && 2 == head.count )
             {
                 WORD low = head.offset & 0xffff;
                 WORD high = ( head.offset >> 16 ) & 0xffff;
 
-                printf( "YCbCrSubSampling:                   %s\n", YCbCrSubSampling( low, high ) );
+                prf( "YCbCrSubSampling:                   %s\n", YCbCrSubSampling( low, high ) );
             }
             else if ( 531 == head.id && 3 == head.type && 1 == head.count )
-                printf( "YCbCrPositioning:                   %s\n", YCbCrPositioning( head.offset ) );
+                prf( "YCbCrPositioning:                   %s\n", YCbCrPositioning( head.offset ) );
             else if ( 28672 == head.id && 3 == head.type )
-                printf( "Sony Raw File Type:                 %s\n", SonyRawFileType( head.offset ) );
+                prf( "Sony Raw File Type:                 %s\n", SonyRawFileType( head.offset ) );
             else if ( 28673 == head.id && 3 == head.type )
-                printf( "Sony Unknown(28673):                %d\n", head.offset );
+                prf( "Sony Unknown(28673):                %d\n", head.offset );
             else if ( 28688 == head.id && 3 == head.type && 4 == head.count )
             {
-                printf( "Sony Tone Curve:                    " );
+                prf( "Sony Tone Curve:                    " );
                 DWORD o = head.offset + headerBase;
                 for ( int i = 0; i < 4; i++ )
                 {
                     DWORD x = GetDWORD( o, littleEndian );
                     o += 4;
-                    printf( "%d", x );
+                    prf( "%d", x );
                     if ( 3 != i )
-                        printf( ", " );
+                        prf( ", " );
                 }
-                printf( "\n" );
+                prf( "\n" );
             }
             else if ( 28689 == head.id && 3 == head.type && 4 == head.count )
             {
-                printf( "Sony Unknown:                       " );
+                prf( "Sony Unknown:                       " );
                 DWORD o = head.offset + headerBase;
                 for ( int i = 0; i < 4; i++ )
                 {
                     DWORD x = GetDWORD( o, littleEndian );
                     o += 4;
-                    printf( "%d", x );
+                    prf( "%d", x );
                     if ( 3 != i )
-                        printf( ", " );
+                        prf( ", " );
                 }
-                printf( "\n" );
+                prf( "\n" );
             }
             else if ( 28704 == head.id && 4 == head.type )
-                printf( "Sony Unknown(28704):                %d\n", head.offset );
+                prf( "Sony Unknown(28704):                %d\n", head.offset );
             else if ( 33421 == head.id && 3 == head.type && 2 == head.count )
             {
                 short cfaMinRows = head.offset & 0xffff;
                 short cfaMinCols = ( head.offset >> 16 ) & 0xffff;
-                printf( "CFARepeatPatternDim rows/cols       %d / %d\n", cfaMinRows, cfaMinCols );
+                prf( "CFARepeatPatternDim rows/cols       %d / %d\n", cfaMinRows, cfaMinCols );
             }
             else if ( 33422 == head.id && 1 == head.type && 4 == head.count )
             {
@@ -1099,19 +1161,19 @@ void EnumerateGenericIFD( int depth, __int64 IFDOffset, __int64 headerBase, bool
                 BYTE b = ( head.offset >> 8 ) & 0xff;
                 BYTE c = ( head.offset >> 16 ) & 0xff;
                 BYTE d = ( head.offset >> 24 ) & 0xff;
-                printf( "CFAPattern:                         %#x, %s, %s, %s, %s\n", head.offset, CFAColorToString( a ), CFAColorToString( b ), CFAColorToString( c ), CFAColorToString( d ) );
+                prf( "CFAPattern:                         %#x, %s, %s, %s, %s\n", head.offset, CFAColorToString( a ), CFAColorToString( b ), CFAColorToString( c ), CFAColorToString( d ) );
             }
             else if ( 37399 == head.id )
-                printf( "Sensing Method:                     %s\n", ExifSensingMethod( head.offset ) );
+                prf( "Sensing Method:                     %s\n", ExifSensingMethod( head.offset ) );
             else if ( 50711 == head.id && 3 == head.type )
             {
-                printf( "CFALayout:                          %#x, %s\n", head.offset, CFALayout( head.offset ) );
+                prf( "CFALayout:                          %#x, %s\n", head.offset, CFALayout( head.offset ) );
             }
             else if ( 50713 == head.id && 3 == head.type && 2 == head.count )
             {
                 short a = head.offset & 0xffff;
                 short b = ( head.offset >> 16 ) && 0xffff;
-                printf( "BlackLevelRepeatDim                 %#x / %#x\n", a, b );
+                prf( "BlackLevelRepeatDim                 %#x / %#x\n", a, b );
             }                                               
             else if ( 50714 == head.id && 4 == head.type && 4 == head.count )
             {
@@ -1131,7 +1193,7 @@ void EnumerateGenericIFD( int depth, __int64 IFDOffset, __int64 headerBase, bool
                 LONG den4 = GetDWORD( head.offset + 28 + headerBase, littleEndian );
                 double d4 = (double) num4 / (double) den4;
 
-                printf( "BlackLevel:                         %lf, %lf, %lf, %lf\n", d1, d2, d3, d4 );
+                prf( "BlackLevel:                         %lf, %lf, %lf, %lf\n", d1, d2, d3, d4 );
             }
             else if ( 50714 == head.id && 3 == head.type && 4 == head.count )
             {
@@ -1151,7 +1213,7 @@ void EnumerateGenericIFD( int depth, __int64 IFDOffset, __int64 headerBase, bool
                 WORD den4 = GetWORD( head.offset + 14 + headerBase, littleEndian );
                 double d4 = (double) num4 / (double) den4;
 
-                printf( "BlackLevel:                         %lf, %lf, %lf, %lf\n", d1, d2, d3, d4 );
+                prf( "BlackLevel:                         %lf, %lf, %lf, %lf\n", d1, d2, d3, d4 );
             }
             else if ( 50714 == head.id && 5 == head.type && 1 == head.count ) // Hasselblad uses this
             {
@@ -1159,12 +1221,12 @@ void EnumerateGenericIFD( int depth, __int64 IFDOffset, __int64 headerBase, bool
                 LONG den = GetDWORD( head.offset +  4 + headerBase, littleEndian );
 
                 double d = (double) num / (double) den;
-                printf( "BlackLevel:                         %d / %d = %lf\n", num, den, d );
+                prf( "BlackLevel:                         %d / %d = %lf\n", num, den, d );
             }
             else if ( 50717 == head.id && 4 == head.type && 1 == head.count )
-                printf( "WhiteLevel:                         %d\n", head.offset );
+                prf( "WhiteLevel:                         %d\n", head.offset );
             else if ( 50717 == head.id && 3 == head.type && 1 == head.count ) // Hasselblad uses this
-                printf( "WhiteLevel:                         %d\n", head.offset );
+                prf( "WhiteLevel:                         %d\n", head.offset );
             else if ( 50718 == head.id && 5 == head.type && 2 == head.count )
             {
                 LONG num1 = GetDWORD( head.offset +      headerBase, littleEndian );
@@ -1175,45 +1237,45 @@ void EnumerateGenericIFD( int depth, __int64 IFDOffset, __int64 headerBase, bool
                 LONG den2 = GetDWORD( head.offset + 12 + headerBase, littleEndian );
                 double d2 = (double) num2 / (double) den2;
 
-                printf( "DefaultScale:                       %lf, %lf\n", d1, d2 );
+                prf( "DefaultScale:                       %lf, %lf\n", d1, d2 );
             }
             else if ( 50719 == head.id && 4 == head.type && 2 == head.count ) // Ricoh uses type 4
             {
                 LONG x1 = GetDWORD( head.offset +      headerBase, littleEndian );
                 LONG x2 = GetDWORD( head.offset +  4 + headerBase, littleEndian );
 
-                printf( "DefaultCropOrigin:                  %d, %d\n", x1, x2 );
+                prf( "DefaultCropOrigin:                  %d, %d\n", x1, x2 );
             }
             else if ( 50719 == head.id && 3 == head.type && 2 == head.count ) // Leica uses type 3
             {
                 WORD x1 = head.offset & 0xffff;
                 WORD x2 = ( ( head.offset >> 16 ) & 0xffff );
 
-                printf( "DefaultCropOrigin:                  %d, %d\n", x1, x2 );
+                prf( "DefaultCropOrigin:                  %d, %d\n", x1, x2 );
             }
             else if ( 50720 == head.id && 4 == head.type && 2 == head.count )
             {
                 LONG x1 = GetDWORD( head.offset +     headerBase, littleEndian );
                 LONG x2 = GetDWORD( head.offset + 4 + headerBase, littleEndian );
 
-                printf( "DefaultCropSize:                    %d, %d\n", x1, x2 );
+                prf( "DefaultCropSize:                    %d, %d\n", x1, x2 );
             }
             else if ( 50720 == head.id && 3 == head.type && 2 == head.count )
             {
                 WORD x1 = head.offset & 0xffff;
                 WORD x2 = ( ( head.offset >> 16 ) & 0xffff );
 
-                printf( "DefaultCropSize:                    %d, %d\n", x1, x2 );
+                prf( "DefaultCropSize:                    %d, %d\n", x1, x2 );
             }
             else if ( 50733 == head.id && 4 == head.type && 1 == head.count )
-                printf( "BayerGreenSplit                     %d\n", head.offset );
+                prf( "BayerGreenSplit                     %d\n", head.offset );
             else if ( 50738 == head.id && 5 == head.type && 1 == head.count )
             {
                 LONG num1 = GetDWORD( head.offset +     headerBase, littleEndian );
                 LONG den1 = GetDWORD( head.offset + 4 + headerBase, littleEndian );
                 double d1 = (double) num1 / (double) den1;
 
-                printf( "AntiAliasStrength:                  %lf\n", d1 );
+                prf( "AntiAliasStrength:                  %lf\n", d1 );
             }
             else if ( 50780 == head.id && 5 == head.type && 1 == head.count )
             {
@@ -1221,17 +1283,17 @@ void EnumerateGenericIFD( int depth, __int64 IFDOffset, __int64 headerBase, bool
                 LONG den1 = GetDWORD( head.offset + 4 + headerBase, littleEndian );
                 double d1 = (double) num1 / (double) den1;
 
-                printf( "BestQualityScale:                   %lf\n", d1 );
+                prf( "BestQualityScale:                   %lf\n", d1 );
             }
             else if ( 50781 == head.id && 1 == head.type & 16 == head.count )
             {
-                printf( "RawDataUniqueID: 16 bytes at offset %d\n", head.offset );
+                prf( "RawDataUniqueID: 16 bytes at offset %d\n", head.offset );
                 DumpBinaryData( head.offset, headerBase, head.count, 4, IFDOffset - 4 );
 
             }
             else if ( 50829 == head.id && 4 == head.type && 4 == head.count )
             {
-                printf( "ActiveArea:                         %d, %d, %d, %d\n",
+                prf( "ActiveArea:                         %d, %d, %d, %d\n",
                         GetDWORD( head.offset + headerBase, littleEndian ),
                         GetDWORD( 4 + head.offset + headerBase, littleEndian ),
                         GetDWORD( 8 + head.offset + headerBase, littleEndian ),
@@ -1239,27 +1301,27 @@ void EnumerateGenericIFD( int depth, __int64 IFDOffset, __int64 headerBase, bool
             }
             else if ( 50829 == head.id && 3 == head.type && 4 == head.count )
             {
-                printf( "ActiveArea:                         %d, %d, %d, %d\n",
+                prf( "ActiveArea:                         %d, %d, %d, %d\n",
                         GetWORD( head.offset + headerBase, littleEndian ),
                         GetWORD( 2 + head.offset + headerBase, littleEndian ),
                         GetWORD( 4 + head.offset + headerBase, littleEndian ),
                         GetWORD( 6 + head.offset + headerBase, littleEndian ) );
             }
             else if ( 50970 == head.id )
-                printf( "PreviewColorSpace:                  %s\n", TagPreviewColorSpace( head.offset ) );
+                prf( "PreviewColorSpace:                  %s\n", TagPreviewColorSpace( head.offset ) );
             else if ( 51008 == head.id )
             {
-                printf( "OpcodeList1:                        type %d, %d bytes, offset %d\n", head.type, head.count, head.offset );
+                prf( "OpcodeList1:                        type %d, %d bytes, offset %d\n", head.type, head.count, head.offset );
                 DumpBinaryData( head.offset, headerBase, head.count, 4, IFDOffset - 4 );
             }
             else if ( 51009 == head.id )
             {
-                printf( "OpcodeList2:                        type %d, %d bytes, offset %d\n", head.type, head.count, head.offset );
+                prf( "OpcodeList2:                        type %d, %d bytes, offset %d\n", head.type, head.count, head.offset );
                 DumpBinaryData( head.offset, headerBase, head.count, 4, IFDOffset - 4 );
             }
             else if ( 51022 == head.id )
             {
-                printf( "OpcodeList3:                        type %d, %d bytes, offset %d\n", head.type, head.count, head.offset );
+                prf( "OpcodeList3:                        type %d, %d bytes, offset %d\n", head.type, head.count, head.offset );
                 DumpBinaryData( head.offset, headerBase, head.count, 4, IFDOffset - 4 );
             }
             else if ( 51125 == head.id && 5 == head.type && 4 == head.count )
@@ -1280,11 +1342,11 @@ void EnumerateGenericIFD( int depth, __int64 IFDOffset, __int64 headerBase, bool
                 LONG den4 = GetDWORD( head.offset + 28 + headerBase, littleEndian );
                 double d4 = (double) num4 / (double) den4;
 
-                printf( "DefaultUserCrop:                    %lf, %lf, %lf, %lf\n", d1, d2, d3, d4 );
+                prf( "DefaultUserCrop:                    %lf, %lf, %lf, %lf\n", d1, d2, d3, d4 );
             }
             else
             {
-                printf( "GenericIFD tag %d ID %d==%#x, type %d, count %d, offset/value %d\n", i, head.id, head.id, head.type, head.count, head.offset );
+                prf( "GenericIFD tag %d ID %d==%#x, type %d, count %d, offset/value %d\n", i, head.id, head.id, head.type, head.count, head.offset );
 
                 if ( 7 == head.type )
                     DumpBinaryData( head.offset, headerBase, head.count, 4, IFDOffset - 4 );
@@ -1305,20 +1367,20 @@ void EnumerateInteropIFD( int depth, __int64 IFDOffset, __int64 headerBase, bool
     {
         WORD NumTags = GetWORD( IFDOffset + headerBase, littleEndian );
         Space( depth );
-        printf( "IFDOffset %lld, NumTags %d\n", IFDOffset, NumTags );
+        prf( "IFDOffset %lld, NumTags %d\n", IFDOffset, NumTags );
         IFDOffset += 2;
 
         if ( NumTags > MaxIFDHeaders )
         {
             Space( depth );
-            printf( "numtags is > 200; it's likely not in EXIF format, so the data may be noise. skipping\n" );
+            prf( "numtags is > 200; it's likely not in EXIF format, so the data may be noise. skipping\n" );
             break;
         }
     
         if ( !GetIFDHeaders( IFDOffset + headerBase, aHeaders.data(), NumTags, littleEndian ) )
         {
             Space( depth );
-            printf( "InteropIFD has a tag that's invalid. skipping\n" );
+            prf( "InteropIFD has a tag that's invalid. skipping\n" );
             break;
         }
 
@@ -1330,7 +1392,7 @@ void EnumerateInteropIFD( int depth, __int64 IFDOffset, __int64 headerBase, bool
             if ( g_FullInformation )
             {
                 Space( depth );
-                printf( "InteripIFD tag %d ID %d, type %d, count %d, offset/value %d\n", i, head.id, head.type, head.count, head.offset );
+                prf( "InteripIFD tag %d ID %d, type %d, count %d, offset/value %d\n", i, head.id, head.type, head.count, head.offset );
             }
 
             Space( depth );
@@ -1339,12 +1401,12 @@ void EnumerateInteropIFD( int depth, __int64 IFDOffset, __int64 headerBase, bool
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "interop index:                    %s\n", acBuffer );
+                prf( "interop index:                    %s\n", acBuffer );
             }
             else if ( 2 == head.id && 7 == head.type && 4 == head.count )
-                printf( "interop version:                  %#x\n", head.offset );
+                prf( "interop version:                  %#x\n", head.offset );
             else
-                printf( "tag %d ID %d==%#x, type %d, count %d, offset/value %d\n", i, head.id, head.id, head.type, head.count, head.offset );
+                prf( "tag %d ID %d==%#x, type %d, count %d, offset/value %d\n", i, head.id, head.id, head.type, head.count, head.offset );
         }
 
         IFDOffset = GetDWORD( IFDOffset + headerBase, littleEndian );
@@ -1363,20 +1425,20 @@ void EnumerateNikonPreviewIFD( int depth, __int64 IFDOffset, __int64 headerBase,
 
         WORD NumTags = GetWORD( IFDOffset + headerBase, littleEndian );
         Space( depth );
-        printf( "nikonpreviewIFD IFDOffset %#llx %lld, NumTags %d, headerBase %#llx %lld\n", IFDOffset, IFDOffset, NumTags, headerBase, headerBase );
+        prf( "nikonpreviewIFD IFDOffset %#llx %lld, NumTags %d, headerBase %#llx %lld\n", IFDOffset, IFDOffset, NumTags, headerBase, headerBase );
         IFDOffset += 2;
 
         if ( NumTags > MaxIFDHeaders )
         {
             Space( depth );
-            printf( "numtags is > 200; it's likely not in EXIF format, so the data may be noise. skipping\n" );
+            prf( "numtags is > 200; it's likely not in EXIF format, so the data may be noise. skipping\n" );
             break;
         }
     
         if ( !GetIFDHeaders( IFDOffset + headerBase, aHeaders.data(), NumTags, littleEndian ) )
         {
             Space( depth );
-            printf( "nikon previewifd has a tag that's invalid. skipping\n" );
+            prf( "nikon previewifd has a tag that's invalid. skipping\n" );
             break;
         }
 
@@ -1388,28 +1450,28 @@ void EnumerateNikonPreviewIFD( int depth, __int64 IFDOffset, __int64 headerBase,
             if ( g_FullInformation )
             {
                 Space( depth );
-                printf( "NikonPreviewIFD tag %d ID %d, type %d, count %d, offset/value %d\n", i, head.id, head.type, head.count, head.offset );
+                prf( "NikonPreviewIFD tag %d ID %d, type %d, count %d, offset/value %d\n", i, head.id, head.type, head.count, head.offset );
             }
 
             Space( depth );
 
             if ( 0x103 == head.id && 3 == head.type )
-                printf( "makernote NikonPreview.Compression:        %s (%d)\n", CompressionType( head.offset), head.offset );
+                prf( "makernote NikonPreview.Compression:        %s (%d)\n", CompressionType( head.offset), head.offset );
             else if ( 0x11a == head.id && 5 == head.type )
-                printf( "makernote NikonPreview.XResolution:        %d\n", head.offset );
+                prf( "makernote NikonPreview.XResolution:        %d\n", head.offset );
             else if ( 0x11b == head.id && 5 == head.type )
-                printf( "makernote NikonPreview.YResolution:        %d\n", head.offset );
+                prf( "makernote NikonPreview.YResolution:        %d\n", head.offset );
             else if ( 0x128 == head.id && 3 == head.type )
-                printf( "makernote NikonPreview.ResolutionUnit:     %s (%d)\n", ResolutionUnit( head.offset), head.offset );
+                prf( "makernote NikonPreview.ResolutionUnit:     %s (%d)\n", ResolutionUnit( head.offset), head.offset );
             else if ( 0x201 == head.id && 4 == head.type )
             {
                 provisionalJPGOffset = head.offset + headerBase;
-                printf( "makernote NikonPreview.PreviewImageStart:  %d (effective is %lld)\n", head.offset, provisionalJPGOffset );
+                prf( "makernote NikonPreview.PreviewImageStart:  %d (effective is %lld)\n", head.offset, provisionalJPGOffset );
             }
             else if ( 0x202 == head.id && 4 == head.type )
             {
                 //printf( "!!!!!!!!!!!!!overwriting length %I64d with %d\n", g_Embedded_Image_Length, head.offset );
-                printf( "makernote NikonPreview.PreviewImageLength: %d\n", head.offset );
+                prf( "makernote NikonPreview.PreviewImageLength: %d\n", head.offset );
 
                 if ( 0 != provisionalJPGOffset && 0 != head.offset && 0xffffffff != head.offset && head.offset > g_Embedded_Image_Length )
                 {
@@ -1418,10 +1480,10 @@ void EnumerateNikonPreviewIFD( int depth, __int64 IFDOffset, __int64 headerBase,
                 }
             }
             else if ( 0x213 == head.id && 3 == head.type )
-                printf( "makernote NikonPreview.YCbCrPositioning:   %s (%d)\n", YCbCrPositioning( head.offset ), head.offset );
+                prf( "makernote NikonPreview.YCbCrPositioning:   %s (%d)\n", YCbCrPositioning( head.offset ), head.offset );
             else
             {
-                printf( "nikonPreviewIFD tag %d ID %d==%#x, type %d, count %d, offset/value %d\n", i, head.id, head.id, head.type, head.count, head.offset );
+                prf( "nikonPreviewIFD tag %d ID %d==%#x, type %d, count %d, offset/value %d\n", i, head.id, head.id, head.type, head.count, head.offset );
 
                 if ( 7 == head.type )
                     DumpBinaryData( head.offset, headerBase, head.count, 4, IFDOffset - 4 );
@@ -1444,20 +1506,20 @@ void EnumerateNikonMakernotes( int depth, __int64 IFDOffset, __int64 headerBase,
     {
         WORD NumTags = GetWORD( IFDOffset + headerBase, littleEndian );
         Space( depth );
-        printf( "nikon makernote IFDOffset %#llx %lld, NumTags %d, headerBase %#llx %lld\n", IFDOffset, IFDOffset, NumTags, headerBase, headerBase );
+        prf( "nikon makernote IFDOffset %#llx %lld, NumTags %d, headerBase %#llx %lld\n", IFDOffset, IFDOffset, NumTags, headerBase, headerBase );
         IFDOffset += 2;
 
         if ( NumTags > MaxIFDHeaders )
         {
             Space( depth );
-            printf( "numtags is > 200; it's likely not in EXIF format, so the data may be noise. skipping\n" );
+            prf( "numtags is > 200; it's likely not in EXIF format, so the data may be noise. skipping\n" );
             break;
         }
     
         if ( !GetIFDHeaders( IFDOffset + headerBase, aHeaders.data(), NumTags, littleEndian ) )
         {
             Space( depth );
-            printf( "nikon makernotes has a tag that's invalid. skipping\n" );
+            prf( "nikon makernotes has a tag that's invalid. skipping\n" );
             break;
         }
 
@@ -1469,54 +1531,54 @@ void EnumerateNikonMakernotes( int depth, __int64 IFDOffset, __int64 headerBase,
             if ( g_FullInformation )
             {
                 Space( depth );
-                printf( "NikonMakernote tag %d ID %d, type %d, count %d, offset/value %d\n", i, head.id, head.type, head.count, head.offset );
+                prf( "NikonMakernote tag %d ID %d, type %d, count %d, offset/value %d\n", i, head.id, head.type, head.count, head.offset );
             }
 
             Space( depth );
 
             if ( 2 == head.id && 3 == head.type )
-                printf( "makernote Nikon.ISOSpeed:               %d\n", head.offset );
+                prf( "makernote Nikon.ISOSpeed:               %d\n", head.offset );
             else if ( 4 == head.id && 2 == head.type )
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset + originalNikonMakernotesOffset;
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "makernote Nikon.Quality:                %s\n", acBuffer );
+                prf( "makernote Nikon.Quality:                %s\n", acBuffer );
             }
             else if ( 5 == head.id && 2 == head.type )
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset + originalNikonMakernotesOffset;
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "makernote Nikon.WhiteBalance:           %s\n", acBuffer );
+                prf( "makernote Nikon.WhiteBalance:           %s\n", acBuffer );
             }
             else if ( 6 == head.id && 2 == head.type )
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset + originalNikonMakernotesOffset;
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "makernote Nikon.Sharpening:             %s\n", acBuffer );
+                prf( "makernote Nikon.Sharpening:             %s\n", acBuffer );
             }
             else if ( 7 == head.id && 2 == head.type )
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset + originalNikonMakernotesOffset;
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "makernote Nikon.Focus:                  %s\n", acBuffer );
+                prf( "makernote Nikon.Focus:                  %s\n", acBuffer );
             }
             else if ( 8 == head.id && 2 == head.type )
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset + originalNikonMakernotesOffset;
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "makernote Nikon.FlashSetting:           %s\n", acBuffer );
+                prf( "makernote Nikon.FlashSetting:           %s\n", acBuffer );
             }
             else if ( 9 == head.id && 2 == head.type )
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset + originalNikonMakernotesOffset;
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "makernote Nikon.FlashDevice:            %s\n", acBuffer );
+                prf( "makernote Nikon.FlashDevice:            %s\n", acBuffer );
             }
             else if ( 17 == head.id && 4 == head.type && 1 == head.count )
             {
                 // Nikon Preview IFD
 
-                printf( "makernote Nikon.PreviewIFD:             %#x\n", head.offset );
+                prf( "makernote Nikon.PreviewIFD:             %#x\n", head.offset );
 
                 // This "original - 8" is clearly a hack. But it works on RAW images from the D300, D70, and D100
                 // Note it's needed to correctly compute the preview IFD start, the embedded JPG preview start, and strings
@@ -1525,7 +1587,7 @@ void EnumerateNikonMakernotes( int depth, __int64 IFDOffset, __int64 headerBase,
             }
             else
             {
-                printf( "makernote tag %d ID %d==%#x, type %d, count %d, offset/value %d\n", i, head.id, head.id, head.type, head.count, head.offset );
+                prf( "makernote tag %d ID %d==%#x, type %d, count %d, offset/value %d\n", i, head.id, head.id, head.type, head.count, head.offset );
 
                 if ( 7 == head.type )
                     DumpBinaryData( head.offset + originalNikonMakernotesOffset, headerBase, head.count, 4, IFDOffset - 4 );
@@ -1559,20 +1621,20 @@ void EnumeratePanasonicMakernotes( int depth, __int64 IFDOffset, __int64 headerB
     {
         WORD NumTags = GetWORD( IFDOffset + headerBase, littleEndian );
         Space( depth );
-        printf( "Panasonic makernote IFDOffset %#llx %lld, NumTags %d, headerBase %#llx %lld\n", IFDOffset, IFDOffset, NumTags, headerBase, headerBase );
+        prf( "Panasonic makernote IFDOffset %#llx %lld, NumTags %d, headerBase %#llx %lld\n", IFDOffset, IFDOffset, NumTags, headerBase, headerBase );
         IFDOffset += 2;
 
         if ( NumTags > MaxIFDHeaders )
         {
             Space( depth );
-            printf( "numtags is > 200; it's likely not in EXIF format, so the data may be noise. skipping\n" );
+            prf( "numtags is > 200; it's likely not in EXIF format, so the data may be noise. skipping\n" );
             break;
         }
     
         if ( !GetIFDHeaders( IFDOffset + headerBase, aHeaders.data(), NumTags, littleEndian ) )
         {
             Space( depth );
-            printf( "Panasonic makernotes has a tag that's invalid. skipping\n" );
+            prf( "Panasonic makernotes has a tag that's invalid. skipping\n" );
             break;
         }
 
@@ -1584,7 +1646,7 @@ void EnumeratePanasonicMakernotes( int depth, __int64 IFDOffset, __int64 headerB
             if ( g_FullInformation )
             {
                 Space( depth );
-                printf( "PanasonicMakernote tag %d ID %d, type %d, count %d, offset/value %d\n", i, head.id, head.type, head.count, head.offset );
+                prf( "PanasonicMakernote tag %d ID %d, type %d, count %d, offset/value %d\n", i, head.id, head.type, head.count, head.offset );
             }
 
             // Note: Photomatix Pro 5.0.1 (64-bit) generates .tif files where these 3 strings are garbage.
@@ -1598,7 +1660,7 @@ void EnumeratePanasonicMakernotes( int depth, __int64 IFDOffset, __int64 headerB
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
                 DetectGarbage( acBuffer );
-                printf( "panasonic serial number:          %s\n", acBuffer );
+                prf( "panasonic serial number:          %s\n", acBuffer );
             }
             else if ( 81 == head.id && 2 == head.type )
             {
@@ -1606,7 +1668,7 @@ void EnumeratePanasonicMakernotes( int depth, __int64 IFDOffset, __int64 headerB
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
                 DetectGarbage( acBuffer );
-                printf( "panasonic lens model:             %s\n", acBuffer );
+                prf( "panasonic lens model:             %s\n", acBuffer );
             }
             else if ( 82 == head.id && 2 == head.type )
             {
@@ -1614,21 +1676,21 @@ void EnumeratePanasonicMakernotes( int depth, __int64 IFDOffset, __int64 headerB
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
                 DetectGarbage( acBuffer );
-                printf( "panasonic lens serial #:          %s\n", acBuffer );
+                prf( "panasonic lens serial #:          %s\n", acBuffer );
             }
             else
             {
                 Space( depth );
-                printf( "panasonic makernote tag %d ID %d==%#x, type %d, count %d, offset/value %d", i, head.id, head.id, head.type, head.count, head.offset );
+                prf( "panasonic makernote tag %d ID %d==%#x, type %d, count %d, offset/value %d", i, head.id, head.id, head.type, head.count, head.offset );
 
                 if ( 2 == head.type )
                 {
                     ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                     GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                    printf( " %s", acBuffer );
+                    prf( " %s", acBuffer );
                 }
 
-                printf( "\n" );
+                prf( "\n" );
 
                 if ( 7 == head.type )
                     DumpBinaryData( head.offset, headerBase, head.count, 4, IFDOffset - 4 );
@@ -1650,20 +1712,20 @@ void EnumerateOlympusCameraSettingsIFD( int depth, __int64 IFDOffset, __int64 he
     {
         WORD NumTags = GetWORD( IFDOffset + headerBase, littleEndian );
         Space( depth );
-        printf( "olympus camera settings IFDOffset %#llx==%lld, NumTags %d, headerBase %#llx==%lld\n", IFDOffset, IFDOffset, NumTags, headerBase, headerBase );
+        prf( "olympus camera settings IFDOffset %#llx==%lld, NumTags %d, headerBase %#llx==%lld\n", IFDOffset, IFDOffset, NumTags, headerBase, headerBase );
         IFDOffset += 2;
 
         if ( NumTags > MaxIFDHeaders )
         {
             Space( depth );
-            printf( "numtags is > 200; it's likely not in EXIF format, so the data may be noise. skipping\n" );
+            prf( "numtags is > 200; it's likely not in EXIF format, so the data may be noise. skipping\n" );
             break;
         }
     
         if ( !GetIFDHeaders( IFDOffset + headerBase, aHeaders.data(), NumTags, littleEndian ) )
         {
             Space( depth );
-            printf( "Olympus CameraSettingsIFD has a tag that's invalid. skipping\n" );
+            prf( "Olympus CameraSettingsIFD has a tag that's invalid. skipping\n" );
             break;
         }
 
@@ -1675,16 +1737,16 @@ void EnumerateOlympusCameraSettingsIFD( int depth, __int64 IFDOffset, __int64 he
             if ( g_FullInformation )
             {
                 Space( depth );
-                printf( "olympus camera settings ifd tag %d ID %d, type %d, count %d, offset/value %d==%#x\n", i, head.id, head.type, head.count, head.offset, head.offset );
+                prf( "olympus camera settings ifd tag %d ID %d, type %d, count %d, offset/value %d==%#x\n", i, head.id, head.type, head.count, head.offset, head.offset );
             }
 
             Space( depth );
 
             if ( 0 == head.id && 7 == head.type && 4 == head.count )
-                printf( "olympusCameraSettings.CameraSettingsVersion:    %d\n", head.offset );
+                prf( "olympusCameraSettings.CameraSettingsVersion:    %d\n", head.offset );
             else if ( 256 == head.id && 4 == head.type )
             {
-                printf( "olympusCameraSettings.PreviewImageValid:        %d\n", head.offset );
+                prf( "olympusCameraSettings.PreviewImageValid:        %d\n", head.offset );
 
                 previewIsValid = ( 0 != head.offset );
             }
@@ -1693,17 +1755,17 @@ void EnumerateOlympusCameraSettingsIFD( int depth, __int64 IFDOffset, __int64 he
                 if ( previewIsValid )
                     g_Embedded_Image_Offset = head.offset + headerBase;
 
-                printf( "olympusCameraSettings.PreviewImageStart:        %d (effective is %lld)\n", head.offset, g_Embedded_Image_Offset );
+                prf( "olympusCameraSettings.PreviewImageStart:        %d (effective is %lld)\n", head.offset, g_Embedded_Image_Offset );
             }
             else if ( 258 == head.id && 4 == head.type )
             {
                 if ( previewIsValid )
                     g_Embedded_Image_Length = head.offset;
-                printf( "olympusCameraSettings.PreviewImageLength:       %d\n", head.offset );
+                prf( "olympusCameraSettings.PreviewImageLength:       %d\n", head.offset );
             }
             else
             {
-                printf( "olympusCameraSettings.tag %d ID %d==%#x, type %d, count %d, offset/value %d==%#x\n", i, head.id, head.id, head.type, head.count, head.offset, head.offset );
+                prf( "olympusCameraSettings.tag %d ID %d==%#x, type %d, count %d, offset/value %d==%#x\n", i, head.id, head.id, head.type, head.count, head.offset, head.offset );
 
                 if ( 7 == head.type )
                     DumpBinaryData( head.offset, headerBase, head.count, 4, IFDOffset - 4 );
@@ -1741,8 +1803,8 @@ void EnumerateMakernotes( int depth, __int64 IFDOffset, __int64 headerBase, bool
     if ( g_FullInformation )
     {
         Space( depth );
-        printf( "make: %s\n", g_acMake );
-        printf( "model: %s\n", g_acModel );
+        prf( "make: %s\n", g_acMake );
+        prf( "model: %s\n", g_acModel );
     }
 
     // sample headers:
@@ -1855,7 +1917,7 @@ void EnumerateMakernotes( int depth, __int64 IFDOffset, __int64 headerBase, bool
     else if ( !strcmp( g_acMake, "RICOH IMAGING COMPANY, LTD." ) )
     {
         // GR III, etc.
-        printf( "ricoh IFDOffset %lld, headerBase %lld\n", IFDOffset, headerBase );
+        prf( "ricoh IFDOffset %lld, headerBase %lld\n", IFDOffset, headerBase );
 
         IFDOffset += 8;
         isRicoh = true;
@@ -1866,14 +1928,14 @@ void EnumerateMakernotes( int depth, __int64 IFDOffset, __int64 headerBase, bool
     else if ( !strcmp( g_acMake, "RICOH" ) )
     {
         // THETA, etc.
-        printf( "ricoh theta IFDOffset %lld, headerBase %lld\n", IFDOffset, headerBase );
+        prf( "ricoh theta IFDOffset %lld, headerBase %lld\n", IFDOffset, headerBase );
 
         IFDOffset += 8;
         isRicohTheta = true;
     }
     else if ( !strcmp( g_acMake, "PENTAX" ) )
     {
-        printf( "pentax IFDOffset %lld, headerBase %lld\n", IFDOffset, headerBase );
+        prf( "pentax IFDOffset %lld, headerBase %lld\n", IFDOffset, headerBase );
 
         IFDOffset += 6;
         isPentax = true;
@@ -1894,7 +1956,7 @@ void EnumerateMakernotes( int depth, __int64 IFDOffset, __int64 headerBase, bool
     }
     else if ( !strcmp( g_acMake, "Eastman Kodak Company" ) )
     {
-        printf( "eastman kodak IFDOffset %lld, headerBase %lld\n", IFDOffset, headerBase );
+        prf( "eastman kodak IFDOffset %lld, headerBase %lld\n", IFDOffset, headerBase );
 
         isEastmanKodak = true;
         return; // apparently unparsable
@@ -1971,21 +2033,21 @@ void EnumerateMakernotes( int depth, __int64 IFDOffset, __int64 headerBase, bool
     {
         WORD NumTags = GetWORD( IFDOffset + headerBase, littleEndian );
         Space( depth );
-        printf( "makernote IFDOffset %lld==%#llx, NumTags %d, headerBase %lld==%#llx, effective %#llx\n", IFDOffset, IFDOffset, NumTags, headerBase, headerBase, IFDOffset + headerBase );
-//        printf( "  makernote dirOffset: %#x\n", dirOffset );
+        prf( "makernote IFDOffset %lld==%#llx, NumTags %d, headerBase %lld==%#llx, effective %#llx\n", IFDOffset, IFDOffset, NumTags, headerBase, headerBase, IFDOffset + headerBase );
+//        prf( "  makernote dirOffset: %#x\n", dirOffset );
         IFDOffset += 2;
 
         if ( NumTags > MaxIFDHeaders )
         {
             Space( depth );
-            printf( "        numtags is > 200; it's likely not in EXIF format, so the data may be noise. skipping (value is %#xs )\n", NumTags );
+            prf( "        numtags is > 200; it's likely not in EXIF format, so the data may be noise. skipping (value is %#xs )\n", NumTags );
             break;
         }
     
         if ( !GetIFDHeaders( IFDOffset + headerBase, aHeaders.data(), NumTags, littleEndian ) )
         {
             Space( depth );
-            printf( "MakernotesIFD has a tag that's invalid. skipping\n" );
+            prf( "MakernotesIFD has a tag that's invalid. skipping\n" );
             break;
         }
 
@@ -1997,7 +2059,7 @@ void EnumerateMakernotes( int depth, __int64 IFDOffset, __int64 headerBase, bool
             if ( g_FullInformation )
             {
                 Space( depth );
-                printf( "makernote tag %d ID %d==%#x, type %d, count %d, offset/value %d==%#x\n", i, head.id, head.id, head.type, head.count, head.offset, head.offset );
+                prf( "makernote tag %d ID %d==%#x, type %d, count %d, offset/value %d==%#x\n", i, head.id, head.id, head.type, head.count, head.offset, head.offset );
             }
 
             Space( depth );
@@ -2007,7 +2069,7 @@ void EnumerateMakernotes( int depth, __int64 IFDOffset, __int64 headerBase, bool
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
 
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "makernote FirmwareVersion:           %s\n", acBuffer );
+                prf( "makernote FirmwareVersion:           %s\n", acBuffer );
             }
             else if ( 5 == head.id && 7 == head.type && isRicohTheta )
             {
@@ -2016,21 +2078,21 @@ void EnumerateMakernotes( int depth, __int64 IFDOffset, __int64 headerBase, bool
                     GetBytes( head.offset + headerBase, acBuffer, head.count );
                     acBuffer[ head.count ] = 0;
                     
-                    printf( "makernote Serial Number:             %s\n", acBuffer );
+                    prf( "makernote Serial Number:             %s\n", acBuffer );
                 }
             }
             else if ( 224 == head.id && 17 == head.count )
             {
                 short sensorWidth = GetWORD( head.offset + headerBase + 2, littleEndian );
                 short sensorHeight = GetWORD( head.offset + headerBase + 4, littleEndian );
-                printf( "makernote sensor width %d, height    %d\n", sensorWidth, sensorHeight );
+                prf( "makernote sensor width %d, height    %d\n", sensorWidth, sensorHeight );
 
                 short leftBorder = GetWORD( head.offset + headerBase + 10, littleEndian );
                 short topBorder = GetWORD( head.offset + headerBase + 12, littleEndian );
                 short rightBorder = GetWORD( head.offset + headerBase + 14, littleEndian );
                 short bottomBorder = GetWORD( head.offset + headerBase + 16, littleEndian );
                 Space( depth );
-                printf( "makernote left, top, right, bottom:   %d %d %d %d\n", leftBorder, topBorder, rightBorder, bottomBorder );
+                prf( "makernote left, top, right, bottom:   %d %d %d %d\n", leftBorder, topBorder, rightBorder, bottomBorder );
             }
             else if ( 553 == head.id && 2 == head.type && isRicoh )
             {
@@ -2038,65 +2100,65 @@ void EnumerateMakernotes( int depth, __int64 IFDOffset, __int64 headerBase, bool
 
                 // Ricoh assumes the base is originalIFDOffset
                 GetString( originalIFDOffset + stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "makernote Serial Number:             %s\n", acBuffer );
+                prf( "makernote Serial Number:             %s\n", acBuffer );
             }
             else if ( 773 == head.id && isLeica )
             {
-                printf( "makernote serial number:             %d\n", head.offset );
+                prf( "makernote serial number:             %d\n", head.offset );
             }
             else if ( 1031 == head.id && isLeica )
             {
                 char acOriginalFileName[ 100 ];
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acOriginalFileName, _countof( acOriginalFileName ), head.count );
-                printf( "makernote OriginalFileName:          %s\n", acOriginalFileName );
+                prf( "makernote OriginalFileName:          %s\n", acOriginalFileName );
             }
             else if ( 1032 == head.id && isLeica )
             {
                 char acOriginalDirectory[ 100 ];
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acOriginalDirectory, _countof( acOriginalDirectory ), head.count );
-                printf( "makernote OriginalDirectory:         %s\n", acOriginalDirectory );
+                prf( "makernote OriginalDirectory:         %s\n", acOriginalDirectory );
             }
             else if ( 1280 == head.id && isLeica )
             {
                 char acInternalSerialNumber[ 100 ];
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acInternalSerialNumber, _countof( acInternalSerialNumber ), head.count );
-                printf( "makernote InternalSerialNumber:      %s\n", acInternalSerialNumber );
+                prf( "makernote InternalSerialNumber:      %s\n", acInternalSerialNumber );
             }
             else if ( 8224 == head.id && 13 == head.type && isOlympus )
             {
                 // Olympus camera settings IFD
 
-                printf( "makernote OlympusCameraSettingsIFD   %d, originalIFDOffset %lld\n", head.offset, originalIFDOffset );
+                prf( "makernote OlympusCameraSettingsIFD   %d, originalIFDOffset %lld\n", head.offset, originalIFDOffset );
 
                 EnumerateOlympusCameraSettingsIFD( depth + 1, head.offset, originalIFDOffset + headerBase, littleEndian );
             }
             else if ( 29184 == head.id && isSony )
-                printf( "makernote Sony Sr2SubIFDOffset       %#x\n", head.offset );
+                prf( "makernote Sony Sr2SubIFDOffset       %#x\n", head.offset );
             else if ( 29185 == head.id && isSony )
-                printf( "makernote Sony Sr2SubIFDLength       %#x\n", head.offset );
+                prf( "makernote Sony Sr2SubIFDLength       %#x\n", head.offset );
             else if ( 29217 == head.id && isSony )
-                printf( "makernote Sony Sr2SubIFDKey          %#x\n", head.offset );
+                prf( "makernote Sony Sr2SubIFDKey          %#x\n", head.offset );
             else if ( 29248 == head.id && isSony )
-                printf( "makernote Sony IDC_IFD               %#x\n", head.offset );
+                prf( "makernote Sony IDC_IFD               %#x\n", head.offset );
             else if ( 29249 == head.id && isSony )
-                printf( "makernote Sony IDC_IFD2              %#x\n", head.offset );
+                prf( "makernote Sony IDC_IFD2              %#x\n", head.offset );
             else if ( 29264 == head.id && isSony )
-                printf( "makernote Sony MRWInfo               %#x\n", head.offset );
+                prf( "makernote Sony MRWInfo               %#x\n", head.offset );
             else
             {
-                printf( "makernote tag %d ID %d==%#x, type %d, count %d, offset/value %d", i, head.id, head.id, head.type, head.count, head.offset );
+                prf( "makernote tag %d ID %d==%#x, type %d, count %d, offset/value %d", i, head.id, head.id, head.type, head.count, head.offset );
 
                 if ( 2 == head.type )
                 {
                     ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                     GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                    printf( " %s", acBuffer );
+                    prf( " %s", acBuffer );
                 }
 
-                printf( "\n" );
+                prf( "\n" );
 
                 if ( 7 == head.type )
                     DumpBinaryData( head.offset, headerBase, head.count, 4, IFDOffset - 4 );
@@ -2120,7 +2182,7 @@ void EnumeratePanasonicCameraTags( int depth, __int64 IFDOffset, __int64 headerB
 
     WORD header = GetWORD( IFDOffset + headerBase, littleEndian );
     if ( 0x4949 != header && 0x4d4d != header )
-        printf( "unknown panasonic endianness header %#x\n", header );
+        prf( "unknown panasonic endianness header %#x\n", header );
 
     littleEndian = ( 0x4949 == header );
 
@@ -2130,20 +2192,20 @@ void EnumeratePanasonicCameraTags( int depth, __int64 IFDOffset, __int64 headerB
     {
         WORD NumTags = GetWORD( IFDOffset + headerBase, littleEndian );
         Space( depth );
-        printf( "panasonic IFDOffset %lld, NumTags %d, headerBase %lld\n", IFDOffset, NumTags, headerBase );
+        prf( "panasonic IFDOffset %lld, NumTags %d, headerBase %lld\n", IFDOffset, NumTags, headerBase );
         IFDOffset += 2;
     
         if ( NumTags > MaxIFDHeaders )
         {
             Space( depth );
-            printf( "numtags is > 200; it's likely not in EXIF format, so the data may be noise. skipping\n" );
+            prf( "numtags is > 200; it's likely not in EXIF format, so the data may be noise. skipping\n" );
             break;
         }
     
         if ( !GetIFDHeaders( IFDOffset + headerBase, aHeaders.data(), NumTags, littleEndian ) )
         {
             Space( depth );
-            printf( "PanasonicCameraTags has a tag that's invalid. skipping\n" );
+            prf( "PanasonicCameraTags has a tag that's invalid. skipping\n" );
             break;
         }
 
@@ -2155,60 +2217,60 @@ void EnumeratePanasonicCameraTags( int depth, __int64 IFDOffset, __int64 headerB
             if ( g_FullInformation )
             {
                 Space( depth );
-                printf( "panasonic tag %d ID %d, type %d, count %d, offset/value %d\n", i, head.id, head.type, head.count, head.offset );
+                prf( "panasonic tag %d ID %d, type %d, count %d, offset/value %d\n", i, head.id, head.type, head.count, head.offset );
             }
 
             Space( depth );
 
             if ( 4096 == head.id && 257 == head.type )
-                printf( "panasonic CameraIFD_0x1000:         %d\n", head.offset ); 
+                prf( "panasonic CameraIFD_0x1000:         %d\n", head.offset ); 
             else if ( 4352 == head.id && 3 == head.type )
-                printf( "panasonic FocusStepNear:            %d\n", head.offset );
+                prf( "panasonic FocusStepNear:            %d\n", head.offset );
             else if ( 4353 == head.id && 3 == head.type )
-                printf( "panasonic FocusStepCount:           %d\n", head.offset );
+                prf( "panasonic FocusStepCount:           %d\n", head.offset );
             else if ( 4354 == head.id && 1 == head.type )
-                printf( "panasonic FlashFired:               %d\n", head.offset );
+                prf( "panasonic FlashFired:               %d\n", head.offset );
             else if ( 4357 == head.id && 4 == head.type )
-                printf( "panasonic ZoomPosition:             %d\n", head.offset );
+                prf( "panasonic ZoomPosition:             %d\n", head.offset );
             else if ( 4608 == head.id && 1 == head.type )
-                printf( "panasonic LensAttached:             %d\n", head.offset );
+                prf( "panasonic LensAttached:             %d\n", head.offset );
             else if ( 4609 == head.id && 3 == head.type )
-                printf( "panasonic LensTypeMake:             %d\n", head.offset );
+                prf( "panasonic LensTypeMake:             %d\n", head.offset );
             else if ( 4610 == head.id && 3 == head.type )
-                printf( "panasonic LensTypeModel:            %d\n", head.offset );
+                prf( "panasonic LensTypeModel:            %d\n", head.offset );
             else if ( 4611 == head.id && 3 == head.type )
-                printf( "panasonic FocalLengthIn35mmFormat:  %d\n", head.offset );
+                prf( "panasonic FocalLengthIn35mmFormat:  %d\n", head.offset );
             else if ( 4865 == head.id && 8 == head.type )
-                printf( "panasonic ApertureValue:            %d\n", head.offset );
+                prf( "panasonic ApertureValue:            %d\n", head.offset );
             else if ( 4866 == head.id && 8 == head.type )
-                printf( "panasonic ShutterSpeedValue:        %d\n", head.offset );
+                prf( "panasonic ShutterSpeedValue:        %d\n", head.offset );
             else if ( 4867 == head.id && 8 == head.type )
-                printf( "panasonic SensitivityValue:         %d\n", head.offset );
+                prf( "panasonic SensitivityValue:         %d\n", head.offset );
             else if ( 4869 == head.id && 3 == head.type )
-                printf( "panasonic HighISOMode:              %d\n", head.offset );
+                prf( "panasonic HighISOMode:              %d\n", head.offset );
             else if ( 5138 == head.id && 1 == head.type )
-                printf( "panasonic FacesDetected:            %d\n", head.offset );
+                prf( "panasonic FacesDetected:            %d\n", head.offset );
             else if ( 12800 == head.id && 3 == head.type )
-                printf( "panasonic WB_CFA0_LevelDaylight:    %d\n", head.offset );
+                prf( "panasonic WB_CFA0_LevelDaylight:    %d\n", head.offset );
             else if ( 12801 == head.id && 3 == head.type )
-                printf( "panasonic WB_CFA1_LevelDaylight:    %d\n", head.offset );
+                prf( "panasonic WB_CFA1_LevelDaylight:    %d\n", head.offset );
             else if ( 12802 == head.id && 3 == head.type )
-                printf( "panasonic WB_CFA2_LevelDaylight:    %d\n", head.offset );
+                prf( "panasonic WB_CFA2_LevelDaylight:    %d\n", head.offset );
             else if ( 12803 == head.id && 3 == head.type )
-                printf( "panasonic WB_CFA3_LevelDaylight:    %d\n", head.offset );
+                prf( "panasonic WB_CFA3_LevelDaylight:    %d\n", head.offset );
             else if ( 13056 == head.id && 1 == head.type )
-                printf( "panasonic WhiteBalanceSet:          %d\n", head.offset );
+                prf( "panasonic WhiteBalanceSet:          %d\n", head.offset );
             else if ( 13344 == head.id && 3 == head.type )
-                printf( "panasonic WB_RedLevelAuto:          %d\n", head.offset );
+                prf( "panasonic WB_RedLevelAuto:          %d\n", head.offset );
             else if ( 13345== head.id && 3 == head.type )
-                printf( "panasonic WB_BlueLevelAuto:         %d\n", head.offset );
+                prf( "panasonic WB_BlueLevelAuto:         %d\n", head.offset );
             else if ( 13569== head.id && 1 == head.type )
-                printf( "panasonic Orientation:              %d\n", head.offset );
+                prf( "panasonic Orientation:              %d\n", head.offset );
             else if ( 13824== head.id && 1 == head.type )
-                printf( "panasonic WhiteBalanceDetected:     %d\n", head.offset );
+                prf( "panasonic WhiteBalanceDetected:     %d\n", head.offset );
             else
             {
-                printf( "panasonic tag %d ID %d==%#x, type %d, count %d, offset/value %d\n", i, head.id, head.id, head.type, head.count, head.offset );
+                prf( "panasonic tag %d ID %d==%#x, type %d, count %d, offset/value %d\n", i, head.id, head.id, head.type, head.count, head.offset );
 
                 if ( 7 == head.type )
                     DumpBinaryData( head.offset, headerBase, head.count, 4, IFDOffset - 4 );
@@ -2222,7 +2284,7 @@ void EnumeratePanasonicCameraTags( int depth, __int64 IFDOffset, __int64 headerB
 void EnumerateAdobeImageResources( int depth, DWORD offset, DWORD headerBase, DWORD count )
 {
     Space( depth );
-    printf( "Adobe Image Resources\n" );
+    prf( "Adobe Image Resources\n" );
 
     // https://www.adobe.com/content/dam/acom/en/devnet/photoshop/psir/ps_image_resources.pdf
 
@@ -2250,25 +2312,25 @@ void EnumerateAdobeImageResources( int depth, DWORD offset, DWORD headerBase, DW
         {
             BYTE captionDigest[ 16 ];
 
-            printf( "caption digest:                     {" );
+            prf( "caption digest:                     {" );
 
             for ( int i = 0; i < 16; i++ )
             {
                 captionDigest[ i ] = GetBYTE( o++ );
-                printf( "%x", captionDigest[ i ] );
+                prf( "%x", captionDigest[ i ] );
             }
 
-            printf( "}\n" );
+            prf( "}\n" );
         }
         else
-            printf( "  Adobe Image Resource ID %d, name len %d, data len %d\n", id, nameLen, dataLen );
+            prf( "  Adobe Image Resource ID %d, name len %d, data len %d\n", id, nameLen, dataLen );
     }
 } //EnumerateAdobeImageResoures
 
 void EnumerateIPTC( int depth, DWORD offset, DWORD headerBase, DWORD count )
 {
     Space( depth );
-    printf( "IPTC dataset\n" );
+    prf( "IPTC dataset\n" );
 
     /*
         https://exiftool.org/TagNames/IPTC.html
@@ -2316,7 +2378,7 @@ void EnumerateIPTC( int depth, DWORD offset, DWORD headerBase, DWORD count )
                 known = true;
 
                 WORD envelopeRecordVersion = GetWORD( dataO, false );
-                printf( "envelope record version:            %d\n", envelopeRecordVersion );
+                prf( "envelope record version:            %d\n", envelopeRecordVersion );
             }
             else if ( 90 == datasetNumber )
             {
@@ -2328,7 +2390,7 @@ void EnumerateIPTC( int depth, DWORD offset, DWORD headerBase, DWORD count )
 
                 acBuffer[ chars ] = 0;
 
-                printf( "coded character set:                %s\n", acBuffer );
+                prf( "coded character set:                %s\n", acBuffer );
             }
 
         }
@@ -2339,7 +2401,7 @@ void EnumerateIPTC( int depth, DWORD offset, DWORD headerBase, DWORD count )
                 known = true;
 
                 WORD appRecordVersion = GetWORD( dataO, false );
-                printf( "application record version:         %d\n", appRecordVersion );
+                prf( "application record version:         %d\n", appRecordVersion );
             }
             else if ( 55 == datasetNumber )
             {
@@ -2350,7 +2412,7 @@ void EnumerateIPTC( int depth, DWORD offset, DWORD headerBase, DWORD count )
 
                 acBuffer[ 8 ] = 0;
 
-                printf( "date created:                       %s\n", acBuffer );
+                prf( "date created:                       %s\n", acBuffer );
             }
             else if ( 60 == datasetNumber )
             {
@@ -2361,12 +2423,12 @@ void EnumerateIPTC( int depth, DWORD offset, DWORD headerBase, DWORD count )
 
                 acBuffer[ 11 ] = 0;
 
-                printf( "time created:                       %s\n", acBuffer );
+                prf( "time created:                       %s\n", acBuffer );
             }
         }
 
         if ( !known )
-            printf( "marker %#x, rec number %d, datasetNumber %d, length %d, extended %d\n", tagMarker, recordNumber, datasetNumber, dataLength, extended );
+            prf( "marker %#x, rec number %d, datasetNumber %d, length %d, extended %d\n", tagMarker, recordNumber, datasetNumber, dataLength, extended );
 
         o += dataLength;
     } while ( true );
@@ -2603,7 +2665,7 @@ void EnumerateGPSTags( int depth, __int64 IFDOffset, __int64 headerBase, bool li
 
     if ( 0xffffffff == IFDOffset )
     {
-        printf( "warning: GPS IFDOffset is invalid: %lld\n", IFDOffset );
+        prf( "warning: GPS IFDOffset is invalid: %lld\n", IFDOffset );
         return;
     }
 
@@ -2611,20 +2673,20 @@ void EnumerateGPSTags( int depth, __int64 IFDOffset, __int64 headerBase, bool li
     {
         WORD NumTags = GetWORD( IFDOffset + headerBase, littleEndian );
         Space( depth );
-        printf( "GPS IFDOffset %lld, NumTags %d\n", IFDOffset, NumTags );
+        prf( "GPS IFDOffset %lld, NumTags %d\n", IFDOffset, NumTags );
         IFDOffset += 2;
     
         if ( NumTags > MaxIFDHeaders )
         {
             Space( depth );
-            printf( "numtags is > 200; it's likely not in EXIF format, so the data may be noise. skipping\n" );
+            prf( "numtags is > 200; it's likely not in EXIF format, so the data may be noise. skipping\n" );
             break;
         }
     
         if ( !GetIFDHeaders( IFDOffset + headerBase, aHeaders.data(), NumTags, littleEndian ) )
         {
             Space( depth );
-            printf( "GPS Tags has a tag that's invalid. skipping\n" );
+            prf( "GPS Tags has a tag that's invalid. skipping\n" );
             break;
         }
 
@@ -2636,20 +2698,20 @@ void EnumerateGPSTags( int depth, __int64 IFDOffset, __int64 headerBase, bool li
             if ( g_FullInformation )
             {
                 Space( depth );
-                printf( "GPS tag %d ID %d, type %d, count %d, offset/value %d\n", i, head.id, head.type, head.count, head.offset );
+                prf( "GPS tag %d ID %d, type %d, count %d, offset/value %d\n", i, head.id, head.type, head.count, head.offset );
             }
 
             Space( depth );
 
             if ( 0 == head.id && 1 == head.type && 4 == head.count )
             {
-                printf( "GPS VersionID:                      %#x\n", head.offset );
+                prf( "GPS VersionID:                      %#x\n", head.offset );
             }
             else if ( 1 == head.id && 2 == head.type )
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "GPS LatitudeRef:                    %s\n", acBuffer );
+                prf( "GPS LatitudeRef:                    %s\n", acBuffer );
             }
             else if ( 2 == head.id && ( ( 10 == head.type ) || ( 5 == head.type ) ) && 3 == head.count )
             {
@@ -2665,13 +2727,13 @@ void EnumerateGPSTags( int depth, __int64 IFDOffset, __int64 headerBase, bool li
                 DWORD den3 = GetDWORD( head.offset + 20 + headerBase, littleEndian );
                 double d3 = (double) num3 / (double) den3;
 
-                printf( "GPS Latitude:                       %lf, %lf, %lf\n", d1, d2, d3 );
+                prf( "GPS Latitude:                       %lf, %lf, %lf\n", d1, d2, d3 );
             }
             else if ( 3 == head.id && 2 == head.type )
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "GPS LongitudeRef:                   %s\n", acBuffer );
+                prf( "GPS LongitudeRef:                   %s\n", acBuffer );
             }
             else if ( 4 == head.id && ( ( 10 == head.type ) || ( 5 == head.type ) ) && 3 == head.count )
             {
@@ -2687,17 +2749,17 @@ void EnumerateGPSTags( int depth, __int64 IFDOffset, __int64 headerBase, bool li
                 DWORD den3 = GetDWORD( head.offset + 20 + headerBase, littleEndian );
                 double d3 = (double) num3 / (double) den3;
 
-                printf( "GPS Longitude:                      %lf, %lf, %lf\n", d1, d2, d3 );
+                prf( "GPS Longitude:                      %lf, %lf, %lf\n", d1, d2, d3 );
             }
             else if ( 5 == head.id && 1 == head.type )
-                printf( "GPS AltitudeRef:                    %d (%s sea level)\n", head.offset, ( 0 == head.offset ) ? "above" : "below" );
+                prf( "GPS AltitudeRef:                    %d (%s sea level)\n", head.offset, ( 0 == head.offset ) ? "above" : "below" );
             else if ( 6 == head.id && 5 == head.type && 1 == head.count )
             {
                 DWORD num1 = GetDWORD( head.offset +      headerBase, littleEndian );
                 DWORD den1 = GetDWORD( head.offset +  4 + headerBase, littleEndian );
                 double d1 = (double) num1 / (double) den1;
 
-                printf( "GPS Altitude:                       %lf\n", d1 );
+                prf( "GPS Altitude:                       %lf\n", d1 );
             }
             else if ( 7 == head.id && ( ( 10 == head.type) || ( 5 == head.type ) ) && 3 == head.count )
             {
@@ -2713,13 +2775,13 @@ void EnumerateGPSTags( int depth, __int64 IFDOffset, __int64 headerBase, bool li
                 DWORD den3 = GetDWORD( head.offset + 20 + headerBase, littleEndian );
                 double d3 = (double) num3 / (double) den3;
 
-                printf( "GPS TimeStamp:                      %lf, %lf, %lf\n", d1, d2, d3 );
+                prf( "GPS TimeStamp:                      %lf, %lf, %lf\n", d1, d2, d3 );
             }
             else if ( 8 == head.id && 2 == head.type )
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "GPS Satellites:                     %s\n", acBuffer );
+                prf( "GPS Satellites:                     %s\n", acBuffer );
             }
             else if ( 9 == head.id && 2 == head.type )
             {
@@ -2730,13 +2792,13 @@ void EnumerateGPSTags( int depth, __int64 IFDOffset, __int64 headerBase, bool li
                     status = "void measurement";
                 else if ( 'a' == tolower( acBuffer[ 0 ] ) )
                     status = "active measurement";
-                printf( "GPS Status:                         %s (%s)\n", acBuffer, status );
+                prf( "GPS Status:                         %s (%s)\n", acBuffer, status );
             }
             else if ( 10 == head.id && 2 == head.type )
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "GPS MeasureMode:                    %s-dimensional measurement\n", acBuffer );
+                prf( "GPS MeasureMode:                    %s-dimensional measurement\n", acBuffer );
             }
             else if ( 11 == head.id && 5 == head.type && 1 == head.count )
             {
@@ -2744,7 +2806,7 @@ void EnumerateGPSTags( int depth, __int64 IFDOffset, __int64 headerBase, bool li
                 DWORD den1 = GetDWORD( head.offset +  4 + headerBase, littleEndian );
                 double d1 = (double) num1 / (double) den1;
 
-                printf( "GPS DOP:                            %lf\n", d1 );
+                prf( "GPS DOP:                            %lf\n", d1 );
             }
             else if ( 12 == head.id && 2 == head.type )
             {
@@ -2761,7 +2823,7 @@ void EnumerateGPSTags( int depth, __int64 IFDOffset, __int64 headerBase, bool li
                 else if ( 'n' == c )
                     units = "knots";
 
-                printf( "GPS SpeedRef:                       %s (%s)\n", acBuffer, units );
+                prf( "GPS SpeedRef:                       %s (%s)\n", acBuffer, units );
             }
             else if ( 13 == head.id && 5 == head.type && 1 == head.count )
             {
@@ -2769,7 +2831,7 @@ void EnumerateGPSTags( int depth, __int64 IFDOffset, __int64 headerBase, bool li
                 DWORD den1 = GetDWORD( head.offset +  4 + headerBase, littleEndian );
                 double d1 = (double) num1 / (double) den1;
 
-                printf( "GPS Speed:                          %lf\n", d1 );
+                prf( "GPS Speed:                          %lf\n", d1 );
             }
             else if ( 15 == head.id && 5 == head.type && 1 == head.count )
             {
@@ -2777,7 +2839,7 @@ void EnumerateGPSTags( int depth, __int64 IFDOffset, __int64 headerBase, bool li
                 DWORD den1 = GetDWORD( head.offset +  4 + headerBase, littleEndian );
                 double d1 = (double) num1 / (double) den1;
 
-                printf( "GPS Track:                          %lf\n", d1 );
+                prf( "GPS Track:                          %lf\n", d1 );
             }
             else if ( 16 == head.id && 2 == head.type )
             {
@@ -2792,7 +2854,7 @@ void EnumerateGPSTags( int depth, __int64 IFDOffset, __int64 headerBase, bool li
                 else if ( 't' == c )
                     direction = "true";
 
-                printf( "GPS ImgDirectionRef:                %s (%s north)\n", acBuffer, direction );
+                prf( "GPS ImgDirectionRef:                %s (%s north)\n", acBuffer, direction );
             }
             else if ( 17 == head.id && 5 == head.type && 1 == head.count )
             {
@@ -2800,13 +2862,13 @@ void EnumerateGPSTags( int depth, __int64 IFDOffset, __int64 headerBase, bool li
                 DWORD den1 = GetDWORD( head.offset +  4 + headerBase, littleEndian );
                 double d1 = (double) num1 / (double) den1;
 
-                printf( "GPS ImgDirection:                   %lf\n", d1 );
+                prf( "GPS ImgDirection:                   %lf\n", d1 );
             }
             else if ( 18 == head.id && 2 == head.type )
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "GPS DestLatitudeRef:                %s\n", acBuffer );
+                prf( "GPS DestLatitudeRef:                %s\n", acBuffer );
             }
             else if ( 23 == head.id && 2 == head.type )
             {
@@ -2821,7 +2883,7 @@ void EnumerateGPSTags( int depth, __int64 IFDOffset, __int64 headerBase, bool li
                 else if ( 't' == c )
                     direction = "true";
 
-                printf( "GPS DestBearingRef:                 %s (%s north)\n", acBuffer, direction );
+                prf( "GPS DestBearingRef:                 %s (%s north)\n", acBuffer, direction );
             }
             else if ( 24 == head.id && 5 == head.type && 1 == head.count )
             {
@@ -2829,24 +2891,24 @@ void EnumerateGPSTags( int depth, __int64 IFDOffset, __int64 headerBase, bool li
                 DWORD den1 = GetDWORD( head.offset +  4 + headerBase, littleEndian );
                 double d1 = (double) num1 / (double) den1;
 
-                printf( "GPS DestBearing:                    %lf\n", d1 );
+                prf( "GPS DestBearing:                    %lf\n", d1 );
             }
             else if ( 27 == head.id && 7 == head.type )
             {
-                printf( "GPS ProcessingMethod type           %d, count %d, offset/value %d\n", i, head.type, head.count, head.offset );
+                prf( "GPS ProcessingMethod type           %d, count %d, offset/value %d\n", i, head.type, head.count, head.offset );
                 DumpBinaryData( head.offset, headerBase, head.count, 4, IFDOffset - 4 );
             }
             else if ( 27 == head.id && 2 == head.type )
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "GPS ProcessingMethod type           %s\n", acBuffer );
+                prf( "GPS ProcessingMethod type           %s\n", acBuffer );
             }
             else if ( 29 == head.id && 2 == head.type )
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "GPS DateStamp:                      %s\n", acBuffer );
+                prf( "GPS DateStamp:                      %s\n", acBuffer );
             }
             else if ( 31 == head.id && 5 == head.type && 1 == head.count )
             {
@@ -2854,16 +2916,16 @@ void EnumerateGPSTags( int depth, __int64 IFDOffset, __int64 headerBase, bool li
                 DWORD den1 = GetDWORD( head.offset +  4 + headerBase, littleEndian );
                 double d1 = (double) num1 / (double) den1;
 
-                printf( "GPS HPositioningError:              %lf\n", d1 );
+                prf( "GPS HPositioningError:              %lf\n", d1 );
             }
             else if ( 59932 == head.id && 7 == head.type )
             {
-                printf( "GPS Padding type                    %d, count %d, offset %d\n", head.type, head.count, head.offset );
+                prf( "GPS Padding type                    %d, count %d, offset %d\n", head.type, head.count, head.offset );
                 DumpBinaryData( head.offset, headerBase, head.count, 4, IFDOffset - 4 );
             }
             else
             {
-                printf( "GPS tag %d ID %d==%#x, type %d, count %d, offset/value %d\n", i, head.id, head.id, head.type, head.count, head.offset );
+                prf( "GPS tag %d ID %d==%#x, type %d, count %d, offset/value %d\n", i, head.id, head.id, head.type, head.count, head.offset );
 
                 if ( 7 == head.type )
                     DumpBinaryData( head.offset, headerBase, head.count, 4, IFDOffset - 4 );
@@ -2874,7 +2936,7 @@ void EnumerateGPSTags( int depth, __int64 IFDOffset, __int64 headerBase, bool li
 
         if ( 0xffffffff == IFDOffset )
         {
-            printf( "warning: next GPS IFDOffset is invalid: %lld\n", IFDOffset );
+            prf( "warning: next GPS IFDOffset is invalid: %lld\n", IFDOffset );
             return;
         }
     }
@@ -3030,20 +3092,20 @@ void EnumerateExifTags( int depth, __int64 IFDOffset, __int64 headerBase, bool l
     {
         WORD NumTags = GetWORD( IFDOffset + headerBase, littleEndian );
         Space( depth );
-        printf( "exif IFDOffset %lld, NumTags %d\n", IFDOffset, NumTags );
+        prf( "exif IFDOffset %lld, NumTags %d\n", IFDOffset, NumTags );
         IFDOffset += 2;
     
         if ( NumTags > MaxIFDHeaders )
         {
             Space( depth );
-            printf( "numtags is > 200; it's likely not in EXIF format, so the data may be noise. skipping (%d)\n", NumTags );
+            prf( "numtags is > 200; it's likely not in EXIF format, so the data may be noise. skipping (%d)\n", NumTags );
             break;
         }
     
         if ( !GetIFDHeaders( IFDOffset + headerBase, aHeaders.data(), NumTags, littleEndian ) )
         {
             Space( depth );
-            printf( "ExifTags has a tag that's invalid. skipping\n" );
+            prf( "ExifTags has a tag that's invalid. skipping\n" );
             break;
         }
 
@@ -3055,7 +3117,7 @@ void EnumerateExifTags( int depth, __int64 IFDOffset, __int64 headerBase, bool l
             if ( g_FullInformation )
             {
                 Space( depth );
-                printf( "exif tag %d ID %d=%#x, type %d, count %d, offset/value %d\n", i, head.id, head.id, head.type, head.count, head.offset );
+                prf( "exif tag %d ID %d=%#x, type %d, count %d, offset/value %d\n", i, head.id, head.id, head.type, head.count, head.offset );
             }
 
             Space( depth );
@@ -3064,88 +3126,88 @@ void EnumerateExifTags( int depth, __int64 IFDOffset, __int64 headerBase, bool l
             {
                 DWORD num = GetDWORD( head.offset + headerBase, littleEndian );
                 DWORD den = GetDWORD( head.offset + headerBase + 4, littleEndian );
-                printf( "XResolution:                        %d / %d = %lf\n", num, den, (double) num / (double) den );
+                prf( "XResolution:                        %d / %d = %lf\n", num, den, (double) num / (double) den );
             }
             else if ( 283 == head.id && 10 == head.type )
             {
                 DWORD num = GetDWORD( head.offset + headerBase, littleEndian );
                 DWORD den = GetDWORD( head.offset + headerBase + 4, littleEndian );
-                printf( "YResolution:                        %d / %d = %lf\n", num, den, (double) num / (double) den );
+                prf( "YResolution:                        %d / %d = %lf\n", num, den, (double) num / (double) den );
             }
             else if ( 306 == head.id && 2 == head.type )
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "exif ModifyDate:                    %s\n", acBuffer );
+                prf( "exif ModifyDate:                    %s\n", acBuffer );
             }
             else if ( 513 == head.id && 4 == head.type )
-                printf( "exif ThumbnailOffset:               %d\n", head.offset );
+                prf( "exif ThumbnailOffset:               %d\n", head.offset );
             else if ( 514 == head.id && 4 == head.type )
-                printf( "exif ThumbnailLength:               %d\n", head.offset );
+                prf( "exif ThumbnailLength:               %d\n", head.offset );
             else if ( 33434 == head.id && 5 == head.type )
             {
                 DWORD num = GetDWORD( head.offset + headerBase, littleEndian );
                 DWORD den = GetDWORD( head.offset + headerBase + 4, littleEndian );
-                printf( "exif ExposureTime:                  %d / %d = %lf\n", num, den, (double) num / (double) den );
+                prf( "exif ExposureTime:                  %d / %d = %lf\n", num, den, (double) num / (double) den );
             }
             else if ( 33434 == head.id && 4 == head.type )
             {
                 DWORD den = head.offset;
-                printf( "exif ExposureTime (type 4):         %d / %d = %lf\n", 1, den, (double) 1 / (double) den );
+                prf( "exif ExposureTime (type 4):         %d / %d = %lf\n", 1, den, (double) 1 / (double) den );
             }
             else if ( 33437 == head.id && 5 == head.type )
             {
                 DWORD num = GetDWORD( head.offset + headerBase, littleEndian );
                 DWORD den = GetDWORD( head.offset + headerBase + 4, littleEndian );
-                printf( "exif FNumber:                       %d / %d = %lf\n", num, den, (double) num / (double) den );
+                prf( "exif FNumber:                       %d / %d = %lf\n", num, den, (double) num / (double) den );
             }
             else if ( 34850 == head.id )
-                printf( "exif ExposureProgram                %s\n", ExifExposureProgram( head.offset ) );
+                prf( "exif ExposureProgram                %s\n", ExifExposureProgram( head.offset ) );
             else if ( 34855 == head.id )
-                printf( "exif ISO                            %d\n", head.offset );
+                prf( "exif ISO                            %d\n", head.offset );
             else if ( 34864 == head.id )
-                printf( "exif Sensitivity Type               %s\n", ExifSensitivityType( head.offset ) );
+                prf( "exif Sensitivity Type               %s\n", ExifSensitivityType( head.offset ) );
             else if ( 34865 == head.id )
-                printf( "exif Standard Output Sensitivity:   %d\n", head.offset );
+                prf( "exif Standard Output Sensitivity:   %d\n", head.offset );
             else if ( 34866 == head.id )
-                printf( "exif Recommended Exposure Index     %d\n", head.offset );
+                prf( "exif Recommended Exposure Index     %d\n", head.offset );
             else if ( 36864 == head.id )
-                printf( "exif ExifVersion                    %d\n", head.count );
+                prf( "exif ExifVersion                    %d\n", head.count );
             else if ( 36867 == head.id && 2 == head.type )
             {
                 char acDateTimeOriginal[ 100 ];
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acDateTimeOriginal, _countof( acDateTimeOriginal ), head.count );
-                printf( "exif DateTimeOriginal:              %s\n", acDateTimeOriginal );
+                prf( "exif DateTimeOriginal:              %s\n", acDateTimeOriginal );
             }
             else if ( 36868 == head.id && 2 == head.type )
             {
                 char acCreateDate[ 100 ];
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acCreateDate, _countof( acCreateDate ), head.count );
-                printf( "exif CreateDate:                    %s\n", acCreateDate );
+                prf( "exif CreateDate:                    %s\n", acCreateDate );
             }
             else if ( 36880 == head.id && 2 == head.type )
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "exif Offset Time:                   %s\n", acBuffer );
+                prf( "exif Offset Time:                   %s\n", acBuffer );
             }
             else if ( 36881 == head.id && 2 == head.type )
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "exif Offset Time Original:          %s\n", acBuffer );
+                prf( "exif Offset Time Original:          %s\n", acBuffer );
             }
             else if ( 36882 == head.id && 2 == head.type )
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "exif Offset Time Digital:           %s\n", acBuffer );
+                prf( "exif Offset Time Digital:           %s\n", acBuffer );
             }
             else if ( 37121 == head.id && 7 == head.type )
             {
-                printf( "exif ComponentsConfiguration:       %d bytes\n", head.count );
+                prf( "exif ComponentsConfiguration:       %d bytes\n", head.count );
                 DumpBinaryData( head.offset, headerBase, head.count, 4, IFDOffset - 4 );
             }
             else if ( 37122 == head.id && 5 == head.type )
@@ -3153,14 +3215,14 @@ void EnumerateExifTags( int depth, __int64 IFDOffset, __int64 headerBase, bool l
                 DWORD num = GetDWORD( head.offset + headerBase, littleEndian );
                 DWORD den = GetDWORD( head.offset + 4 + headerBase, littleEndian );
 
-                printf( "exif CompressedBitsPerPixel:        %d / %d = %lf\n", num, den, (double) num / (double) den );
+                prf( "exif CompressedBitsPerPixel:        %d / %d = %lf\n", num, den, (double) num / (double) den );
             }
             else if ( 37377 == head.id && 10 == head.type )
             {
                 int num = (int) GetDWORD( head.offset + headerBase, littleEndian );
                 int den = (int) GetDWORD( head.offset + 4 + headerBase, littleEndian );
 
-                printf( "exif ShutterSpeedValue:             %d / %d = %lf\n", num, den, (double) num / (double) den );
+                prf( "exif ShutterSpeedValue:             %d / %d = %lf\n", num, den, (double) num / (double) den );
             }
             else if ( 37378 == head.id && 5 == head.type )
             {
@@ -3169,49 +3231,49 @@ void EnumerateExifTags( int depth, __int64 IFDOffset, __int64 headerBase, bool l
 
                 double aperture = (double) num / (double) den;
                 double fnumber = pow( sqrt( 2.0 ), aperture );
-                printf( "exif ApertureValue:                 %d / %d = %lf == f / %lf\n", num, den, aperture, fnumber );
+                prf( "exif ApertureValue:                 %d / %d = %lf == f / %lf\n", num, den, aperture, fnumber );
             }
             else if ( 37379 == head.id && 10 == head.type )
             {
                 int num = (int) GetDWORD( head.offset + headerBase, littleEndian );
                 int den = (int) GetDWORD( head.offset + 4 + headerBase, littleEndian );
 
-                printf( "exif BrightnessValue:               %d / %d = %lf\n", num, den, (double) num / (double) den );
+                prf( "exif BrightnessValue:               %d / %d = %lf\n", num, den, (double) num / (double) den );
             }
             else if ( 37379 == head.id && 5 == head.type ) // iPhone 11 uses head.type 5
             {
                 DWORD num = GetDWORD( head.offset + headerBase, littleEndian );
                 DWORD den = GetDWORD( head.offset + 4 + headerBase, littleEndian );
 
-                printf( "exif BrightnessValue:               %d / %d = %lf\n", num, den, (double) num / (double) den );
+                prf( "exif BrightnessValue:               %d / %d = %lf\n", num, den, (double) num / (double) den );
             }
             else if ( 37380 == head.id && 10 == head.type )
             {
                 int num = (int) GetDWORD( head.offset + headerBase, littleEndian );
                 int den = (int) GetDWORD( head.offset + 4 + headerBase, littleEndian );
 
-                printf( "exif ExposureCompensation:          %d / %d = %lf\n", num, den, (double) num / (double) den );
+                prf( "exif ExposureCompensation:          %d / %d = %lf\n", num, den, (double) num / (double) den );
             }
             else if ( 37381 == head.id && 5 == head.type )
             {
                 DWORD num = GetDWORD( head.offset + headerBase, littleEndian );
                 DWORD den = GetDWORD( head.offset + 4 + headerBase, littleEndian );
 
-                printf( "exif MaxApertureValue:              %d / %d = %lf\n", num, den, (double) num / (double) den );
+                prf( "exif MaxApertureValue:              %d / %d = %lf\n", num, den, (double) num / (double) den );
             }
             else if ( 37382 == head.id )
             {
                 DWORD num = GetDWORD( head.offset + headerBase, littleEndian );
                 DWORD den = GetDWORD( head.offset + 4 + headerBase, littleEndian );
  
-                printf( "exif SubjectDistance (meters):      %d / %d = %lf\n", num, den, (double) num / (double) den );
+                prf( "exif SubjectDistance (meters):      %d / %d = %lf\n", num, den, (double) num / (double) den );
             }
             else if ( 37383 == head.id )
-                printf( "exif MeteringMode:                  %d\n", head.offset );
+                prf( "exif MeteringMode:                  %d\n", head.offset );
             else if ( 37384 == head.id )
-                printf( "exif LightSource:                   %d\n", head.offset );
+                prf( "exif LightSource:                   %d\n", head.offset );
             else if ( 37385 == head.id )
-                printf( "exif Flash:                         %d - %s\n", head.offset, GetFlash( head.offset ) );
+                prf( "exif Flash:                         %d - %s\n", head.offset, GetFlash( head.offset ) );
             else if ( 37386 == head.id && 5 == head.type )
             {
                 DWORD num = GetDWORD( head.offset + headerBase, littleEndian );
@@ -3220,10 +3282,10 @@ void EnumerateExifTags( int depth, __int64 IFDOffset, __int64 headerBase, bool l
                 if ( 0 != den )
                     focalLength = (double) num / (double) den;
  
-                printf( "exif FocalLength:                   %d / %d = %lf\n", num, den, (double) num / (double) den );
+                prf( "exif FocalLength:                   %d / %d = %lf\n", num, den, (double) num / (double) den );
             }
             else if ( 37393 == head.id && 4 == head.type && 1 == head.count )
-                printf( "exif ImageNumber:                   %d\n", head.offset );
+                prf( "exif ImageNumber:                   %d\n", head.offset );
             else if ( 37396 == head.id && 3 == head.type && 4 == head.count )
             {
                 WORD a = GetWORD( head.offset +     headerBase, littleEndian );
@@ -3231,63 +3293,63 @@ void EnumerateExifTags( int depth, __int64 IFDOffset, __int64 headerBase, bool l
                 WORD c = GetWORD( head.offset + 4 + headerBase, littleEndian );
                 WORD d = GetWORD( head.offset + 6 + headerBase, littleEndian );
 
-                printf( "exif SubjectArea:                   %d, %d, %d, %d\n", a, b, c, d );
+                prf( "exif SubjectArea:                   %d, %d, %d, %d\n", a, b, c, d );
             }
             else if ( 37500 == head.id )
             {
-                printf( "makernotes IFD at offset:           %d\n", head.offset );
+                prf( "makernotes IFD at offset:           %d\n", head.offset );
                 EnumerateMakernotes( depth + 1, head.offset, headerBase, littleEndian );
             }
             else if ( 37510 == head.id )
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "exif User Comment:                  %s\n", acBuffer );
+                prf( "exif User Comment:                  %s\n", acBuffer );
             }
             else if ( 37520 == head.id && 2 == head.type )
             {
                 char acSubSecTime[ 100 ];
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acSubSecTime, _countof( acSubSecTime ), head.count );
-                printf( "exif SubSecTime:                    %s\n", acSubSecTime );
+                prf( "exif SubSecTime:                    %s\n", acSubSecTime );
             }
             else if ( 37521 == head.id && 2 == head.type )
             {
                 char acSubSecTimeOriginal[ 100 ];
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acSubSecTimeOriginal, _countof( acSubSecTimeOriginal ), head.count );
-                printf( "exif SubSecTimeOriginal:            %s\n", acSubSecTimeOriginal );
+                prf( "exif SubSecTimeOriginal:            %s\n", acSubSecTimeOriginal );
             }
             else if ( 37522 == head.id && 2 == head.type )
             {
                 char acSubSecTimeDigitized[ 100 ];
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acSubSecTimeDigitized, _countof( acSubSecTimeDigitized ), head.count );
-                printf( "exif SubSecTimeDigitized:           %s\n", acSubSecTimeDigitized );
+                prf( "exif SubSecTimeDigitized:           %s\n", acSubSecTimeDigitized );
             }
             else if ( 40960 == head.id )
-                printf( "exif FlashpixVersion                %#x\n", head.offset );
+                prf( "exif FlashpixVersion                %#x\n", head.offset );
             else if ( 40961 == head.id )
-                printf( "exif Color Space                    %s\n", ExifColorSpace( head.offset ) );
+                prf( "exif Color Space                    %s\n", ExifColorSpace( head.offset ) );
             else if ( 40962 == head.id )
             {
                 pixelWidth = head.offset;
-                printf( "exif PixelWidth                     %d\n", pixelWidth );
+                prf( "exif PixelWidth                     %d\n", pixelWidth );
             }
             else if ( 40963 == head.id )
             {
                 pixelHeight = head.offset;
-                printf( "exif PixelHeight                    %d\n", pixelHeight );
+                prf( "exif PixelHeight                    %d\n", pixelHeight );
             }
             else if ( 40964 == head.id && 2 == head.type )
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "exif Related Sound File:            %s\n", acBuffer );
+                prf( "exif Related Sound File:            %s\n", acBuffer );
             }
             else if ( 40965 == head.id )
             {
-                printf( "exif Interop IFD\n" );
+                prf( "exif Interop IFD\n" );
                 EnumerateInteropIFD( depth + 1, head.offset, headerBase, littleEndian );
             }
             else if ( 41486 == head.id )
@@ -3296,7 +3358,7 @@ void EnumerateExifTags( int depth, __int64 IFDOffset, __int64 headerBase, bool l
                 XResolutionDen = GetDWORD( head.offset + headerBase + 4, littleEndian );
                 ULONG num = XResolutionNum;
                 ULONG den = XResolutionDen;
-                printf( "exif XResolution:                   %d / %d = %lf\n", num, den, (double) num / (double) den );
+                prf( "exif XResolution:                   %d / %d = %lf\n", num, den, (double) num / (double) den );
             }
             else if ( 41487 == head.id )
             {
@@ -3304,78 +3366,78 @@ void EnumerateExifTags( int depth, __int64 IFDOffset, __int64 headerBase, bool l
                 YResolutionDen = GetDWORD( head.offset + headerBase + 4, littleEndian );
                 ULONG num = YResolutionNum;
                 ULONG den = YResolutionDen;
-                printf( "exif YResolution:                   %d / %d = %lf\n", num, den, (double) num / (double) den );
+                prf( "exif YResolution:                   %d / %d = %lf\n", num, den, (double) num / (double) den );
             }
             else if ( 41488 == head.id )
             {
                 sensorSizeUnit = head.offset;
-                printf( "exif SensorSizeUnit:                %d (%s)\n", sensorSizeUnit, ExifSensorSizeUnit( sensorSizeUnit ) );
+                prf( "exif SensorSizeUnit:                %d (%s)\n", sensorSizeUnit, ExifSensorSizeUnit( sensorSizeUnit ) );
             }
             else if ( 41495 == head.id )
-                printf( "exif Sensing Method:                %s\n", ExifSensingMethod( head.offset ) );
+                prf( "exif Sensing Method:                %s\n", ExifSensingMethod( head.offset ) );
             else if ( 41728 == head.id && 7 == head.type )
-                printf( "exif FileSource:                    %s\n", ExifFileSource( head.offset ) );
+                prf( "exif FileSource:                    %s\n", ExifFileSource( head.offset ) );
             else if ( 41729 == head.id && ( 7 == head.type ) || ( 1 == head.type ) )
-                printf( "exif Scene Type:                    %s\n", ExifSceneType( head.offset ) );
+                prf( "exif Scene Type:                    %s\n", ExifSceneType( head.offset ) );
             else if ( 41730 == head.id && 7 == head.type && 8 == head.count )
             {
-                printf( "exif CFA Pattern:                   " );
+                prf( "exif CFA Pattern:                   " );
 
                 ULONG o = head.offset + headerBase;
 
                 for ( int i = 0; i < 8; i++ )
                 {
-                    printf( "%#x", GetBYTE( o++ ) );
+                    prf( "%#x", GetBYTE( o++ ) );
                     if ( 7 != i )
-                        printf( ", " );
+                        prf( ", " );
                 }
 
-                printf( "\n" );
+                prf( "\n" );
             }
             else if ( 41985 == head.id )
-                printf( "exif Custom Rendered:               %s\n", ExifCustomRendered( head.offset ) );
+                prf( "exif Custom Rendered:               %s\n", ExifCustomRendered( head.offset ) );
             else if ( 41986 == head.id )
-                printf( "exif Exposure Mode:                 %s\n", ExifExposureMode( head.offset ) );
+                prf( "exif Exposure Mode:                 %s\n", ExifExposureMode( head.offset ) );
             else if ( 41987 == head.id )
-                printf( "exif White Balance:                 %s\n", ExifWhiteBalance( head.offset ) );
+                prf( "exif White Balance:                 %s\n", ExifWhiteBalance( head.offset ) );
             else if ( 41988 == head.id && 5 == head.type )
             {
                 DWORD num = GetDWORD( head.offset + headerBase, littleEndian );
                 DWORD den = GetDWORD( head.offset + 4 + headerBase, littleEndian );
 
-                printf( "exif Digital Zoom Ratio:            %d / %d = %lf\n", num, den, (double) num / (double) den );
+                prf( "exif Digital Zoom Ratio:            %d / %d = %lf\n", num, den, (double) num / (double) den );
             }
             else if ( 41989 == head.id )
-                printf( "exif FocalLengthIn35mmFilm:         %d\n", head.offset );
+                prf( "exif FocalLengthIn35mmFilm:         %d\n", head.offset );
             else if ( 41990 == head.id )
-                printf( "exif Scene Capture Type:            %s\n", ExifSceneCaptureType( head.offset ) );
+                prf( "exif Scene Capture Type:            %s\n", ExifSceneCaptureType( head.offset ) );
             else if ( 41991 == head.id )
-                printf( "exif Gain Control:                  %s\n", ExifGainControl( head.offset ) );
+                prf( "exif Gain Control:                  %s\n", ExifGainControl( head.offset ) );
             else if ( 41992 == head.id )
-                printf( "exif Contrast:                      %s\n", ExifContrast( head.offset ) );
+                prf( "exif Contrast:                      %s\n", ExifContrast( head.offset ) );
             else if ( 41993 == head.id )
-                printf( "exif Saturation:                    %s\n", ExifContrast( head.offset ) ); // same values as saturation
+                prf( "exif Saturation:                    %s\n", ExifContrast( head.offset ) ); // same values as saturation
             else if ( 41994 == head.id )
-                printf( "exif Sharpness:                     %s\n", ExifSharpness( head.offset ) );
+                prf( "exif Sharpness:                     %s\n", ExifSharpness( head.offset ) );
             else if ( 41996 == head.id )
-                printf( "exif Subject Distance Range:        %s\n", ExifSubjectDistanceRange( head.offset ) );
+                prf( "exif Subject Distance Range:        %s\n", ExifSubjectDistanceRange( head.offset ) );
             else if ( 42016 == head.id && 2 == head.type )
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "exif ImageUniqueID:                 %s\n", acBuffer );
+                prf( "exif ImageUniqueID:                 %s\n", acBuffer );
             }
             else if ( 42032 == head.id )
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "exif Owner Name:                    %s\n", acBuffer );
+                prf( "exif Owner Name:                    %s\n", acBuffer );
             }
             else if ( 42033 == head.id )
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "exif Body Serial Number:            %s\n", acBuffer );
+                prf( "exif Body Serial Number:            %s\n", acBuffer );
             }
             else if ( 42034 == head.id && 5 == head.type && 4 == head.count )
             {
@@ -3391,7 +3453,7 @@ void EnumerateExifTags( int depth, __int64 IFDOffset, __int64 headerBase, bool l
                 DWORD numMaxAp = GetDWORD( head.offset + 24 + headerBase, littleEndian );
                 DWORD denMaxAp = GetDWORD( head.offset + 28 + headerBase, littleEndian );
 
-                printf( "exif Lens min/max FL and Aperture:  %.2lf, %.2lf, %.2lf, %.2lf\n",
+                prf( "exif Lens min/max FL and Aperture:  %.2lf, %.2lf, %.2lf, %.2lf\n",
                         (double) numMinFL / (double) denMinFL,
                         (double) numMaxFL / (double) denMaxFL,
                         (double) numMinAp / (double) denMinAp,
@@ -3401,32 +3463,32 @@ void EnumerateExifTags( int depth, __int64 IFDOffset, __int64 headerBase, bool l
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "exif Lens Make:                     %s\n", acBuffer );
+                prf( "exif Lens Make:                     %s\n", acBuffer );
             }
             else if ( 42036 == head.id && 2 == head.type )
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "exif Lens Model:                    %s\n", acBuffer );
+                prf( "exif Lens Model:                    %s\n", acBuffer );
             }
             else if ( 42037 == head.id && 2 == head.type )
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "exif Lens Serial Number:            %s\n", acBuffer );
+                prf( "exif Lens Serial Number:            %s\n", acBuffer );
             }
             else if ( 42080 == head.id && 3 == head.type && 1 == head.count )
-                printf( "exif Composite Image:               %s\n", ExifComposite( head.offset ) );
+                prf( "exif Composite Image:               %s\n", ExifComposite( head.offset ) );
             else if ( 42081 == head.id && 3 == head.type && 2 == head.count )
             {
                 WORD images = ( head.offset >> 16 ) & 0xffff;
                 WORD imagesUsed = head.offset & 0xffff;
 
-                printf( "exif Composite Image Count:         %d images, %d of which were used\n", images, imagesUsed );
+                prf( "exif Composite Image Count:         %d images, %d of which were used\n", images, imagesUsed );
             }
             else if ( 42082 == head.id && 7 == head.type )
             {
-                printf( "exif ImageExposure Times\n" );
+                prf( "exif ImageExposure Times\n" );
 
                 DWORD soFar = 0;
 
@@ -3439,14 +3501,14 @@ void EnumerateExifTags( int depth, __int64 IFDOffset, __int64 headerBase, bool l
                         double d = (double) num / (double) den;
 
                         Space( depth );
-                        printf( "       %6lf    -- %s\n", d, ExifImageExposureTimes( soFar ) );
+                        prf( "       %6lf    -- %s\n", d, ExifImageExposureTimes( soFar ) );
 
                         soFar += 8;
                     }
                     else if ( 56 == soFar )
                     {
                         Space( depth );
-                        printf( "       %8d    -- %s\n", head.offset, ExifImageExposureTimes( soFar ) );
+                        prf( "       %8d    -- %s\n", head.offset, ExifImageExposureTimes( soFar ) );
                         soFar += 2;
                     }
                     else
@@ -3457,20 +3519,20 @@ void EnumerateExifTags( int depth, __int64 IFDOffset, __int64 headerBase, bool l
             {
                 DWORD num = GetDWORD( head.offset +      headerBase, littleEndian );
                 DWORD den = GetDWORD( head.offset +  4 + headerBase, littleEndian );
-                printf( "exif Gamma:                         %d / %d = %lf\n", num, den, (double) num / (double) den );
+                prf( "exif Gamma:                         %d / %d = %lf\n", num, den, (double) num / (double) den );
             }
             else if ( 59932 == head.id && 7 == head.type )
             {
-                printf( "exif Padding type                   %d, count %d, offset %d\n", head.type, head.count, head.offset );
+                prf( "exif Padding type                   %d, count %d, offset %d\n", head.type, head.count, head.offset );
                 DumpBinaryData( head.offset, headerBase, head.count, 4, IFDOffset - 4 );
             }
             else if ( 59933 == head.id && 9 == head.type )
-                printf( "exif MSFTOffsetSchema type           %d, count %d, offset %d\n", head.type, head.count, head.offset );
+                prf( "exif MSFTOffsetSchema type           %d, count %d, offset %d\n", head.type, head.count, head.offset );
             else if ( 0 == head.id )
-                printf( "exif has invalid tag %d ID %d==%#x, type %d, count %d, offset/value %d\n", i, head.id, head.id, head.type, head.count, head.offset );
+                prf( "exif has invalid tag %d ID %d==%#x, type %d, count %d, offset/value %d\n", i, head.id, head.id, head.type, head.count, head.offset );
             else
             {
-                printf( "exif tag %d ID %d==%#x, type %d, count %d, offset/value %d\n", i, head.id, head.id, head.type, head.count, head.offset );
+                prf( "exif tag %d ID %d==%#x, type %d, count %d, offset/value %d\n", i, head.id, head.id, head.type, head.count, head.offset );
 
                 if ( 7 == head.type )
                     DumpBinaryData( head.offset, headerBase, head.count, 4, IFDOffset - 4 );
@@ -3516,103 +3578,103 @@ void EnumerateExifTags( int depth, __int64 IFDOffset, __int64 headerBase, bool l
         }
 
         Space( depth );
-        printf( "exif (Computed) sensor WxH:         %lf, %lf\n", sensorSizeXmm, sensorSizeYmm );
+        prf( "exif (Computed) sensor WxH:         %lf, %lf\n", sensorSizeXmm, sensorSizeYmm );
     }
 } //EnumerateExifTags
 
 void PrintPanasonicIFD0Tag( int depth, WORD id, WORD type, DWORD count, DWORD offset, __int64 headerBase, bool littleEndian, __int64 IFDOffset )
 {
     if ( 1 == id )
-        printf( "panasonicRawVersion:                  %#x\n", offset );
+        prf( "panasonicRawVersion:                  %#x\n", offset );
     else if ( 2 == id )
-        printf( "panasonicSensorWidth:                 %d\n", offset );
+        prf( "panasonicSensorWidth:                 %d\n", offset );
     else if ( 3 == id )
-        printf( "panasonicSensorHeight:                %d\n", offset );
+        prf( "panasonicSensorHeight:                %d\n", offset );
     else if ( 4 == id )
-        printf( "panasonicSensorTopBorder:             %d\n", offset );
+        prf( "panasonicSensorTopBorder:             %d\n", offset );
     else if ( 5 == id )
-        printf( "panasonicSensorLeftBorder:            %d\n", offset );
+        prf( "panasonicSensorLeftBorder:            %d\n", offset );
     else if ( 6 == id )
-        printf( "panasonicSensorBottomBorder:          %d\n", offset );
+        prf( "panasonicSensorBottomBorder:          %d\n", offset );
     else if ( 7 == id )
-        printf( "panasonicSensorRightBorder:           %d\n", offset );
+        prf( "panasonicSensorRightBorder:           %d\n", offset );
     else if ( 8 == id )
-        printf( "panasonicSamplesPerPixel:             %d\n", offset );
+        prf( "panasonicSamplesPerPixel:             %d\n", offset );
     else if ( 9 == id )
-        printf( "panasonicCFAPattern:                  %d\n", offset );
+        prf( "panasonicCFAPattern:                  %d\n", offset );
     else if ( 10 == id )
-        printf( "panasonicBitsPerSample:               %d\n", offset );
+        prf( "panasonicBitsPerSample:               %d\n", offset );
     else if ( 11 == id )
-        printf( "panasonicCompression:                 %d\n", offset );
+        prf( "panasonicCompression:                 %d\n", offset );
     else if ( 14 == id )
-        printf( "panasonicLinearityLimitRed:           %d\n", offset );
+        prf( "panasonicLinearityLimitRed:           %d\n", offset );
     else if ( 15 == id )
-        printf( "panasonicLinearityLimitGreen:         %d\n", offset );
+        prf( "panasonicLinearityLimitGreen:         %d\n", offset );
     else if ( 16 == id )
-        printf( "panasonicLinearityLimitBlue:          %d\n", offset );
+        prf( "panasonicLinearityLimitBlue:          %d\n", offset );
     else if ( 23 == id )
-        printf( "panasonicISO:                         %d\n", offset );
+        prf( "panasonicISO:                         %d\n", offset );
     else if ( 24 == id )
-        printf( "panasonicHighISOMultiplierRed:        %d\n", offset );
+        prf( "panasonicHighISOMultiplierRed:        %d\n", offset );
     else if ( 25 == id )
-        printf( "panasonicHighISOMultiplierGreen:      %d\n", offset );
+        prf( "panasonicHighISOMultiplierGreen:      %d\n", offset );
     else if ( 26 == id )
-        printf( "panasonicHighISOMultiplierBlue:       %d\n", offset );
+        prf( "panasonicHighISOMultiplierBlue:       %d\n", offset );
     else if ( 27 == id )
     {
-        printf( "panasonicNoiseReductionParams:        %d bytes at %d\n", count, offset );
+        prf( "panasonicNoiseReductionParams:        %d bytes at %d\n", count, offset );
         DumpBinaryData( offset, headerBase, count, 4, IFDOffset - 4 );
     }
     else if ( 28 == id )
-        printf( "panasonicBlackLevelRed:               %d\n", offset );
+        prf( "panasonicBlackLevelRed:               %d\n", offset );
     else if ( 29 == id )
-        printf( "panasonicBlackLevelGreen:             %d\n", offset );
+        prf( "panasonicBlackLevelGreen:             %d\n", offset );
     else if ( 30 == id )
-        printf( "panasonicBlackLevelBlue:              %d\n", offset );
+        prf( "panasonicBlackLevelBlue:              %d\n", offset );
     else if ( 36 == id )
-        printf( "panasonicWBRedLevel:                  %d\n", offset );
+        prf( "panasonicWBRedLevel:                  %d\n", offset );
     else if ( 37 == id )
-        printf( "panasonicWBGreenLevel:                %d\n", offset );
+        prf( "panasonicWBGreenLevel:                %d\n", offset );
     else if ( 38 == id )
-        printf( "panasonicWBBlueLevel:                 %d\n", offset );
+        prf( "panasonicWBBlueLevel:                 %d\n", offset );
     else if ( 39 == id )
     {
-        printf( "panasonicWBInfo2:                     %d bytes at %d\n", count, offset );
+        prf( "panasonicWBInfo2:                     %d bytes at %d\n", count, offset );
         DumpBinaryData( offset, headerBase, count, 4, IFDOffset - 4 );
     }
     else if ( 45 == id )
-        printf( "panasonicRawFormat:                   %d\n", offset );
+        prf( "panasonicRawFormat:                   %d\n", offset );
     else if ( 46 == id )
     {
-        printf( "panasonicJPGFromRaw:                  %d bytes at %d\n", count, offset );
+        prf( "panasonicJPGFromRaw:                  %d bytes at %d\n", count, offset );
         DumpBinaryData( offset, headerBase, count, 4, IFDOffset - 4 );
 
         g_Embedded_Image_Offset = offset;
         g_Embedded_Image_Length = count;
     }
     else if ( 47 == id )
-        printf( "panasonicCropTop:                     %d\n", offset );
+        prf( "panasonicCropTop:                     %d\n", offset );
     else if ( 48 == id )
-        printf( "panasonicCropLeft:                    %d\n", offset );
+        prf( "panasonicCropLeft:                    %d\n", offset );
     else if ( 49 == id )
-        printf( "panasonicCropBottom:                  %d\n", offset );
+        prf( "panasonicCropBottom:                  %d\n", offset );
     else if ( 50 == id )
-        printf( "panasonicCropRight:                   %d\n", offset );
+        prf( "panasonicCropRight:                   %d\n", offset );
     else if ( 280 == id )
-        printf( "panasonicRawDataOffset                %d\n", offset );
+        prf( "panasonicRawDataOffset                %d\n", offset );
     else if ( 281 == id )
     {
-        printf( "panasonicDistortionInfo               %d bytes at %d\n", count, offset );
+        prf( "panasonicDistortionInfo               %d bytes at %d\n", count, offset );
         DumpBinaryData( offset, headerBase, count, 4, IFDOffset - 4 );
     }
     else if ( 284 == id )
-        printf( "panasonicGamma:                       %d\n", offset );
+        prf( "panasonicGamma:                       %d\n", offset );
     else if ( 288 == id )
         EnumeratePanasonicCameraTags( depth + 1, offset, headerBase, littleEndian );
     else if ( 289 == id )
-        printf( "panasonicMultishot:                   %d\n", offset );
+        prf( "panasonicMultishot:                   %d\n", offset );
     else
-        printf( "panasonicTag ID %d==%#x, type %d, count %d, offset/value %d\n", id, id, type, count, offset );
+        prf( "panasonicTag ID %d==%#x, type %d, count %d, offset/value %d\n", id, id, type, count, offset );
 } //PrintPanasonicIFD0Tag
 
 const char * JPGComponents( int x )
@@ -3873,7 +3935,7 @@ void PrintICCValue( ICC_TAG & t, DWORD offset )
 
     if ( g_FullInformation )
     {
-        printf( "  tag %s, type %s\n", acTag, acType );
+        prf( "  tag %s, type %s\n", acTag, acType );
         DumpBinaryData( offset, 0, t.dataSize, 8, offset );
     }
 
@@ -3882,21 +3944,21 @@ void PrintICCValue( ICC_TAG & t, DWORD offset )
         int len = t.dataSize - 8;
         vector<char> value( len );
         GetBytes( offset + 8, value.data(), len );
-        printf( "  Copyright:                          %s\n", value.data() );
+        prf( "  Copyright:                          %s\n", value.data() );
     }
     else if ( !strcmp( acTag, "desc" ) )
     {
         int len = t.dataSize - 12;
         vector<char> value( len );
         GetBytes( offset + 12, value.data(), len );
-        printf( "  ProfileDescription:                 %s\n", value.data() );
+        prf( "  ProfileDescription:                 %s\n", value.data() );
     }
     else if ( !strcmp( acTag, "wtpt" ) )
     {
         DWORD x = GetDWORD( offset + 8, false );
         DWORD y = GetDWORD( offset + 12, false );
         DWORD z = GetDWORD( offset + 16, false );
-        printf( "  MediaWhitePoint:                    %lf %lf %lf\n", ConvertS15Fixed16Number( x ),
+        prf( "  MediaWhitePoint:                    %lf %lf %lf\n", ConvertS15Fixed16Number( x ),
                 ConvertS15Fixed16Number( y ), ConvertS15Fixed16Number( z ) );
     }
     else if ( !strcmp( acTag, "bkpt" ) )
@@ -3904,7 +3966,7 @@ void PrintICCValue( ICC_TAG & t, DWORD offset )
         DWORD x = GetDWORD( offset + 8, false );
         DWORD y = GetDWORD( offset + 12, false );
         DWORD z = GetDWORD( offset + 16, false );
-        printf( "  MediaBlackPoint:                    %lf %lf %lf\n", ConvertS15Fixed16Number( x ),
+        prf( "  MediaBlackPoint:                    %lf %lf %lf\n", ConvertS15Fixed16Number( x ),
                 ConvertS15Fixed16Number( y ), ConvertS15Fixed16Number( z ) );
     }
     else if ( !strcmp( acTag, "rXYZ" ) )
@@ -3912,7 +3974,7 @@ void PrintICCValue( ICC_TAG & t, DWORD offset )
         DWORD x = GetDWORD( offset + 8, false );
         DWORD y = GetDWORD( offset + 12, false );
         DWORD z = GetDWORD( offset + 16, false );
-        printf( "  RedMatrixColumn:                    %lf %lf %lf\n", ConvertS15Fixed16Number( x ),
+        prf( "  RedMatrixColumn:                    %lf %lf %lf\n", ConvertS15Fixed16Number( x ),
                 ConvertS15Fixed16Number( y ), ConvertS15Fixed16Number( z ) );
     }
     else if ( !strcmp( acTag, "gXYZ" ) )
@@ -3920,7 +3982,7 @@ void PrintICCValue( ICC_TAG & t, DWORD offset )
         DWORD x = GetDWORD( offset + 8, false );
         DWORD y = GetDWORD( offset + 12, false );
         DWORD z = GetDWORD( offset + 16, false );
-        printf( "  GreenMatrixColumn:                  %lf %lf %lf\n", ConvertS15Fixed16Number( x ),
+        prf( "  GreenMatrixColumn:                  %lf %lf %lf\n", ConvertS15Fixed16Number( x ),
                 ConvertS15Fixed16Number( y ), ConvertS15Fixed16Number( z ) );
     }
     else if ( !strcmp( acTag, "bXYZ" ) )
@@ -3928,7 +3990,7 @@ void PrintICCValue( ICC_TAG & t, DWORD offset )
         DWORD x = GetDWORD( offset + 8, false );
         DWORD y = GetDWORD( offset + 12, false );
         DWORD z = GetDWORD( offset + 16, false );
-        printf( "  BlueMatrixColumn:                   %lf %lf %lf\n", ConvertS15Fixed16Number( x ),
+        prf( "  BlueMatrixColumn:                   %lf %lf %lf\n", ConvertS15Fixed16Number( x ),
                 ConvertS15Fixed16Number( y ), ConvertS15Fixed16Number( z ) );
     }
     else if ( !strcmp( acTag, "dmnd" ) )
@@ -3936,28 +3998,28 @@ void PrintICCValue( ICC_TAG & t, DWORD offset )
         int len = t.dataSize - 12;
         vector<char> value( len );
         GetBytes( offset + 12, value.data(), len );
-        printf( "  DeviceMfgDesc:                      %s\n", value.data() );
+        prf( "  DeviceMfgDesc:                      %s\n", value.data() );
     }
     else if ( !strcmp( acTag, "dmdd" ) )
     {
         int len = t.dataSize - 12;
         vector<char> value( len );
         GetBytes( offset + 12, value.data(), len );
-        printf( "  DeviceModelDesc:                    %s\n", value.data() );
+        prf( "  DeviceModelDesc:                    %s\n", value.data() );
     }
     else if ( !strcmp( acTag, "vued" ) )
     {
         int len = t.dataSize - 12;
         vector<char> value( len );
         GetBytes( offset + 12, value.data(), len );
-        printf( "  ViewingCondDesc:                    %s\n", value.data() );
+        prf( "  ViewingCondDesc:                    %s\n", value.data() );
     }
     else if ( !strcmp( acTag, "lumi" ) )
     {
         DWORD x = GetDWORD( offset + 8, false );
         DWORD y = GetDWORD( offset + 12, false );
         DWORD z = GetDWORD( offset + 16, false );
-        printf( "  Luminance:                          %lf %lf %lf\n", ConvertS15Fixed16Number( x ),
+        prf( "  Luminance:                          %lf %lf %lf\n", ConvertS15Fixed16Number( x ),
                 ConvertS15Fixed16Number( y ), ConvertS15Fixed16Number( z ) );
     }
     else if ( !strcmp( acTag, "meas" ) )
@@ -3985,50 +4047,50 @@ void PrintICCValue( ICC_TAG & t, DWORD offset )
         mt.flare = _byteswap_ulong( mt.flare );
         mt.standard = _byteswap_ulong( mt.standard );
 
-        printf( "  Measurement:\n" );
-        printf( "    standard observer:                %d\n", mt.standardObserver, GetICCStandardObserver( mt.standardObserver ) );
-        printf( "    x tristimulus backing:            %lf\n", ConvertS15Fixed16Number( mt.xTriStimulus ) );
-        printf( "    y tristimulus backing:            %lf\n", ConvertS15Fixed16Number( mt.yTriStimulus ) );
-        printf( "    z tristimulus backing:            %lf\n", ConvertS15Fixed16Number( mt.zTriStimulus ) );
-        printf( "    measurement geometry:             %d (%s)\n", mt.geometry, GetICCGeometry( mt.geometry ) );
-        printf( "    measurement flare:                %d (%s)\n", mt.flare, GetICCMeasurementFlare( mt.flare ) );
-        printf( "    standard illuminant:              %d (%s)\n", mt.standard, GetICCStandardIlluminant( mt.standard ) );
+        prf( "  Measurement:\n" );
+        prf( "    standard observer:                %d\n", mt.standardObserver, GetICCStandardObserver( mt.standardObserver ) );
+        prf( "    x tristimulus backing:            %lf\n", ConvertS15Fixed16Number( mt.xTriStimulus ) );
+        prf( "    y tristimulus backing:            %lf\n", ConvertS15Fixed16Number( mt.yTriStimulus ) );
+        prf( "    z tristimulus backing:            %lf\n", ConvertS15Fixed16Number( mt.zTriStimulus ) );
+        prf( "    measurement geometry:             %d (%s)\n", mt.geometry, GetICCGeometry( mt.geometry ) );
+        prf( "    measurement flare:                %d (%s)\n", mt.flare, GetICCMeasurementFlare( mt.flare ) );
+        prf( "    standard illuminant:              %d (%s)\n", mt.standard, GetICCStandardIlluminant( mt.standard ) );
     }
     else if ( !strcmp( acTag, "tech" ) )
     {
         char acTech[ 5 ];
         acTech[ 4 ] = 0;
         GetBytes( offset + 8, acTech, 4 );
-        printf( "  technology:                         %s\n", acTech );
+        prf( "  technology:                         %s\n", acTech );
     }
     else if ( !strcmp( acTag, "view" ) )
     {
         DWORD x = GetDWORD( offset + 8, false );
         DWORD y = GetDWORD( offset + 12, false );
         DWORD z = GetDWORD( offset + 16, false );
-        printf( "  ViewingConditions:                  %lf %lf %lf\n", ConvertS15Fixed16Number( x ),
+        prf( "  ViewingConditions:                  %lf %lf %lf\n", ConvertS15Fixed16Number( x ),
                 ConvertS15Fixed16Number( y ), ConvertS15Fixed16Number( z ) );
     }
     else if ( !strcmp( acTag, "rTRC" ) )
     {
         DWORD count = GetDWORD( offset + 8, false );
-        printf( "  Red tone reproduction curve #:      %d\n", count );
+        prf( "  Red tone reproduction curve #:      %d\n", count );
     }
     else if ( !strcmp( acTag, "gTRC" ) )
     {
         DWORD count = GetDWORD( offset + 8, false );
-        printf( "  Green tone reproduction curve #:    %d\n", count );
+        prf( "  Green tone reproduction curve #:    %d\n", count );
     }
     else if ( !strcmp( acTag, "bTRC" ) )
     {
         DWORD count = GetDWORD( offset + 8, false );
-        printf( "  Blue tone reproduction curve #:     %d\n", count );
+        prf( "  Blue tone reproduction curve #:     %d\n", count );
     }
     else
     {
         if ( !g_FullInformation )
         {
-            printf( "  tag %s, type %s\n", acTag, acType );
+            prf( "  tag %s, type %s\n", acTag, acType );
             DumpBinaryData( offset, 0, t.dataSize, 8, offset );
         }
     }
@@ -4064,15 +4126,15 @@ void PrintXMPData( const char * pcIn )
         int rating = *pcRating;
 
         if ( rating >= '0' && rating <= '5' )          // doesn't handle Adobe Bridge's -1
-            printf( "Rating:                               %c\n", rating );
+            prf( "Rating:                               %c\n", rating );
         else
-            printf( "XMP Rating value isn't 0-5: '%c' == %#x\n", rating, rating );
+            prf( "XMP Rating value isn't 0-5: '%c' == %#x\n", rating, rating );
     }
 } //PrintXMPData
 
 int ParseOldJpg( DWORD startingOffset = 0 )
 {
-    printf( "mimetype:                             image/jpeg\n" );
+    prf( "mimetype:                             image/jpeg\n" );
 
     DWORD offset = 2 + startingOffset;
     WORD width = 0;
@@ -4108,7 +4170,7 @@ int ParseOldJpg( DWORD startingOffset = 0 )
         BYTE segment = GetBYTE( offset + 1 );
 
         if ( g_FullInformation )
-            printf( "jpg offset %d, segment %#x\n", offset, segment );
+            prf( "jpg offset %d, segment %#x\n", offset, segment );
 
         if ( MARKER_EOI == segment )
         {
@@ -4126,7 +4188,7 @@ int ParseOldJpg( DWORD startingOffset = 0 )
         WORD data_length = length - 2;
 
         if ( g_FullInformation )
-            printf( "  segment length %d\n", length );
+            prf( "  segment length %d\n", length );
 
         if ( MARKER_DQT == segment )
         {
@@ -4139,7 +4201,7 @@ int ParseOldJpg( DWORD startingOffset = 0 )
             DQTSegmentCount = data_length / 65;
 
             if ( g_FullInformation )
-                printf( "  dqt segments: %d\n", DQTSegmentCount );
+                prf( "  dqt segments: %d\n", DQTSegmentCount );
 
             int o = offset + 4;
             pDQTSegs = new QuantizationTableSegment[ DQTSegmentCount ];
@@ -4163,7 +4225,7 @@ int ParseOldJpg( DWORD startingOffset = 0 )
 
             comment.get()[ data_length ] = 0;
 
-            printf( "comment:                           %s\n", comment.get() );
+            prf( "comment:                           %s\n", comment.get() );
         }
         else if ( MARKER_DHT == segment || MARKER_JPG == segment || MARKER_DAC == segment )
         {
@@ -4171,17 +4233,17 @@ int ParseOldJpg( DWORD startingOffset = 0 )
         }
         else if ( segment >= MARKER_SOF0 && segment <= MARKER_SOF15 )
         {
-            printf( "start of frame:                   %5d (%#x) (%s)\n", segment, segment, SOFMarker( segment ) );
+            prf( "start of frame:                   %5d (%#x) (%s)\n", segment, segment, SOFMarker( segment ) );
 
             byte precision = GetBYTE( offset + 4 );
             height = GetWORD( offset + 5, false );
             width = GetWORD( offset + 7, false );
             byte components = GetBYTE( offset + 9 );
 
-            printf( "bits per sample:                  %5d\n", precision );
-            printf( "image height:                     %5d\n", height );
-            printf( "image width:                      %5d\n", width );
-            printf( "color components:                 %5d (%s)\n", components, JPGComponents( components ) );
+            prf( "bits per sample:                  %5d\n", precision );
+            prf( "image height:                     %5d\n", height );
+            prf( "image width:                      %5d\n", width );
+            prf( "color components:                 %5d (%s)\n", components, JPGComponents( components ) );
 
             for ( int component = 0; component < components; component++ )
             {
@@ -4191,9 +4253,9 @@ int ParseOldJpg( DWORD startingOffset = 0 )
 
                 if ( g_FullInformation )
                 {
-                    printf( "  component %d ID  %5d\n", component, componentID );
-                    printf( "  component %d sampling factor  vertical %d, horizontal %d\n", component, samplingFactor & 0xf, samplingFactor >> 4 );
-                    printf( "  component %d quantization table %d\n", component, quantizationTable );
+                    prf( "  component %d ID  %5d\n", component, componentID );
+                    prf( "  component %d sampling factor  vertical %d, horizontal %d\n", component, samplingFactor & 0xf, samplingFactor >> 4 );
+                    prf( "  component %d quantization table %d\n", component, quantizationTable );
                 }
             }
 
@@ -4223,7 +4285,7 @@ int ParseOldJpg( DWORD startingOffset = 0 )
                     sub3 = 0;
                 }
 
-                printf( "compression:                          YCbCr4:%d:%d (%d %d)\n", sub2, sub3, horizS, vertS );
+                prf( "compression:                          YCbCr4:%d:%d (%d %d)\n", sub2, sub3, horizS, vertS );
             }
 
         }
@@ -4242,12 +4304,12 @@ int ParseOldJpg( DWORD startingOffset = 0 )
             BYTE thumbWidth = GetBYTE( offset + 16 );
             BYTE thumbHeight = GetBYTE( offset + 17 );
 
-            printf( "id marker:                            %s\n", acID );
-            printf( "major version:                    %5d\n", majorVersion );
-            printf( "minor version:                    %5d\n", minorVersion );
-            printf( "units:                                %s\n", ( 0 == units ) ? "none" : ( 1 == units ) ? "dots/inch" : ( 2 == units ) ? "dots/cm" : "unknown" );
-            printf( "x density:                        %5d\n", xDensity );
-            printf( "y density:                        %5d\n", yDensity );
+            prf( "id marker:                            %s\n", acID );
+            prf( "major version:                    %5d\n", majorVersion );
+            prf( "minor version:                    %5d\n", minorVersion );
+            prf( "units:                                %s\n", ( 0 == units ) ? "none" : ( 1 == units ) ? "dots/inch" : ( 2 == units ) ? "dots/cm" : "unknown" );
+            prf( "x density:                        %5d\n", xDensity );
+            prf( "y density:                        %5d\n", yDensity );
         }
         else if ( MARKER_APP2 == segment )
         {
@@ -4257,7 +4319,7 @@ int ParseOldJpg( DWORD startingOffset = 0 )
             char acHeader[ 13 ];
             acHeader[ 12 ] = 0;
             GetBytes( offset + 4, &acHeader, 12 );
-            printf( "APP2 header %s\n", acHeader );
+            prf( "APP2 header %s\n", acHeader );
 
             if ( !stricmp( acHeader, "FPXR" ) )
             {
@@ -4271,61 +4333,61 @@ int ParseOldJpg( DWORD startingOffset = 0 )
                 icc.ByteSwap( false );
     
                 //printf( "data_length %d, sizeof icc %d\n", data_length, (int) sizeof icc );
-                printf( "  size:                           %5d\n", icc.size );
+                prf( "  size:                           %5d\n", icc.size );
     
                 memcpy( acHeader, &icc.cmmType, 4 );
                 acHeader[ 4 ] = 0;
-                printf( "  cmm type:                           %s (%#x)\n", acHeader, icc.cmmType );
+                prf( "  cmm type:                           %s (%#x)\n", acHeader, icc.cmmType );
     
-                printf( "  version:                            %d.%d.%d\n", icc.version & 0xff, ( icc.version >> 12 ) & 0xf, ( icc.version >> 8 ) & 0xf );
-                printf( "  profile class:                      %s (%#x)\n", GetICCProfileClass( icc.profileClass ), icc.profileClass );
+                prf( "  version:                            %d.%d.%d\n", icc.version & 0xff, ( icc.version >> 12 ) & 0xf, ( icc.version >> 8 ) & 0xf );
+                prf( "  profile class:                      %s (%#x)\n", GetICCProfileClass( icc.profileClass ), icc.profileClass );
     
                 memcpy( acHeader, &icc.colorSpace, 4 );
                 acHeader[ 4 ] = 0;
-                printf( "  color space:                        %s (%#x)\n", acHeader, icc.colorSpace );
+                prf( "  color space:                        %s (%#x)\n", acHeader, icc.colorSpace );
     
                 memcpy( acHeader, &icc.pcs, 4 );
                 acHeader[ 4 ] = 0;
-                printf( "  connection space:                   %s (%#x)\n", acHeader, icc.pcs );
+                prf( "  connection space:                   %s (%#x)\n", acHeader, icc.pcs );
     
-                printf( "  dd/mm/yyyy hh:mm:ss:                %02d/%02d/%04d %02d:%02d:%02d\n", icc.day, icc.month, icc.year, icc.hours, icc.minutes, icc.seconds );
+                prf( "  dd/mm/yyyy hh:mm:ss:                %02d/%02d/%04d %02d:%02d:%02d\n", icc.day, icc.month, icc.year, icc.hours, icc.minutes, icc.seconds );
     
                 memcpy( acHeader, &icc.signature, 4 );
                 acHeader[ 4 ] = 0;
-                printf( "  signature:                          %s (%#x)\n", acHeader, icc.signature );
+                prf( "  signature:                          %s (%#x)\n", acHeader, icc.signature );
     
                 memcpy( acHeader, &icc.platform, 4 );
                 acHeader[ 4 ] = 0;
-                printf( "  primary platform:                   %s (%#x)\n", acHeader, icc.platform );
+                prf( "  primary platform:                   %s (%#x)\n", acHeader, icc.platform );
     
-                printf( "  cmm flags:                          %s, %s\n", ( icc.options & 0x1 ) ? "embedded" : "not embedded", ( icc.options & 0x2 ) ? "not independent" : "independent" );
+                prf( "  cmm flags:                          %s, %s\n", ( icc.options & 0x1 ) ? "embedded" : "not embedded", ( icc.options & 0x2 ) ? "not independent" : "independent" );
     
                 memcpy( acHeader, &icc.manufacturer, 4 );
                 acHeader[ 4 ] = 0;
-                printf( "  manufacturer:                       %s (%#x)\n", acHeader, icc.manufacturer );
+                prf( "  manufacturer:                       %s (%#x)\n", acHeader, icc.manufacturer );
     
                 memcpy( acHeader, &icc.model, 4 );
                 acHeader[ 4 ] = 0;
-                printf( "  model:                              %s (%#x)\n", acHeader, icc.model );
+                prf( "  model:                              %s (%#x)\n", acHeader, icc.model );
     
-                printf( "  attributes:                         %s, %s, %s, %s\n", ( icc.attributes & 0x1 ) ? "transparency" : "reflective",
+                prf( "  attributes:                         %s, %s, %s, %s\n", ( icc.attributes & 0x1 ) ? "transparency" : "reflective",
                                                                                   ( icc.attributes & 0x2 ) ? "matte" : "glossy",
                                                                                   ( icc.attributes & 0x4 ) ? "polarity negative" : "polarity positive",
                                                                                   ( icc.attributes & 0x8 ) ? "black and white media" : "color media" );
     
-                printf( "  rendering intent:                   %s\n", GetICCRenderingIntent( icc.intent & 0xffff ) );
+                prf( "  rendering intent:                   %s\n", GetICCRenderingIntent( icc.intent & 0xffff ) );
     
-                printf( "  illuminant:                         %lf, %lf, %lf\n", ConvertS15Fixed16Number( icc.illuminantX ),
+                prf( "  illuminant:                         %lf, %lf, %lf\n", ConvertS15Fixed16Number( icc.illuminantX ),
                                                                                  ConvertS15Fixed16Number( icc.illuminantY ),
                                                                                  ConvertS15Fixed16Number( icc.illuminantZ ) );
                 memcpy( acHeader, &icc.creator, 4 );
                 acHeader[ 4 ] = 0;
-                printf( "  creator:                            %s (%#x)\n", acHeader, icc.creator );
+                prf( "  creator:                            %s (%#x)\n", acHeader, icc.creator );
     
-                printf( "  profile id:                         " );
+                prf( "  profile id:                         " );
                 for ( size_t i = 0; i < _countof( icc.id ); i++ )
-                    printf( "%#x", icc.id[ i ] );
-                printf( "\n" );
+                    prf( "%#x", icc.id[ i ] );
+                prf( "\n" );
     
                 //printf( "data_length and sizeof icc: %d %d\n", data_length, (int) sizeof icc );
     
@@ -4337,7 +4399,7 @@ int ParseOldJpg( DWORD startingOffset = 0 )
     
                     DWORD tagCount = GetDWORD( currentOffset, false );
                     currentOffset += 4;
-                    printf( "ICC tag table has %d entries\n", tagCount );
+                    prf( "ICC tag table has %d entries\n", tagCount );
     
                     for ( DWORD tag = 0; tag < tagCount; tag++ )
                     {
@@ -4361,7 +4423,7 @@ int ParseOldJpg( DWORD startingOffset = 0 )
             DWORD o = offset + 4;
 
             BYTE numberOfComponents = GetBYTE( o++ );
-            printf( "number of components:                 %d\n", numberOfComponents );
+            prf( "number of components:                 %d\n", numberOfComponents );
 
             if ( numberOfComponents > 4 )
                 numberOfComponents = 4;
@@ -4380,8 +4442,8 @@ int ParseOldJpg( DWORD startingOffset = 0 )
                 if ( g_FullInformation )
                 {
                     BYTE c = c_ID[ i ];
-                    printf( "  Component ID [%d]: %s", i, ( 1 == c ) ? "Y" : ( 2 == c ) ? "Cb" : ( 3 == c ) ? "Cr" : ( 4 == c ) ? "I" : ( 5 == c ) ? "Q" : "unknown" );
-                    printf( " -- DC table: %d, AC table %d\n", c_Huff[ i ] & 0xf, c_Huff[ i ] >> 4 );
+                    prf( "  Component ID [%d]: %s", i, ( 1 == c ) ? "Y" : ( 2 == c ) ? "Cb" : ( 3 == c ) ? "Cr" : ( 4 == c ) ? "I" : ( 5 == c ) ? "Q" : "unknown" );
+                    prf( " -- DC table: %d, AC table %d\n", c_Huff[ i ] & 0xf, c_Huff[ i ] >> 4 );
                 }
             }
 
@@ -4391,7 +4453,7 @@ int ParseOldJpg( DWORD startingOffset = 0 )
         }
         else if ( MARKER_PS3 == segment )
         {
-            printf( "photoshop irb data:\n" );
+            prf( "photoshop irb data:\n" );
 
             DumpBinaryData( offset + 4, 0, data_length, 8, 0 );
         }
@@ -4402,7 +4464,7 @@ int ParseOldJpg( DWORD startingOffset = 0 )
             app1Header[4] = 0;
 
             if ( g_FullInformation )
-                printf( "app1 header: %s\n", app1Header );
+                prf( "app1 header: %s\n", app1Header );
 
             if ( !stricmp( app1Header, "exif" ) )
             {
@@ -4422,15 +4484,15 @@ int ParseOldJpg( DWORD startingOffset = 0 )
                 bytes.get()[ data_length ] = 0;
                 int headerlen = strlen( bytes.get() );
 
-                printf( "adobe header: %s\n", bytes.get() );
-                printf( "adobe data:   %s\n", bytes.get() + headerlen + 1 );
+                prf( "adobe header: %s\n", bytes.get() );
+                prf( "adobe data:   %s\n", bytes.get() + headerlen + 1 );
                 PrintXMPData( bytes.get() + headerlen + 1 );
             }
         }
         else if ( MARKER_DRI == segment )
         {
             WORD restart_interval = GetWORD( offset + 4, false );
-            printf( "define restart interval:   %12d\n", restart_interval );
+            prf( "define restart interval:   %12d\n", restart_interval );
         }
         else if ( MARKER_APP14 == segment )
         {
@@ -4441,15 +4503,15 @@ int ParseOldJpg( DWORD startingOffset = 0 )
             WORD App14Flags1 = GetWORD( app14_offset + 4, false );
             WORD ColorTransform = GetBYTE( app14_offset + 5 );
 
-            printf( "app14 Adobe data:\n" );
-            printf( "  DCT encode version:      %12d\n", DCTEncodeVersion );
-            printf( "  app14 flags0:            %12d\n", App14Flags0 );
-            printf( "  app14 flags1:            %12d\n", App14Flags1 );
-            printf( "  color transform:         %12d (%s)\n", ColorTransform, GetJPGApp14ColorTransform( ColorTransform ) );
+            prf( "app14 Adobe data:\n" );
+            prf( "  DCT encode version:      %12d\n", DCTEncodeVersion );
+            prf( "  app14 flags0:            %12d\n", App14Flags0 );
+            prf( "  app14 flags1:            %12d\n", App14Flags1 );
+            prf( "  color transform:         %12d (%s)\n", ColorTransform, GetJPGApp14ColorTransform( ColorTransform ) );
         }
         else
         {
-            printf( "unparsed segment %#x data_length %d\n", segment, data_length );
+            prf( "unparsed segment %#x data_length %d\n", segment, data_length );
             DumpBinaryData( offset + 4, 0, data_length, 8, offset + 4 );
         }
 
@@ -4525,7 +4587,7 @@ const WCHAR * LookupFlacField( const WCHAR * pwcField )
 
 void EnumerateFlac()
 {
-    printf( "mimetype:                             audio/flac\n" );
+    prf( "mimetype:                             audio/flac\n" );
 
     // Data is big-endian!
 
@@ -4541,7 +4603,7 @@ void EnumerateFlac()
         ULONG length = blockHeader & 0xffffff;
 
         if ( g_FullInformation )
-            printf( "FLAC header %#x, last block %d, block type %d, length %d, offset %#x\n", blockHeader, lastBlock, blockType, length, offset );
+            prf( "FLAC header %#x, last block %d, block type %d, length %d, offset %#x\n", blockHeader, lastBlock, blockType, length, offset );
 
         // protect against malformed files
 
@@ -4577,18 +4639,18 @@ void EnumerateFlac()
             DWORD lengthInMinutes = lengthInSeconds / 60;
             DWORD remainderSeconds = lengthInSeconds % 60;
 
-            printf( "Stream Info:\n" );
+            prf( "Stream Info:\n" );
 
-            printf( "  Minimum block size      %13d\n", minBlockSize );
-            printf( "  Maximum block size      %13d\n", maxBlockSize );
-            printf( "  Minimum frame size      %13d\n", minFrameSize );
-            printf( "  Maximum frame size      %13d\n", maxFrameSize );
-            printf( "  Sample rate per sec     %13d\n", sampleRate );
-            printf( "  Channel count           %13d\n", channelCount );
-            printf( "  Bits per sample         %13d\n", bitsPerSample );
-            printf( "  Samples                 %13I64d\n", ullSamples );
-            printf( "  Length in min:sec       %10d:%02d\n", lengthInMinutes, remainderSeconds );
-            printf( "  MD5 signature                       " );
+            prf( "  Minimum block size      %13d\n", minBlockSize );
+            prf( "  Maximum block size      %13d\n", maxBlockSize );
+            prf( "  Minimum frame size      %13d\n", minFrameSize );
+            prf( "  Maximum frame size      %13d\n", maxFrameSize );
+            prf( "  Sample rate per sec     %13d\n", sampleRate );
+            prf( "  Channel count           %13d\n", channelCount );
+            prf( "  Bits per sample         %13d\n", bitsPerSample );
+            prf( "  Samples                 %13I64d\n", ullSamples );
+            prf( "  Length in min:sec       %10d:%02d\n", lengthInMinutes, remainderSeconds );
+            prf( "  MD5 signature                       " );
 
             DWORD o = offset + 4 + 6 + 8;
 
@@ -4596,15 +4658,15 @@ void EnumerateFlac()
             {
                 DWORD x = GetDWORD( o, false );
                 o += 4;
-                printf( "%08x", x );
+                prf( "%08x", x );
             }
-            printf( "\n" );
+            prf( "\n" );
         }
         else if ( 4 == blockType )
         {
             // Vorbis_comment. This data is little-endian, unlike the rest of FLAC files
 
-            printf( "Comments:\n" );
+            prf( "Comments:\n" );
 
             DWORD o = offset;
             DWORD vendorLength = GetDWORD( o, true );
@@ -4612,7 +4674,7 @@ void EnumerateFlac()
             unique_ptr<WCHAR> vendor( GetUTF8( o, vendorLength ) );
             o += vendorLength;
 
-            printf( "  Vendor                              %ws\n", vendor.get() );
+            wprf( L"  Vendor                              %ws\n", vendor.get() );
 
             DWORD items = GetDWORD( o, true );
             o += 4;
@@ -4636,23 +4698,15 @@ void EnumerateFlac()
                     const WCHAR * pwcName = LookupFlacField( field );
 
                     if ( NULL == pwcName )
-                        wprintf( L"  %ws\n", item.get() );
+                        wprf( L"  %ws\n", item.get() );
                     else
                     {
                         const WCHAR * value = equal + 1;
 
                         if ( !wcscmp( pwcName, L"Lyrics" ) )// && ( !wcschr( value, L'\r' ) || !wcschr( value, L'\n' ) ) )
-                        {
-                            wprintf( L"  %-15ws\n", pwcName );
-                            printWide( value );
-                            wprintf( L"\n" );
-                        }
+                            wprf( L"  %-15ws\n%ws\n", pwcName, value );
                         else
-                        {
-                            wprintf( L"  %-15ws                     ", pwcName );
-                            printWide( value );
-                            wprintf( L"\n" );
-                        }
+                            wprf( L"  %-15ws                     %ws\n", pwcName, value );
                     }
                 }
             }
@@ -4661,43 +4715,43 @@ void EnumerateFlac()
         {
             // Picture
 
-            printf( "Picture:\n" );
+            prf( "Picture:\n" );
 
             DWORD o = offset;
 
             DWORD pictureType = GetDWORD( o, false );
-            printf( "  Picture type            %13d ", pictureType );
+            prf( "  Picture type            %13d ", pictureType );
 
-            if ( 0 == pictureType ) printf( "Other" );
-            else if ( 1 == pictureType ) printf( "32x32 pixels 'file icon' (PNG only)" );
-            else if ( 2 == pictureType ) printf( "Other file icon" );
-            else if ( 3 == pictureType ) printf( "Cover (front)" );
-            else if ( 4 == pictureType ) printf( "Cover (back)" );
-            else if ( 5 == pictureType ) printf( "Leaflet page" );
-            else if ( 6 == pictureType ) printf( "Media (e.g. label side of CD)" );
-            else if ( 7 == pictureType ) printf( "Lead artist/lead performer/soloist" );
-            else if ( 8 == pictureType ) printf( "Artist/performer" );
-            else if ( 9 == pictureType ) printf( "Conductor" );
-            else if ( 10 == pictureType ) printf( "Band/Orchestra" );
-            else if ( 11 == pictureType ) printf( "Composer" );
-            else if ( 12 == pictureType ) printf( "Lyricist/text writer" );
-            else if ( 13 == pictureType ) printf( "Recording Location" );
-            else if ( 14 == pictureType ) printf( "During recording" );
-            else if ( 15 == pictureType ) printf( "During performance" );
-            else if ( 16 == pictureType ) printf( "Movie/video screen capture" );
-            else if ( 17 == pictureType ) printf( "A bright coloured fish" );
-            else if ( 18 == pictureType ) printf( "Illustration" );
-            else if ( 19 == pictureType ) printf( "Band/artist logotype" );
-            else if ( 20 == pictureType ) printf( "Publisher/Studio logotype" );
-            else printf( "(Unknown pictureType)" );
+            if ( 0 == pictureType ) prf( "Other" );
+            else if ( 1 == pictureType ) prf( "32x32 pixels 'file icon' (PNG only)" );
+            else if ( 2 == pictureType ) prf( "Other file icon" );
+            else if ( 3 == pictureType ) prf( "Cover (front)" );
+            else if ( 4 == pictureType ) prf( "Cover (back)" );
+            else if ( 5 == pictureType ) prf( "Leaflet page" );
+            else if ( 6 == pictureType ) prf( "Media (e.g. label side of CD)" );
+            else if ( 7 == pictureType ) prf( "Lead artist/lead performer/soloist" );
+            else if ( 8 == pictureType ) prf( "Artist/performer" );
+            else if ( 9 == pictureType ) prf( "Conductor" );
+            else if ( 10 == pictureType ) prf( "Band/Orchestra" );
+            else if ( 11 == pictureType ) prf( "Composer" );
+            else if ( 12 == pictureType ) prf( "Lyricist/text writer" );
+            else if ( 13 == pictureType ) prf( "Recording Location" );
+            else if ( 14 == pictureType ) prf( "During recording" );
+            else if ( 15 == pictureType ) prf( "During performance" );
+            else if ( 16 == pictureType ) prf( "Movie/video screen capture" );
+            else if ( 17 == pictureType ) prf( "A bright coloured fish" );
+            else if ( 18 == pictureType ) prf( "Illustration" );
+            else if ( 19 == pictureType ) prf( "Band/artist logotype" );
+            else if ( 20 == pictureType ) prf( "Publisher/Studio logotype" );
+            else prf( "(Unknown pictureType)" );
 
-            printf( "\n" );
+            prf( "\n" );
             o += 4;
 
             DWORD mimeTypeBytes = GetDWORD( o, false );
             if ( mimeTypeBytes > 1000 )
             {
-                printf( "malformed mime type bytes? %#x\n", mimeTypeBytes );
+                prf( "malformed mime type bytes? %#x\n", mimeTypeBytes );
                 return;
             }
 
@@ -4707,14 +4761,14 @@ void EnumerateFlac()
             mimeType.get()[ mimeTypeBytes ] = 0;
             g_pStream->Seek( o );
             g_pStream->Read( mimeType.get(), mimeTypeBytes );
-            printf( "  mime type                           %s\n", mimeType.get() );
+            prf( "  mime type                           %s\n", mimeType.get() );
 
             o += mimeTypeBytes;
 
             DWORD descriptionBytes = GetDWORD( o, false );
             if ( descriptionBytes > 1000 )
             {
-                printf( "malformed description bytes? %#x\n", descriptionBytes );
+                prf( "malformed description bytes? %#x\n", descriptionBytes );
                 return;
             }
 
@@ -4724,28 +4778,28 @@ void EnumerateFlac()
             description.get()[ descriptionBytes ] = 0;
             g_pStream->Seek( o );
             g_pStream->Read( description.get(), descriptionBytes );
-            printf( "  Description             %s\n", description.get() );
+            prf( "  Description             %s\n", description.get() );
 
             o += descriptionBytes;
 
             DWORD width = GetDWORD( o, false );
-            printf( "  Width                   %13d\n", width );
+            prf( "  Width                   %13d\n", width );
             o += 4;
 
             DWORD height = GetDWORD( o, false );
-            printf( "  Height                  %13d\n", height );
+            prf( "  Height                  %13d\n", height );
             o += 4;
 
             DWORD bpp = GetDWORD( o, false );
-            printf( "  Bits per pixel          %13d\n", bpp );
+            prf( "  Bits per pixel          %13d\n", bpp );
             o += 4;
 
             DWORD indexedColors = GetDWORD( o, false );
-            printf( "  Indexed colors          %13d\n", indexedColors );
+            prf( "  Indexed colors          %13d\n", indexedColors );
             o += 4;
 
             DWORD imageLength = GetDWORD( o, false );
-            printf( "  Image size              %13d\n", imageLength );
+            prf( "  Image size              %13d\n", imageLength );
             o += 4;
 
             if ( ( imageLength > 2 ) && IsPerhapsAnImage( o, 0 ) )
@@ -4849,7 +4903,7 @@ void EnumerateBoxes( HeifStream & hs, DWORD depth )
     do
     {
         if ( g_FullInformation )
-            printf( "%*soffset %I64d, length %I64d\n", indent, "", offset, hs.Length() );
+            prf( "%*soffset %I64d, length %I64d\n", indent, "", offset, hs.Length() );
 
         if ( ( 0 == hs.Length() ) || ( offset >= hs.Length() ) )
             break;
@@ -4878,13 +4932,13 @@ void EnumerateBoxes( HeifStream & hs, DWORD depth )
 
         if ( boxLen > hs.Length() )
         {
-            printf( "box length %lld is greater than the substream length %lld\n", boxLen, hs.Length() );
+            prf( "box length %lld is greater than the substream length %lld\n", boxLen, hs.Length() );
             break;
         }
 
         if ( g_FullInformation )
         {
-            printf( "%*sbox %d::%d has length %I64d and tag %s\n", indent, "", depth, box, boxLen, tag );
+            prf( "%*sbox %d::%d has length %I64d and tag %s\n", indent, "", depth, box, boxLen, tag );
 
             ULONGLONG toshow = __min( boxLen, 0x100 );
 
@@ -5121,9 +5175,9 @@ void EnumerateBoxes( HeifStream & hs, DWORD depth )
             BYTE bitDepthChroma = ( hs.GetBYTE( offset ) & 0x7 ) + 8;
             WORD avgFrameRate = hs.GetWORD( offset, false );
 
-            printf( "Heif hvvC metadata (non-Exif):\n" );
-            printf( "  Luma Bit Depth:      %d\n", bitDepthLuma );
-            printf( "  Chroma Bit Depth:    %d\n", bitDepthChroma );
+            prf( "Heif hvvC metadata (non-Exif):\n" );
+            prf( "  Luma Bit Depth:      %d\n", bitDepthLuma );
+            prf( "  Chroma Bit Depth:    %d\n", bitDepthChroma );
         }
         else if ( !strcmp( tag, "iprp" ) )
         {
@@ -5155,7 +5209,7 @@ void EnumerateBoxes( HeifStream & hs, DWORD depth )
             }
 
             if ( g_FullInformation )
-                printf( "%*s  tag uuid: {%s}\n", indent, "", acGUID );
+                prf( "%*s  tag uuid: {%s}\n", indent, "", acGUID );
 
             if ( !strcmp( "85c0b687820f11e08111f4ce462b6a48", acGUID ) )
             {
@@ -5177,7 +5231,7 @@ void EnumerateBoxes( HeifStream & hs, DWORD depth )
 
             if ( !strcmp( "be7acfcb97a942e89c71999491e3afac", acGUID ) )
             {
-                // printf( "found cr3 xmp data box\n" );
+                // prf( "found cr3 xmp data box\n" );
 
                 ULONGLONG xmpLen = boxLen - ( offset - boxOffset );
                 //printf( "xmpLen: %lld\n", xmpLen );
@@ -5212,7 +5266,7 @@ void EnumerateBoxes( HeifStream & hs, DWORD depth )
         }
         else if ( !strcmp( tag, "PRVW" ) )
         {
-            printf( "PREVIEWPREVIEWPREVIEW!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n" );
+            prf( "PREVIEWPREVIEWPREVIEW!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n" );
             DWORD unk = hs.GetDWORD( offset, false );
             WORD unkW = hs.GetWORD( offset, false );
             WORD width = hs.GetWORD( offset, false );
@@ -5288,7 +5342,7 @@ void EnumerateHeif( CStream * pStream )
     EnumerateBoxes( hs, 0 );
 
     if ( g_FullInformation )
-        printf( "Heif EXIF info: id %d, offset %I64d, length %I64d\n", g_Heif_Exif_ItemID, g_Heif_Exif_Offset, g_Heif_Exif_Length );
+        prf( "Heif EXIF info: id %d, offset %I64d, length %I64d\n", g_Heif_Exif_ItemID, g_Heif_Exif_Offset, g_Heif_Exif_Length );
 } //EnumerateHeif
 
 const char * GetOrientation( int o )
@@ -5359,21 +5413,21 @@ void EnumerateIFD0( int depth, __int64 IFDOffset, __int64 headerBase, bool littl
         if ( NumTags > MaxIFDHeaders )
         {
             Space( depth );
-            printf( "numtags is > 200; it's likely not in EXIF format, so the data may be noise. skipping\n" );
+            prf( "numtags is > 200; it's likely not in EXIF format, so the data may be noise. skipping\n" );
             break;
         }
     
         if ( !GetIFDHeaders( IFDOffset + headerBase, aHeaders.data(), NumTags, littleEndian ) )
         {
             Space( depth );
-            printf( "IFD0 has a tag that's invalid. skipping\n" );
+            prf( "IFD0 has a tag that's invalid. skipping\n" );
             break;
         }
 
         if ( g_FullInformation )
         {
             Space( depth );
-            printf( "IFD0 directory with %d tags\n", NumTags );
+            prf( "IFD0 directory with %d tags\n", NumTags );
         }
 
         for ( int i = 0; i < NumTags; i++ )
@@ -5384,7 +5438,7 @@ void EnumerateIFD0( int depth, __int64 IFDOffset, __int64 headerBase, bool littl
             if ( g_FullInformation )
             {
                 Space( depth );
-                printf( "IFD%d tag %d ID %d==%#x, type %d, count %d, offset/value %d==%#x, o %lld\n", currentIFD, i, head.id, head.id, head.type, head.count, head.offset, head.offset, IFDOffset + headerBase );
+                prf( "IFD%d tag %d ID %d==%#x, type %d, count %d, offset/value %d==%#x, o %lld\n", currentIFD, i, head.id, head.id, head.type, head.count, head.offset, head.offset, IFDOffset + headerBase );
             }
 
             Space( depth );
@@ -5401,30 +5455,30 @@ void EnumerateIFD0( int depth, __int64 IFDOffset, __int64 headerBase, bool littl
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "ProcessingSoftware:                   %s\n", acBuffer );
+                prf( "ProcessingSoftware:                   %s\n", acBuffer );
             }
             else if ( 254 == head.id && IsIntType( head.type ) )
             {
                 likelyRAW = ( 0 == ( 1 & head.offset ) );
-                printf( "NewSubfileType:                       %#x (%s)\n", head.offset, likelyRAW ? "main RAW image" : "reduced resolution copy" );
+                prf( "NewSubfileType:                       %#x (%s)\n", head.offset, likelyRAW ? "main RAW image" : "reduced resolution copy" );
             }
             else if ( 255 == head.id && IsIntType( head.type ) )
-                printf( "SubfileType:                          %d\n", head.offset );
+                prf( "SubfileType:                          %d\n", head.offset );
             else if ( 256 == head.id && IsIntType( head.type ) )
-                printf( "ImageWidth:                           %d\n", head.offset );
+                prf( "ImageWidth:                           %d\n", head.offset );
             else if ( 257 == head.id && IsIntType( head.type ) )
-                printf( "ImageHeight:                          %d\n", head.offset );
+                prf( "ImageHeight:                          %d\n", head.offset );
             else if ( 258 == head.id && 3 == head.type && 2 == head.count )
             {
                 lastBitsPerSample = GetWORD( head.offset + headerBase, littleEndian );
-                printf( "BitsPerSample:                        %d, %d\n",
+                prf( "BitsPerSample:                        %d, %d\n",
                         GetWORD( head.offset + headerBase, littleEndian ),
                         GetWORD( head.offset + headerBase + 2, littleEndian ) );
             }
             else if ( 258 == head.id && 3 == head.type && 3 == head.count )
             {
                 lastBitsPerSample = GetWORD( head.offset + headerBase, littleEndian );
-                printf( "BitsPerSample:                        %d, %d, %d\n",
+                prf( "BitsPerSample:                        %d, %d, %d\n",
                         GetWORD( head.offset + headerBase, littleEndian ),
                         GetWORD( head.offset + headerBase + 2, littleEndian ),
                         GetWORD( head.offset + headerBase + 4, littleEndian ) );
@@ -5432,45 +5486,45 @@ void EnumerateIFD0( int depth, __int64 IFDOffset, __int64 headerBase, bool littl
             else if ( 258 == head.id && 3 == head.type && 4 == head.count )
             {
                 lastBitsPerSample = GetWORD( head.offset + headerBase, littleEndian );
-                printf( "BitsPerSample:                        %d, %d, %d %d\n",
+                prf( "BitsPerSample:                        %d, %d, %d %d\n",
                         GetWORD( head.offset + headerBase, littleEndian ),
                         GetWORD( head.offset + headerBase + 2, littleEndian ),
                         GetWORD( head.offset + headerBase + 4, littleEndian ),
                         GetWORD( head.offset + headerBase + 6, littleEndian ) );
             }
             else if ( 258 == head.id && 3 == head.type && 1 == head.count )
-                printf( "BitsPerSample:                        %d\n", head.offset );
+                prf( "BitsPerSample:                        %d\n", head.offset );
             else if ( 259 == head.id && IsIntType( head.type ) )
-                printf( "Compression:                          %d (%s)\n", head.offset, CompressionType( head.offset ) );
+                prf( "Compression:                          %d (%s)\n", head.offset, CompressionType( head.offset ) );
             else if ( 262 == head.id && IsIntType( head.type ) )
-                printf( "PhotometricIntperpretation:           %d (%s)\n", head.offset, PhotometricInterpretationString( head.offset ) );
+                prf( "PhotometricIntperpretation:           %d (%s)\n", head.offset, PhotometricInterpretationString( head.offset ) );
             else if ( 266 == head.id && 3 == head.type )
-                printf( "FillOrder:                            %d (%s)\n", head.offset, ExifFillOrder( head.offset ) );
+                prf( "FillOrder:                            %d (%s)\n", head.offset, ExifFillOrder( head.offset ) );
             else if ( 269 == head.id && 2 == head.type )
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "DocumentName:                         %s\n", acBuffer );
+                prf( "DocumentName:                         %s\n", acBuffer );
             }
             else if ( 270 == head.id  && 2 == head.type )
             {
                 char acImageDescription[ 100 ];
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acImageDescription, _countof( acImageDescription ), head.count );
-                printf( "ImageDescription:                     %s\n", acImageDescription );
+                prf( "ImageDescription:                     %s\n", acImageDescription );
             }
             else if ( 271 == head.id  && 2 == head.type )
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, g_acMake, _countof( g_acMake ), head.count );
 
-                printf( "Make:                                 %s\n", g_acMake );
+                prf( "Make:                                 %s\n", g_acMake );
             }
             else if ( 272 == head.id && 2 == head.type )
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, g_acModel, _countof( g_acModel ), head.count );
-                printf( "Model:                                %s\n", g_acModel );
+                prf( "Model:                                %s\n", g_acModel );
 
                 WCHAR awcModel[ 100 ];
                 mbstowcs( awcModel, g_acModel, _countof( awcModel ) );
@@ -5482,20 +5536,20 @@ void EnumerateIFD0( int depth, __int64 IFDOffset, __int64 headerBase, bool littl
             }
             else if ( 273 == head.id && IsIntType( head.type ) )
             {
-                printf( "StripOffsets:                         %d\n", head.offset );
+                prf( "StripOffsets:                         %d\n", head.offset );
 
                 if ( 0 != head.offset && 0xffffffff != head.offset && !likelyRAW && IsPerhapsAnImage( head.offset, headerBase ) )
                     provisionalJPGOffset = head.offset + headerBase;
             }
             else if ( 274 == head.id && IsIntType( head.type ) )
-                printf( "Orientation:                          %d (%s)\n", head.offset, GetOrientation( head.offset ) );
+                prf( "Orientation:                          %d (%s)\n", head.offset, GetOrientation( head.offset ) );
             else if ( 277 == head.id && IsIntType( head.type ) )
-                printf( "SamplesPerPixel:                      %d\n", head.offset );
+                prf( "SamplesPerPixel:                      %d\n", head.offset );
             else if ( 278 == head.id && IsIntType( head.type ) )
-                printf( "RowsPerStrip:                         %d\n", head.offset );
+                prf( "RowsPerStrip:                         %d\n", head.offset );
             else if ( 279 == head.id && IsIntType( head.type ) )
             {
-                printf( "StripByteCounts:                      %d\n", head.offset );
+                prf( "StripByteCounts:                      %d\n", head.offset );
                 //printf( "!!!!!! lastBitsPerSample %d, length %d, likelyRAW %d provisionalOffset %lld\n", lastBitsPerSample, head.offset, likelyRAW, provisionalJPGOffset );
 
                 if ( ( lastBitsPerSample != 16 ) && 0 != provisionalJPGOffset && 0 != head.offset && 0xffffffff != head.offset && !likelyRAW && ( head.offset > g_Embedded_Image_Length ) )
@@ -5508,84 +5562,84 @@ void EnumerateIFD0( int depth, __int64 IFDOffset, __int64 headerBase, bool littl
             else if ( 280 == head.id && 3 == head.type )
             {
                 if ( 1 == head.count )
-                    printf( "Min Sample Value:                     %d\n", head.offset );
+                    prf( "Min Sample Value:                     %d\n", head.offset );
                 else if ( 3 == head.count )
                 {
                     WORD w1 = GetWORD( head.offset + headerBase, littleEndian );
                     WORD w2 = GetWORD( head.offset + headerBase + 2, littleEndian );
                     WORD w3 = GetWORD( head.offset + headerBase + 4, littleEndian );
-                    printf( "Min Sample Values:                    %d, %d, %d\n", w1, w2, w3 );
+                    prf( "Min Sample Values:                    %d, %d, %d\n", w1, w2, w3 );
                 }
             }
             else if ( 281 == head.id && 3 == head.type )
             {
                 if ( 1 == head.count )
-                    printf( "Max Sample Value:                     %d\n", head.offset );
+                    prf( "Max Sample Value:                     %d\n", head.offset );
                 else if ( 3 == head.count )
                 {
                     WORD w1 = GetWORD( head.offset + headerBase, littleEndian );
                     WORD w2 = GetWORD( head.offset + headerBase + 2, littleEndian );
                     WORD w3 = GetWORD( head.offset + headerBase + 4, littleEndian );
-                    printf( "Max Sample Values:                    %d, %d, %d\n", w1, w2, w3 );
+                    prf( "Max Sample Values:                    %d, %d, %d\n", w1, w2, w3 );
                 }
             }
             else if ( 282 == head.id && 3 == head.type )
-                printf( "XResolution:                          %d\n", head.offset );
+                prf( "XResolution:                          %d\n", head.offset );
             else if ( 282 == head.id && ( ( 5 == head.type ) || ( 10 == head.type ) ) )
             {
                 DWORD num = GetDWORD( head.offset + headerBase, littleEndian );
                 DWORD den = GetDWORD( head.offset + headerBase + 4, littleEndian );
-                printf( "XResolution:                          %d / %d = %lf\n", num, den, (double) num / (double) den );
+                prf( "XResolution:                          %d / %d = %lf\n", num, den, (double) num / (double) den );
             }
             else if ( 283 == head.id && ( ( 5 == head.type ) || ( 10 == head.type ) ) )
             {
                 DWORD num = GetDWORD( head.offset + headerBase, littleEndian );
                 DWORD den = GetDWORD( head.offset + headerBase + 4, littleEndian );
-                printf( "YResolution:                          %d / %d = %lf\n", num, den, (double) num / (double) den );
+                prf( "YResolution:                          %d / %d = %lf\n", num, den, (double) num / (double) den );
             }
             else if ( 284 == head.id && IsIntType( head.type ) )
-                printf( "PlanarConfiguration:                  %d\n", head.offset );
+                prf( "PlanarConfiguration:                  %d\n", head.offset );
             else if ( 285 == head.id && 2 == head.type )
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "PageName:                             %s\n", acBuffer );
+                prf( "PageName:                             %s\n", acBuffer );
             }
             else if ( 296 == head.id && IsIntType( head.type ) )
-                printf( "ResolutionUnit:                       %s (%d)\n", ResolutionUnit( head.offset ), head.offset );
+                prf( "ResolutionUnit:                       %s (%d)\n", ResolutionUnit( head.offset ), head.offset );
             else if ( 297 == head.id && 3 == head.type && 2 == head.count )
             {
                  WORD low = head.offset & 0xffff;
                  WORD high = ( head.offset >> 16 ) & 0xffff;
 
-                 printf( "PageNumber:                          %d, %d\n", low, high );
+                 prf( "PageNumber:                          %d, %d\n", low, high );
             }
             else if ( 305 == head.id && 2 == head.type )
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "Software:                             %s\n", acBuffer );
+                prf( "Software:                             %s\n", acBuffer );
             }
             else if ( 306 == head.id && 2 == head.type )
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "DateTime:                             %s\n", acBuffer );
+                prf( "DateTime:                             %s\n", acBuffer );
             }
             else if ( 315 == head.id && 2 == head.type )
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "Artist:                               %s\n", acBuffer );
+                prf( "Artist:                               %s\n", acBuffer );
             }
             else if ( 316 == head.id && 2 == head.type )
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "HostComputer:                         %s\n", acBuffer );
+                prf( "HostComputer:                         %s\n", acBuffer );
             }
             else if ( 317 == head.id && 3 == head.type && 1 == head.count )
-                printf( "Predictor:                            %s\n", ExifPredictor( head.offset ) );
+                prf( "Predictor:                            %s\n", ExifPredictor( head.offset ) );
             else if ( 318 == head.id && 5 == head.type && 2 == head.count )
             {
                 LONG num1 = GetDWORD( head.offset +      headerBase, littleEndian );
@@ -5596,7 +5650,7 @@ void EnumerateIFD0( int depth, __int64 IFDOffset, __int64 headerBase, bool littl
                 LONG den2 = GetDWORD( head.offset + 12 + headerBase, littleEndian );
                 double d2 = (double) num2 / (double) den2;
 
-                printf( "WhitePoint:                           %lf, %lf\n", d1, d2 );
+                prf( "WhitePoint:                           %lf, %lf\n", d1, d2 );
             }
             else if ( 319 == head.id && 5 == head.type && 6 == head.count )
             {
@@ -5624,18 +5678,18 @@ void EnumerateIFD0( int depth, __int64 IFDOffset, __int64 headerBase, bool littl
                 LONG den6 = GetDWORD( head.offset + 44 + headerBase, littleEndian );
                 double d6 = (double) num6 / (double) den6;
 
-                printf( "PrimaryChromaticities:                %lf, %lf, %lf, %lf, %lf, %lf\n", d1, d2, d3, d4, d5, d6 );
+                prf( "PrimaryChromaticities:                %lf, %lf, %lf, %lf, %lf, %lf\n", d1, d2, d3, d4, d5, d6 );
             }
             else if ( 320 == head.id && 3 == head.type )
-                printf( "Colormap                              %d entries\n", head.count );
+                prf( "Colormap                              %d entries\n", head.count );
             else if ( 322 == head.id && 4 == head.type )
-                printf( "TileWidth                             %d\n", head.offset );
+                prf( "TileWidth                             %d\n", head.offset );
             else if ( 323 == head.id && 4 == head.type )
-                printf( "TileLength                            %d\n", head.offset );
+                prf( "TileLength                            %d\n", head.offset );
             else if ( 330 == head.id && 4 == head.type )
             {
-                printf( "Child IFDs (%d of them) at offset %d\n", head.count, head.offset );
-                // printf( "  head.type %d, head.count %d\n", head.type, head.count );
+                prf( "Child IFDs (%d of them) at offset %d\n", head.count, head.offset );
+                // prf( "  head.type %d, head.count %d\n", head.type, head.count );
 
                 if ( 1 == head.count )
                     EnumerateGenericIFD( depth + 1,  head.offset, headerBase, littleEndian );
@@ -5649,13 +5703,13 @@ void EnumerateIFD0( int depth, __int64 IFDOffset, __int64 headerBase, bool littl
                 }
             }
             else if ( 338 == head.id && 3 == head.type && 1 == head.count )
-                printf( "ExtraSamples:                         %s (%d)\n", ExifExtraSamples( head.offset ), head.offset );
+                prf( "ExtraSamples:                         %s (%d)\n", ExifExtraSamples( head.offset ), head.offset );
             else if ( 339 == head.id && 3 == head.type && 3 == head.count )
             {
                 WORD val0 = GetWORD( 0 + head.offset + headerBase, littleEndian );
                 WORD val1 = GetWORD( 2 + head.offset + headerBase, littleEndian );
                 WORD val2 = GetWORD( 4 + head.offset + headerBase, littleEndian );
-                printf( "SampleFormat:                         %s (%d), %s (%d), %s (%d)\n",
+                prf( "SampleFormat:                         %s (%d), %s (%d), %s (%d)\n",
                         ExifSampleFormat( val0 ), val0,
                         ExifSampleFormat( val1 ), val1,
                         ExifSampleFormat( val2 ), val2 );
@@ -5666,7 +5720,7 @@ void EnumerateIFD0( int depth, __int64 IFDOffset, __int64 headerBase, bool littl
                 WORD val1 = GetWORD( 2 + head.offset + headerBase, littleEndian );
                 WORD val2 = GetWORD( 4 + head.offset + headerBase, littleEndian );
                 WORD val3 = GetWORD( 6 + head.offset + headerBase, littleEndian );
-                printf( "SampleFormat:                         %s (%d), %s (%d), %s (%d), %s (%d)\n",
+                prf( "SampleFormat:                         %s (%d), %s (%d), %s (%d), %s (%d)\n",
                         ExifSampleFormat( val0 ), val0,
                         ExifSampleFormat( val1 ), val1,
                         ExifSampleFormat( val2 ), val2,
@@ -5674,12 +5728,12 @@ void EnumerateIFD0( int depth, __int64 IFDOffset, __int64 headerBase, bool littl
             }
             else if ( 347 == head.id && 7 == head.type )
             {
-                printf( "JPEGTables:                           %d bytes\n", head.count );
+                prf( "JPEGTables:                           %d bytes\n", head.count );
                 DumpBinaryData( head.offset, headerBase, head.count, 4, IFDOffset - 4 );
             }
             else if ( 513 == head.id && IsIntType( head.type ) )
             {
-                printf( "JPEGInterchangeFormat:                %d\n", head.offset );
+                prf( "JPEGInterchangeFormat:                %d\n", head.offset );
 
                 if ( 0 != head.offset && 0xffffffff != head.offset && IsPerhapsAnImage( head.offset, headerBase ) && !likelyRAW )
                     provisionalEmbeddedJPGOffset = head.offset + headerBase;
@@ -5687,7 +5741,7 @@ void EnumerateIFD0( int depth, __int64 IFDOffset, __int64 headerBase, bool littl
             }
             else if ( 514 == head.id && IsIntType( head.type ) )
             {
-                printf( "JPEGInterchangeFormatLength:          %d\n", head.offset );
+                prf( "JPEGInterchangeFormatLength:          %d\n", head.offset );
 
                 //printf( "non-strip offset %lld, length %d\n", provisionalEmbeddedJPGOffset, head.offset );
 
@@ -5703,12 +5757,12 @@ void EnumerateIFD0( int depth, __int64 IFDOffset, __int64 headerBase, bool littl
                 WORD low = head.offset & 0xffff;
                 WORD high = ( head.offset >> 16 ) & 0xffff;
 
-                printf( "YCbCrSubSampling:                     %s\n", YCbCrSubSampling( low, high ) );
+                prf( "YCbCrSubSampling:                     %s\n", YCbCrSubSampling( low, high ) );
             }
             else if ( 530 == head.id && 3 == head.type && 1 == head.count )
-                printf( "YCbCrSubSampling (malformed):         %d\n", head.offset );
+                prf( "YCbCrSubSampling (malformed):         %d\n", head.offset );
             else if ( 531 == head.id && IsIntType( head.type ) )
-                printf( "YCbCrPositioning:                     %d\n", head.offset );
+                prf( "YCbCrPositioning:                     %d\n", head.offset );
             else if ( 532 == head.id && 5 == head.type && 6 == head.count )
             {
                 DWORD num1 = GetDWORD( head.offset +      headerBase, littleEndian );
@@ -5735,11 +5789,11 @@ void EnumerateIFD0( int depth, __int64 IFDOffset, __int64 headerBase, bool littl
                 DWORD den6 = GetDWORD( head.offset + 44 + headerBase, littleEndian );
                 double d6 = (double) num6 / (double) den6;
                 
-                printf( "ReferenceBlackWhite:                  %lf, %lf, %lf, %lf, %lf, %lf\n", d1, d2, d3, d4, d5, d6 );
+                prf( "ReferenceBlackWhite:                  %lf, %lf, %lf, %lf, %lf, %lf\n", d1, d2, d3, d4, d5, d6 );
             }
             else if ( 700 == head.id )
             {
-                printf( "XMP:                                  %d bytes at offset %d\n", head.count, head.offset );
+                prf( "XMP:                                  %d bytes at offset %d\n", head.count, head.offset );
 
                 DumpBinaryData( head.offset, headerBase, head.count, 4, IFDOffset - 4 );
 
@@ -5752,53 +5806,53 @@ void EnumerateIFD0( int depth, __int64 IFDOffset, __int64 headerBase, bool littl
             {
                 DWORD num = GetDWORD( head.offset + headerBase, littleEndian );
                 DWORD den = GetDWORD( head.offset + headerBase + 4, littleEndian );
-                printf( "IFD0_tag769:                          %d / %d = %lf\n", num, den, (double) num / (double) den );
+                prf( "IFD0_tag769:                          %d / %d = %lf\n", num, den, (double) num / (double) den );
             }
             else if ( 770 == head.id && 2 == head.type )
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "IFD0_tag770:                          %s\n", acBuffer );
+                prf( "IFD0_tag770:                          %s\n", acBuffer );
             }
             else if ( 771 == head.id && 1 == head.type && 1 == head.count )
-                printf( "IFD0_tag771: type                     %d, count %d, value %d\n", head.type, head.count, head.offset );
+                prf( "IFD0_tag771: type                     %d, count %d, value %d\n", head.type, head.count, head.offset );
             else if ( 4097 == head.id && 3 == head.type )
-                printf( "RelatedImageWidth                     %d\n", head.offset );
+                prf( "RelatedImageWidth                     %d\n", head.offset );
             else if ( 4098 == head.id && 3 == head.type )
-                printf( "RelatedImageHeight                    %d\n", head.offset );
+                prf( "RelatedImageHeight                    %d\n", head.offset );
             else if ( 16384 == head.id && 3 == head.type && 1 == head.count )
-                printf( "IFD0_Tag16384: type                   %d, count %d, offset %d\n", head.type, head.count, head.offset );
+                prf( "IFD0_Tag16384: type                   %d, count %d, offset %d\n", head.type, head.count, head.offset );
             else if ( 16385 == head.id && 1 == head.type && 1 == head.count )
-                printf( "IFD0_Tag16385: type                   %d, count %d, offset %d\n", head.type, head.count, head.offset );
+                prf( "IFD0_Tag16385: type                   %d, count %d, offset %d\n", head.type, head.count, head.offset );
             else if ( 18246 == head.id && 3 == head.type && 1 == head.count )
-                printf( "Rating:                               %d\n", head.offset );
+                prf( "Rating:                               %d\n", head.offset );
             else if ( 18249 == head.id && 3 == head.type && 1 == head.count )
-                printf( "RatingPercent:                        %d\n", head.offset );
+                prf( "RatingPercent:                        %d\n", head.offset );
             else if ( 20498 == head.id && 4 == head.type && 1 == head.count )
-                printf( "ThumbnailFormat:                      %d\n", head.offset );
+                prf( "ThumbnailFormat:                      %d\n", head.offset );
             else if ( 20752 == head.id && 1 == head.type && 1 == head.count )
-                printf( "IFD0tag20752:                         %d\n", head.offset );
+                prf( "IFD0tag20752:                         %d\n", head.offset );
             else if ( 20753 == head.id && 4 == head.type && 1 == head.count )
-                printf( "IFD0tag20752:                         %d\n", head.offset );
+                prf( "IFD0tag20752:                         %d\n", head.offset );
             else if ( 20754 == head.id && 4 == head.type && 1 == head.count )
-                printf( "IFD0tag20752:                         %d\n", head.offset );
+                prf( "IFD0tag20752:                         %d\n", head.offset );
             else if ( 33432 == head.id && 2 == head.type )
             {
                 char acCopyright[ 100 ];
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acCopyright, _countof( acCopyright ), head.count );
-                printf( "Copyright:                            %s\n", acCopyright );
+                prf( "Copyright:                            %s\n", acCopyright );
             }
             else if ( 33434 == head.id && 10 == head.type )
             {
                 DWORD den = head.offset;
-                printf( "exif ExposureTime (type 10):          %d / %d = %lf\n", 1, den, (double) 1 / (double) den );
+                prf( "exif ExposureTime (type 10):          %d / %d = %lf\n", 1, den, (double) 1 / (double) den );
             }
             else if ( 33437 == head.id && 10 == head.type )
             {
                 DWORD num = GetDWORD( head.offset + headerBase, littleEndian );
                 DWORD den = GetDWORD( head.offset + headerBase + 4, littleEndian );
-                printf( "exif FNumber (type 10):               %d / %d = %lf\n", num, den, (double) num / (double) den );
+                prf( "exif FNumber (type 10):               %d / %d = %lf\n", num, den, (double) num / (double) den );
             }
             else if ( 33723 == head.id && ( ( 7 == head.type ) || ( 4 == head.type ) ) )
                 EnumerateIPTC( depth + 1,  head.offset, headerBase, head.count );
@@ -5806,114 +5860,114 @@ void EnumerateIFD0( int depth, __int64 IFDOffset, __int64 headerBase, bool littl
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "Site:                                 %s\n", acBuffer );
+                prf( "Site:                                 %s\n", acBuffer );
             }
             else if ( 34017 == head.id && 2 == head.type )
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "ColorSequence:                        %s\n", acBuffer );
+                prf( "ColorSequence:                        %s\n", acBuffer );
             }
             else if ( 34018 == head.id && 2 == head.type )
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "IT8Header:                            %s\n", acBuffer );
+                prf( "IT8Header:                            %s\n", acBuffer );
             }
             else if ( 34019 == head.id && 3 == head.type )
-                printf( "RasterPadding                         %s (%d)\n", ExifRasterPadding( head.offset), head.offset );
+                prf( "RasterPadding                         %s (%d)\n", ExifRasterPadding( head.offset), head.offset );
             else if ( 34020 == head.id && 3 == head.type )
-                printf( "BitsPerRunLength:                     %d\n", head.offset );
+                prf( "BitsPerRunLength:                     %d\n", head.offset );
             else if ( 34021 == head.id && 3 == head.type )
-                printf( "BitsPerExtendedRunLength:             %d\n", head.offset );
+                prf( "BitsPerExtendedRunLength:             %d\n", head.offset );
             else if ( 34022 == head.id && 1 == head.type && 0 != head.count )
-                printf( "ColorTable:                           %d\n", head.offset );
+                prf( "ColorTable:                           %d\n", head.offset );
             else if ( 34023 == head.id && 1 == head.type && 0 != head.count )
-                printf( "ImageColorIndicator:                  %d\n", head.offset );
+                prf( "ImageColorIndicator:                  %d\n", head.offset );
             else if ( 34024 == head.id && 1 == head.type && 0 != head.count )
-                printf( "BackgroundColorIndicator:             %d\n", head.offset );
+                prf( "BackgroundColorIndicator:             %d\n", head.offset );
             else if ( 34025 == head.id && 1 == head.type && 0 != head.count )
-                printf( "ImageColorValue:                      %d\n", head.offset );
+                prf( "ImageColorValue:                      %d\n", head.offset );
             else if ( 34026 == head.id && 1 == head.type && 0 != head.count )
-                printf( "BackgroundColorValue:                 %d\n", head.offset );
+                prf( "BackgroundColorValue:                 %d\n", head.offset );
             else if ( 34027 == head.id && 1 == head.type && 0 != head.count )
-                printf( "PixelIntensityRange:                  %d\n", head.offset );
+                prf( "PixelIntensityRange:                  %d\n", head.offset );
             else if ( 34028 == head.id && 1 == head.type && 0 != head.count )
-                printf( "TransparencyIndicator                 %d\n", head.offset );
+                prf( "TransparencyIndicator                 %d\n", head.offset );
             else if ( 34029 == head.id && 1 == head.type && 0 != head.count )
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "ColorCharacterization:                %s\n", acBuffer );
+                prf( "ColorCharacterization:                %s\n", acBuffer );
             }
             else if ( 34030 == head.id && 4 == head.type && 1 == head.count )
-                printf( "HCUsage:                              %s (%d)\n", ExifHCUsage( head.offset ), head.offset );
+                prf( "HCUsage:                              %s (%d)\n", ExifHCUsage( head.offset ), head.offset );
             else if ( 34377 == head.id && ( ( 7 == head.type ) || ( 1 == head.type ) ) )
                 EnumerateAdobeImageResources( depth + 1,  head.offset, headerBase, head.count );
             else if ( 34391 == head.id && 1 == head.type )
             {
-                printf( "mystery tag %d:\n", head.id );
+                prf( "mystery tag %d:\n", head.id );
                 DumpBinaryData( head.offset, headerBase, head.count, 4, IFDOffset - 4 );
             }
             else if ( 34392 == head.id && 2 == head.type )
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "mystery tag:                          %s (tag %d)\n", acBuffer, head.id );
+                prf( "mystery tag:                          %s (tag %d)\n", acBuffer, head.id );
             }
             else if ( 34665 == head.id )
                 EnumerateExifTags( depth + 1,  head.offset, headerBase, littleEndian );
             else if ( 34675 == head.id && 7 == head.type )
             {
-                printf( "Image.InterColorProfile:              %d bytes at offset %d\n", head.count, head.offset );
+                prf( "Image.InterColorProfile:              %d bytes at offset %d\n", head.count, head.offset );
                 DumpBinaryData( head.offset, headerBase, head.count, 4, IFDOffset - 4 );
             }
             else if ( 34850 == head.id )
-                printf( "ExposureProgram                       %s\n", ExifExposureProgram( head.offset ) );
+                prf( "ExposureProgram                       %s\n", ExifExposureProgram( head.offset ) );
             else if ( 34853 == head.id )
             {
-                printf( "GPSInfo:                              %d bytes at offset %d type %d\n", head.count, head.offset, head.type );
+                prf( "GPSInfo:                              %d bytes at offset %d type %d\n", head.count, head.offset, head.type );
                 EnumerateGPSTags( depth + 1,  head.offset, headerBase, littleEndian );
             }
             else if ( 34855 == head.id && 8 == head.type ) // Note: type 8 is bogus, but Nokia uses it
-                printf( "ISO                                   %d\n", head.offset );
+                prf( "ISO                                   %d\n", head.offset );
             else if ( 36867 == head.id && 2 == head.type )
             {
                 char acDateTimeOriginal[ 100 ];
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acDateTimeOriginal, _countof( acDateTimeOriginal ), head.count );
-                printf( "DateTimeOriginal:                     %s\n", acDateTimeOriginal );
+                prf( "DateTimeOriginal:                     %s\n", acDateTimeOriginal );
             }
             else if ( 36868 == head.id && 2 == head.type )
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "exif CreateDate:                    %s\n", acBuffer );
+                prf( "exif CreateDate:                    %s\n", acBuffer );
             }
             else if ( 36880 == head.id && 2 == head.type )
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "OffsetTime:                           %s\n", acBuffer );
+                prf( "OffsetTime:                           %s\n", acBuffer );
             }
             else if ( 36881 == head.id && 2 == head.type )
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "OffsetTimeOriginal:                   %s\n", acBuffer );
+                prf( "OffsetTimeOriginal:                   %s\n", acBuffer );
             }
             else if ( 36882 == head.id && 2 == head.type )
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "OffsetTimeDigitized:                  %s\n", acBuffer );
+                prf( "OffsetTimeDigitized:                  %s\n", acBuffer );
             }
             else if ( 37383 == head.id && 3 == head.type )
-                printf( "MeteringMode:                         %d\n", head.offset );
+                prf( "MeteringMode:                         %d\n", head.offset );
             else if ( 37384 == head.id && 3 == head.type)
-                printf( "LightSource:                          %d\n", head.offset );
+                prf( "LightSource:                          %d\n", head.offset );
             else if ( 37385 == head.id && 3 == head.type )
-                printf( "Flash:                                %d - %s\n", head.offset, GetFlash( head.offset ) );
+                prf( "Flash:                                %d - %s\n", head.offset, GetFlash( head.offset ) );
             else if ( 37386 == head.id && 5 == head.type )
             {
                 DWORD num = GetDWORD( head.offset + headerBase, littleEndian );
@@ -5923,7 +5977,7 @@ void EnumerateIFD0( int depth, __int64 IFDOffset, __int64 headerBase, bool littl
                 if ( 0 != den )
                     focalLength = (double) num / (double) den;
  
-                printf( "FocalLength:                          %d / %d = %lf\n", num, den, focalLength );
+                prf( "FocalLength:                          %d / %d = %lf\n", num, den, focalLength );
             }
             else if ( 37396 == head.id && 3 == head.type && 4 == head.count )
             {
@@ -5932,10 +5986,10 @@ void EnumerateIFD0( int depth, __int64 IFDOffset, __int64 headerBase, bool littl
                 WORD c = GetWORD( head.offset + 4 + headerBase, littleEndian );
                 WORD d = GetWORD( head.offset + 6 + headerBase, littleEndian );
 
-                printf( "SubjectArea:                          %d, %d, %d, %d\n", a, b, c, d );
+                prf( "SubjectArea:                          %d, %d, %d, %d\n", a, b, c, d );
             }
             else if ( 37398 == head.id )
-                printf( "TIFF-EPStandardID:                    %#x\n", head.offset );
+                prf( "TIFF-EPStandardID:                    %#x\n", head.offset );
             else
                 tagHandled = false;
 
@@ -5943,114 +5997,114 @@ void EnumerateIFD0( int depth, __int64 IFDOffset, __int64 headerBase, bool littl
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "SubSecTime:                           %s\n", acBuffer );
+                prf( "SubSecTime:                           %s\n", acBuffer );
             }
             else if ( 37521 == head.id && 2 == head.type )
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "SubSecTimeOriginal:                   %s\n", acBuffer );
+                prf( "SubSecTimeOriginal:                   %s\n", acBuffer );
             }
             else if ( 37522 == head.id && 2 == head.type )
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "SubSecTimeDigitized:                  %s\n", acBuffer );
+                prf( "SubSecTimeDigitized:                  %s\n", acBuffer );
             }
             else if ( 37724 == head.id && 7 == head.type )
             {
-                printf( "ImageSourceData (photoshop)           %d bytes\n", head.count );
+                prf( "ImageSourceData (photoshop)           %d bytes\n", head.count );
                 DumpBinaryData( head.offset, headerBase, head.count, 4, IFDOffset - 4 );
             }
             else if ( 40091 == head.id && 2 == head.type )
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "Windows XPTitle:                      %s\n", acBuffer );
+                prf( "Windows XPTitle:                      %s\n", acBuffer );
             }
             else if ( 40091 == head.id && 1 == head.type )
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "Windows XPTitle\n" );
+                prf( "Windows XPTitle\n" );
                 DumpBinaryData( head.offset, headerBase, head.count, 4, IFDOffset - 4 );
             }
             else if ( 40092 == head.id && 1 == head.type )
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "Windows XPComment\n" );
+                prf( "Windows XPComment\n" );
                 DumpBinaryData( head.offset, headerBase, head.count, 4, IFDOffset - 4 );
             }
             else if ( 40093 == head.id && 1 == head.type )
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "Windows XPAuthor\n" );
+                prf( "Windows XPAuthor\n" );
                 DumpBinaryData( head.offset, headerBase, head.count, 4, IFDOffset - 4 );
             }
             else if ( 40094 == head.id && 1 == head.type )
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "Windows XPKeywords\n" );
+                prf( "Windows XPKeywords\n" );
                 DumpBinaryData( head.offset, headerBase, head.count, 4, IFDOffset - 4 );
             }
             else if ( 40095 == head.id && 1 == head.type )
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "Windows XPSubject:\n" );
+                prf( "Windows XPSubject:\n" );
                 DumpBinaryData( head.offset, headerBase, head.count, 4, IFDOffset - 4 );
             }
             else if ( 41037 == head.id && 2 == head.type )
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "mystery tag:                          %s (tag %d)\n", acBuffer, head.id );
+                prf( "mystery tag:                          %s (tag %d)\n", acBuffer, head.id );
             }
             else if ( 41038 == head.id && 1 == head.type )
             {
-                printf( "mystery tag %d:\n", head.id );
+                prf( "mystery tag %d:\n", head.id );
                 DumpBinaryData( head.offset, headerBase, head.count, 4, IFDOffset - 4 );
             }
             else if ( 41985 == head.id )
-                printf( "Custom Rendered:                      %s\n", ExifCustomRendered( head.offset ) );
+                prf( "Custom Rendered:                      %s\n", ExifCustomRendered( head.offset ) );
             else if ( 41986 == head.id )
-                printf( "Exposure Mode:                        %s\n", ExifExposureMode( head.offset ) );
+                prf( "Exposure Mode:                        %s\n", ExifExposureMode( head.offset ) );
             else if ( 41987 == head.id )
-                printf( "White Balance:                        %s\n", ExifWhiteBalance( head.offset ) );
+                prf( "White Balance:                        %s\n", ExifWhiteBalance( head.offset ) );
             else if ( 41988 == head.id && 5 == head.type )
             {
                 DWORD num = GetDWORD( head.offset + headerBase, littleEndian );
                 DWORD den = GetDWORD( head.offset + 4 + headerBase, littleEndian );
 
-                printf( "Digital Zoom Ratio:                   %d / %d = %lf\n", num, den, (double) num / (double) den );
+                prf( "Digital Zoom Ratio:                   %d / %d = %lf\n", num, den, (double) num / (double) den );
             }
             else if ( 41989 == head.id && IsIntType( head.type ) )
-                printf( "Focal Length in 35mm Film:            %d\n", head.offset );
+                prf( "Focal Length in 35mm Film:            %d\n", head.offset );
             else if ( 41990 == head.id )
-                printf( "Scene Capture Type:                   %s\n", ExifSceneCaptureType( head.offset ) );
+                prf( "Scene Capture Type:                   %s\n", ExifSceneCaptureType( head.offset ) );
             else if ( 41991 == head.id )
-                printf( "Gain Control:                         %s\n", ExifGainControl( head.offset ) );
+                prf( "Gain Control:                         %s\n", ExifGainControl( head.offset ) );
             else if ( 41992 == head.id )
-                printf( "Contrast:                             %s\n", ExifContrast( head.offset ) );
+                prf( "Contrast:                             %s\n", ExifContrast( head.offset ) );
             else if ( 41993 == head.id )
-                printf( "Saturation:                           %s\n", ExifContrast( head.offset ) ); // same values as saturation
+                prf( "Saturation:                           %s\n", ExifContrast( head.offset ) ); // same values as saturation
             else if ( 41994 == head.id )
-                printf( "Sharpness:                            %s\n", ExifSharpness( head.offset ) );
+                prf( "Sharpness:                            %s\n", ExifSharpness( head.offset ) );
             else if ( 41995 == head.id && 7 == head.type )
             {
-                printf( "DeviceSettingDescription:\n" );
+                prf( "DeviceSettingDescription:\n" );
                 DumpBinaryData( head.offset, headerBase, head.count, 4, IFDOffset - 4 );
             }
             else if ( 41996 == head.id )
-                printf( "Subject Distance Range:               %s\n", ExifSubjectDistanceRange( head.offset ) );
+                prf( "Subject Distance Range:               %s\n", ExifSubjectDistanceRange( head.offset ) );
             else if ( 42016 == head.id && 2 == head.type )
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "ImageUniqueID:                        %s\n", acBuffer );
+                prf( "ImageUniqueID:                        %s\n", acBuffer );
             }
             else if ( 42034 == head.id && 5 == head.type && 4 == head.count )
             {
@@ -6066,7 +6120,7 @@ void EnumerateIFD0( int depth, __int64 IFDOffset, __int64 headerBase, bool littl
                 DWORD numMaxAp = GetDWORD( head.offset + 24 + headerBase, littleEndian );
                 DWORD denMaxAp = GetDWORD( head.offset + 28 + headerBase, littleEndian );
 
-                printf( "Lens min/max FL and Aperture:         %.2lf, %.2lf, %.2lf, %.2lf\n",
+                prf( "Lens min/max FL and Aperture:         %.2lf, %.2lf, %.2lf, %.2lf\n",
                         (double) numMinFL / (double) denMinFL,
                         (double) numMaxFL / (double) denMaxFL,
                         (double) numMinAp / (double) denMinAp,
@@ -6076,22 +6130,22 @@ void EnumerateIFD0( int depth, __int64 IFDOffset, __int64 headerBase, bool littl
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "Lens Make:                            %s\n", acBuffer );
+                prf( "Lens Make:                            %s\n", acBuffer );
             }
             else if ( 42036 == head.id && 2 == head.type )
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "Lens Model:                           %s\n", acBuffer );
+                prf( "Lens Model:                           %s\n", acBuffer );
             }
             else if ( 42037 == head.id && 2 == head.type )
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "Lens Serial Number:                   %s\n", acBuffer );
+                prf( "Lens Serial Number:                   %s\n", acBuffer );
             }
             else if ( 42080 == head.id && 3 == head.type && 1 == head.count )
-                printf( "Composite Image:                      %s\n", ExifComposite( head.offset ) );
+                prf( "Composite Image:                      %s\n", ExifComposite( head.offset ) );
             else if ( 50727 == head.id && 5 == head.type && 3 == head.count )
             {
                 LONG num1 = GetDWORD( head.offset +      headerBase, littleEndian );
@@ -6106,36 +6160,36 @@ void EnumerateIFD0( int depth, __int64 IFDOffset, __int64 headerBase, bool littl
                 LONG den3 = GetDWORD( head.offset + 20 + headerBase, littleEndian );
                 double d3 = (double) num3 / (double) den3;
 
-                printf( "AnalogBalance:                        %lf, %lf, %lf\n", d1, d2, d3 );
+                prf( "AnalogBalance:                        %lf, %lf, %lf\n", d1, d2, d3 );
             }
             else if ( 50341 == head.id && 7 == head.type )
             {
-                printf( "PrintImageMatching:                   %d bytes\n", head.count );
+                prf( "PrintImageMatching:                   %d bytes\n", head.count );
                 DumpBinaryData( head.offset, headerBase, head.count, 4, IFDOffset - 4 );
             }
             else if ( 50648 == head.id )                 
-                printf( "Canon-Specific(50648):                %d\n", head.offset );
+                prf( "Canon-Specific(50648):                %d\n", head.offset );
             else if ( 50649 == head.id )
-                printf( "Canon-Specific(50649):                %d\n", head.offset );
+                prf( "Canon-Specific(50649):                %d\n", head.offset );
             else if ( 50656 == head.id )
-                printf( "Canon-Specific(50656):                %d\n", head.offset );
+                prf( "Canon-Specific(50656):                %d\n", head.offset );
             else if ( 50706 == head.id && IsIntType( head.type ) )
-                printf( "DNGVersion:                           %#x\n", head.offset );
+                prf( "DNGVersion:                           %#x\n", head.offset );
             else if ( 50707 == head.id && IsIntType( head.type ) )
-                printf( "DNGBackwardVersion:                   %#x\n", head.offset );
+                prf( "DNGBackwardVersion:                   %#x\n", head.offset );
             else if ( 50708 == head.id && 2 == head.type )
             {
                 char acUniqueCameraModel[ 100 ];
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acUniqueCameraModel, _countof( acUniqueCameraModel ), head.count );
-                printf( "UniqueCameraModel:                    %s\n", acUniqueCameraModel );
+                prf( "UniqueCameraModel:                    %s\n", acUniqueCameraModel );
             }
             else if ( 50709 == head.id && 2 == head.type )
             {
                 char acLocalizedCameraModel[ 100 ];
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acLocalizedCameraModel, _countof( acLocalizedCameraModel ), head.count );
-                printf( "LocalizedCameraModel:                 %s\n", acLocalizedCameraModel );
+                prf( "LocalizedCameraModel:                 %s\n", acLocalizedCameraModel );
             }
             else if ( 50709 == head.id && 1 == head.type )
             {
@@ -6144,62 +6198,62 @@ void EnumerateIFD0( int depth, __int64 IFDOffset, __int64 headerBase, bool littl
                 char acLocalizedCameraModel[ 100 ];
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acLocalizedCameraModel, _countof( acLocalizedCameraModel ), head.count );
-                printf( "LocalizedCameraModel:                 %s\n", acLocalizedCameraModel );
+                prf( "LocalizedCameraModel:                 %s\n", acLocalizedCameraModel );
             }
             else if ( 50721 == head.id && 10 == head.type )
             {
                 int num = (int) GetDWORD( head.offset + headerBase, littleEndian );
                 int den = (int) GetDWORD( head.offset + headerBase + 4, littleEndian );
-                printf( "ColorMatrix1:                         %d / %d = %lf\n", num, den, (double) num / (double) den );
+                prf( "ColorMatrix1:                         %d / %d = %lf\n", num, den, (double) num / (double) den );
             }
             else if ( 50722 == head.id && 10 == head.type )
             {
                 int num = (int) GetDWORD( head.offset + headerBase, littleEndian );
                 int den = (int) GetDWORD( head.offset + headerBase + 4, littleEndian );
-                printf( "ColorMatrix2:                         %d / %d = %lf\n", num, den, (double) num / (double) den );
+                prf( "ColorMatrix2:                         %d / %d = %lf\n", num, den, (double) num / (double) den );
             }
             else if ( 50727 == head.id && 5 == head.type )
             {
                 DWORD num = GetDWORD( head.offset + headerBase, littleEndian );
                 DWORD den = GetDWORD( head.offset + headerBase + 4, littleEndian );
-                printf( "AnalogBalance:                        %d / %d = %lf\n", num, den, (double) num / (double) den );
+                prf( "AnalogBalance:                        %d / %d = %lf\n", num, den, (double) num / (double) den );
             }
             else if ( 50728 == head.id && 5 == head.type )
             {
                 DWORD num = GetDWORD( head.offset + headerBase, littleEndian );
                 DWORD den = GetDWORD( head.offset + headerBase + 4, littleEndian );
-                printf( "AsShotNeutral:                        %d / %d = %lf\n", num, den, (double) num / (double) den );
+                prf( "AsShotNeutral:                        %d / %d = %lf\n", num, den, (double) num / (double) den );
             }
             else if ( 50730 == head.id && 10 == head.type )
             {
                 int num = (int) GetDWORD( head.offset + headerBase, littleEndian );
                 int den = (int) GetDWORD( head.offset + headerBase + 4, littleEndian );
-                printf( "BaselineExposure:                     %d / %d = %lf\n", num, den, (double) num / (double) den );
+                prf( "BaselineExposure:                     %d / %d = %lf\n", num, den, (double) num / (double) den );
             }
             else if ( 50731 == head.id && 5 == head.type )
             {
                 DWORD num = GetDWORD( head.offset + headerBase, littleEndian );
                 DWORD den = GetDWORD( head.offset + headerBase + 4, littleEndian );
-                printf( "BaselineNoise:                        %d / %d = %lf\n", num, den, (double) num / (double) den );
+                prf( "BaselineNoise:                        %d / %d = %lf\n", num, den, (double) num / (double) den );
             }
             else if ( 50732 == head.id && 5 == head.type )
             {
                 DWORD num = GetDWORD( head.offset + headerBase, littleEndian );
                 DWORD den = GetDWORD( head.offset + headerBase + 4, littleEndian );
-                printf( "BaselineSharpness:                    %d / %d = %lf\n", num, den, (double) num / (double) den );
+                prf( "BaselineSharpness:                    %d / %d = %lf\n", num, den, (double) num / (double) den );
             }
             else if ( 50734 == head.id && 5 == head.type )
             {
                 DWORD num = GetDWORD( head.offset + headerBase, littleEndian );
                 DWORD den = GetDWORD( head.offset + headerBase + 4, littleEndian );
-                printf( "LinearResponseLimit:                  %d / %d = %lf\n", num, den, (double) num / (double) den );
+                prf( "LinearResponseLimit:                  %d / %d = %lf\n", num, den, (double) num / (double) den );
             }
             else if ( 50735 == head.id && 2 == head.type )
             {
                 char acCameraSerialNumber[ 100 ];
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acCameraSerialNumber, _countof( acCameraSerialNumber ), head.count );
-                printf( "CameraSerialNumber:                   %s\n", acCameraSerialNumber );
+                prf( "CameraSerialNumber:                   %s\n", acCameraSerialNumber );
             }
             else if ( 50736 == head.id && 5 == head.type && 4 == head.count )
             {
@@ -6219,7 +6273,7 @@ void EnumerateIFD0( int depth, __int64 IFDOffset, __int64 headerBase, bool littl
                 DWORD den4 = GetDWORD( head.offset + 28 + headerBase, littleEndian );
                 double d4 = (double) num4 / (double) den4;
 
-                printf( "DNGLensInfo:                          %lf, %lf, %lf, %lf\n", d1, d2, d3, d4 );
+                prf( "DNGLensInfo:                          %lf, %lf, %lf, %lf\n", d1, d2, d3, d4 );
             }
             else if ( 50739 == head.id && 5 == head.type && 1 == head.count )
             {
@@ -6227,53 +6281,53 @@ void EnumerateIFD0( int depth, __int64 IFDOffset, __int64 headerBase, bool littl
 
                 DWORD num = GetDWORD( head.offset + headerBase, littleEndian );
                 DWORD den = GetDWORD( head.offset + headerBase + 4, littleEndian );
-                printf( "ShadowScale:                          %d / %d = %lf\n", num, den, (double) num / (double) den );
+                prf( "ShadowScale:                          %d / %d = %lf\n", num, den, (double) num / (double) den );
             }
             else if ( 50740 == head.id && IsIntType( head.type ) )
             {
-                printf( "current offset %#llx, head.type: %d, head.count: %d, head.id %d==%#x, head.offset %#x\n",
+                prf( "current offset %#llx, head.type: %d, head.count: %d, head.id %d==%#x, head.offset %#x\n",
                         IFDOffset, head.type, head.count, head.id, head.id, head.offset );
 
-                printf( "DNGPrivateData:                       %#x for make %s\n", head.offset, g_acMake );
+                prf( "DNGPrivateData:                       %#x for make %s\n", head.offset, g_acMake );
 
                 // Sony and Ricoh Makernotes (in addition to makernotes stored in Exif IFD)
 
                 EnumerateMakernotes( depth + 1,  head.offset, headerBase, littleEndian );
             }
             else if ( 50741 == head.id && IsIntType( head.type ) )
-                printf( "MakerNoteSafety:                      %#x\n", head.offset );
+                prf( "MakerNoteSafety:                      %#x\n", head.offset );
             else if ( 50752 == head.id )
-                printf( "Canon-Specific(50752):                %d\n", head.offset );
+                prf( "Canon-Specific(50752):                %d\n", head.offset );
             else if ( 50778 == head.id && IsIntType( head.type ) )
-                printf( "CalibrationIlluminant1:               %#x\n", head.offset );
+                prf( "CalibrationIlluminant1:               %#x\n", head.offset );
             else if ( 50779 == head.id && IsIntType( head.type ) )
-                printf( "CalibrationIlluminant2:               %#x\n", head.offset );
+                prf( "CalibrationIlluminant2:               %#x\n", head.offset );
             else if ( 50781 == head.id && 1 == head.type && 16 == head.count )
             {
                 // Hasselblad uses this
-                printf( "RawDataUniqueID:                      %d (type) %d (count) %d (offset/value)\n", head.type, head.count, head.offset );
+                prf( "RawDataUniqueID:                      %d (type) %d (count) %d (offset/value)\n", head.type, head.count, head.offset );
 
                 DumpBinaryData( head.offset, headerBase, head.count, 4, IFDOffset - 4 );
             }
             else if ( 50885 == head.id )
-                printf( "Canon-Specific(50885):                %d\n", head.offset );
+                prf( "Canon-Specific(50885):                %d\n", head.offset );
             else if ( 50898 == head.id && 7 == head.type )
             {
-                printf( "Panosonic-Title                       type %d, count %d, offset %d\n", head.type, head.count, head.offset );
+                prf( "Panosonic-Title                       type %d, count %d, offset %d\n", head.type, head.count, head.offset );
                 DumpBinaryData( head.offset, headerBase, head.count, 4, IFDOffset - 4 );
             }
             else if ( 50899 == head.id && 7 == head.type )
             {
-                printf( "Panosonic-Title2                      type %d, count %d, offset %d\n", head.type, head.count, head.offset );
+                prf( "Panosonic-Title2                      type %d, count %d, offset %d\n", head.type, head.count, head.offset );
                 DumpBinaryData( head.offset, headerBase, head.count, 4, IFDOffset - 4 );
             }
             else if ( 50908 == head.id )
-                printf( "Canon-Specific(50908):                %d\n", head.offset );
+                prf( "Canon-Specific(50908):                %d\n", head.offset );
             else if ( 50934 == head.id && 2 == head.type )
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                printf( "AsShotProfileName:                    %s\n", acBuffer );
+                prf( "AsShotProfileName:                    %s\n", acBuffer );
             }
             else if ( 50937 == head.id && 4 == head.type && 3 == head.count )
             {
@@ -6281,35 +6335,35 @@ void EnumerateIFD0( int depth, __int64 IFDOffset, __int64 headerBase, bool littl
                 DWORD num2 = GetDWORD( head.offset + 4 + headerBase, littleEndian );
                 DWORD num3 = GetDWORD( head.offset + 8 + headerBase, littleEndian );
 
-                printf( "ProfileHueSatMapDims:                 %d %d %d\n", num1, num2, num3 );
+                prf( "ProfileHueSatMapDims:                 %d %d %d\n", num1, num2, num3 );
             }
             else if ( 50938 == head.id && 11 == head.type )
-                printf( "ProfileHueSatMapData1:                %d floats\n", head.count );
+                prf( "ProfileHueSatMapData1:                %d floats\n", head.count );
             else if ( 50939 == head.id && 11 == head.type )
-                printf( "ProfileHueSatMapData2:                %d floats\n", head.count );
+                prf( "ProfileHueSatMapData2:                %d floats\n", head.count );
             else if ( 50940 == head.id && 11 == head.type )
-                printf( "ProfileToneCurve:                     %d floats\n", head.count );
+                prf( "ProfileToneCurve:                     %d floats\n", head.count );
             else if ( 50941 == head.id && 4 == head.type )
-                printf( "ProfileEmbedPolicy:                   %d (%s)\n", head.count, GetProfileEmbedPolicy( head.count ) );
+                prf( "ProfileEmbedPolicy:                   %d (%s)\n", head.count, GetProfileEmbedPolicy( head.count ) );
             else if ( 50970 == head.id )
-                printf( "PreviewColorSpace:                    %s\n", TagPreviewColorSpace( head.offset ) );
+                prf( "PreviewColorSpace:                    %s\n", TagPreviewColorSpace( head.offset ) );
             else if ( 59932 == head.id && 7 == head.type )
             {
-                printf( "IFD0 Padding type                     %d, count %d, offset %d\n", head.type, head.count, head.offset );
+                prf( "IFD0 Padding type                     %d, count %d, offset %d\n", head.type, head.count, head.offset );
                 DumpBinaryData( head.offset, headerBase, head.count, 4, IFDOffset - 4 );
             }
             else if ( 59933 == head.id && 9 == head.type )
-                printf( "MSFTOffsetSchema type                 %d, count %d, offset %d\n", head.type, head.count, head.offset );
+                prf( "MSFTOffsetSchema type                 %d, count %d, offset %d\n", head.type, head.count, head.offset );
             else if ( !tagHandled )
             {
-                printf( "IFD0 tag %d ID %d==%#x, type %d, count %d, offset/value %d\n", i, head.id, head.id, head.type, head.count, head.offset );
+                prf( "IFD0 tag %d ID %d==%#x, type %d, count %d, offset/value %d\n", i, head.id, head.id, head.type, head.count, head.offset );
 
                 if ( 7 == head.type )
                     DumpBinaryData( head.offset, headerBase, head.count, 4, IFDOffset - 4 );
 
                 if ( 0 == head.id )
                 {
-                    printf( "warning: malformed entry head.id of 0\n" );
+                    prf( "warning: malformed entry head.id of 0\n" );
                     return;
                 }
             }
@@ -6318,7 +6372,7 @@ void EnumerateIFD0( int depth, __int64 IFDOffset, __int64 headerBase, bool littl
         IFDOffset = GetDWORD( IFDOffset + headerBase, littleEndian );
 
         if ( g_FullInformation )
-            printf( "end of IFD0 directory, offset to next directory: %I64d\n", IFDOffset );
+            prf( "end of IFD0 directory, offset to next directory: %I64d\n", IFDOffset );
 
         currentIFD++;
     }
@@ -6416,8 +6470,8 @@ void ParsePNG()
     DWORD dwHeader4 = GetDWORD( 4, false );
     if ( 0x89504e47 != dwHeader0 || 0xd0a1a0a != dwHeader4 )
     {
-        printf( "Invalid PNG header: first 4 bytes: %#x, next 4 bytes: %#x\n", dwHeader0, dwHeader4 );
-        printf( "expected 0x89504e47 then 0xd0a1a0a\n" );
+        prf( "Invalid PNG header: first 4 bytes: %#x, next 4 bytes: %#x\n", dwHeader0, dwHeader4 );
+        prf( "expected 0x89504e47 then 0xd0a1a0a\n" );
         return;
     }
 
@@ -6427,7 +6481,7 @@ void ParsePNG()
     DWORD idatSegments = 0;
     DWORD idatSize = 0;
 
-    printf( "mimetype:                             image/png\n" );
+    prf( "mimetype:                             image/png\n" );
 
     do
     {
@@ -6440,7 +6494,7 @@ void ParsePNG()
 
         if ( len > ( 128 * 1024 * 1024 ) )
         {
-            printf( "aparently invalid length: %d\n", len );
+            prf( "aparently invalid length: %d\n", len );
             return;
         }
 
@@ -6456,12 +6510,12 @@ void ParsePNG()
         acChunkType[ 4 ] = 0;
 
         if ( g_FullInformation )
-            printf( "png chunk type: %s %#x, len %d\n", acChunkType, type, len );
+            prf( "png chunk type: %s %#x, len %d\n", acChunkType, type, len );
 
         if ( 0x49454e44 == type ) // IEND  end of chunks
         {
             if ( g_FullInformation )
-                printf( "offset of IEND chunk: %d\n", offset );
+                prf( "offset of IEND chunk: %d\n", offset );
 
             break;
         }
@@ -6475,25 +6529,25 @@ void ParsePNG()
             filterMethod = GetBYTE( offset + 19 );
             interlaceMethod = GetBYTE( offset + 20 );
 
-            printf( "image width:           %16d\n", width );
-            printf( "image height:          %16d\n", height );
-            printf( "bit depth:             %16d\n", bitDepth );
-            printf( "color type:            %16d (%s)\n", colorType, GetPNGColorType( colorType) );
-            printf( "compression method:    %16d\n", compressionMethod );
-            printf( "filter method:         %16d (%s)\n", filterMethod, GetPNGFilterMethod( filterMethod ) );
-            printf( "interlace method:      %16d (%s)\n", interlaceMethod, GetPNGInterlaceMethod( interlaceMethod ) );
+            prf( "image width:           %16d\n", width );
+            prf( "image height:          %16d\n", height );
+            prf( "bit depth:             %16d\n", bitDepth );
+            prf( "color type:            %16d (%s)\n", colorType, GetPNGColorType( colorType) );
+            prf( "compression method:    %16d\n", compressionMethod );
+            prf( "filter method:         %16d (%s)\n", filterMethod, GetPNGFilterMethod( filterMethod ) );
+            prf( "interlace method:      %16d (%s)\n", interlaceMethod, GetPNGInterlaceMethod( interlaceMethod ) );
         }
         else if ( 0x73524742 == type ) // sRGB
         {
             BYTE renderingIntent = GetBYTE( offset + 8 );
 
-            printf( "sRGB rendering intent: %16d (%s)\n", renderingIntent, GetPNGRenderingIntent( renderingIntent ) );
+            prf( "sRGB rendering intent: %16d (%s)\n", renderingIntent, GetPNGRenderingIntent( renderingIntent ) );
         }
         else if ( 0x67414d41 == type ) // gAMA
         {
             DWORD gamma = GetDWORD( offset + 8, false );
 
-            printf( "gamma:               %18d\n", gamma );
+            prf( "gamma:               %18d\n", gamma );
         }
         else if ( 0x70485973 == type ) // pHYs
         {
@@ -6501,16 +6555,16 @@ void ParsePNG()
             DWORD pixelsPerUnitY = GetDWORD( offset + 12, false );
             BYTE unitSpecifier = GetBYTE( offset + 16 );
 
-            printf( "pixels per unit X:     %16d\n", pixelsPerUnitX );
-            printf( "pixels per unit Y:     %16d\n", pixelsPerUnitY );
-            printf( "unit specifier:        %16d (%s)\n", unitSpecifier, GetPNGUnitSpecifier( unitSpecifier ) );
+            prf( "pixels per unit X:     %16d\n", pixelsPerUnitX );
+            prf( "pixels per unit Y:     %16d\n", pixelsPerUnitY );
+            prf( "unit specifier:        %16d (%s)\n", unitSpecifier, GetPNGUnitSpecifier( unitSpecifier ) );
         }
         else if ( 0x49444154 == type ) // IDAT
         {
             // image data; ignore for now
 
             if ( g_FullInformation )
-                printf( "flac image data length:     %16d\n", len );
+                prf( "flac image data length:     %16d\n", len );
 
             idatSegments++;
             idatSize += len;
@@ -6518,15 +6572,15 @@ void ParsePNG()
         else if ( 0x6348524d == type ) // cHRM
         {
             // chromacity coordinates of the display primaries and white point
-            printf( "chromacity:\n" );
-            printf( "       white point x %18u\n", GetDWORD( offset + 8, false ) );
-            printf( "       white point y %18u\n", GetDWORD( offset + 12, false ) );
-            printf( "       red x         %18u\n", GetDWORD( offset + 16, false ) );
-            printf( "       red y         %18u\n", GetDWORD( offset + 20, false ) );
-            printf( "       green x       %18u\n", GetDWORD( offset + 24, false ) );
-            printf( "       green y       %18u\n", GetDWORD( offset + 28, false ) );
-            printf( "       blue x        %18u\n", GetDWORD( offset + 32, false ) );
-            printf( "       blue y        %18u\n", GetDWORD( offset + 36, false ) );
+            prf( "chromacity:\n" );
+            prf( "       white point x %18u\n", GetDWORD( offset + 8, false ) );
+            prf( "       white point y %18u\n", GetDWORD( offset + 12, false ) );
+            prf( "       red x         %18u\n", GetDWORD( offset + 16, false ) );
+            prf( "       red y         %18u\n", GetDWORD( offset + 20, false ) );
+            prf( "       green x       %18u\n", GetDWORD( offset + 24, false ) );
+            prf( "       green y       %18u\n", GetDWORD( offset + 28, false ) );
+            prf( "       blue x        %18u\n", GetDWORD( offset + 32, false ) );
+            prf( "       blue y        %18u\n", GetDWORD( offset + 36, false ) );
         }
         else if ( 0x74455874 == type ) // tEXt
         {
@@ -6540,11 +6594,11 @@ void ParsePNG()
             unique_ptr<char> textValue( new char[ valuelen + 1 ] );
             GetString( offset + 8 + keylen + 1, textValue.get(), valuelen + 1, valuelen + 1 );
 
-            printf( "text key:                             %s, value: %s\n", acTextKey, textValue.get() );
+            prf( "text key:                             %s, value: %s\n", acTextKey, textValue.get() );
         }
         else if ( 0x69545874 == type ) // iTXt
         {
-            printf( "text chunk length:     %16d\n", len );
+            prf( "text chunk length:     %16d\n", len );
             DumpBinaryData( offset + 8, 0, len, 8, offset + 8 );
         }
         else if ( 0x504c5445 == type ) // PLTE palette
@@ -6553,36 +6607,36 @@ void ParsePNG()
 
             if ( 0 != ( len % 3 ) )
             {
-                printf( "PNG palette chunk is malformed\n" );
+                prf( "PNG palette chunk is malformed\n" );
                 return;
             }
 
-            printf( "palette has %d entries\n", entries );
+            prf( "palette has %d entries\n", entries );
 
             for ( DWORD e = 0; e < entries; e++ )
             {
                 DWORD o = offset + 8 + e * 3;
-                printf( "    %3d: r %3d, g %3d, b %3d\n", e, GetBYTE( o ), GetBYTE( o + 1 ), GetBYTE( o + 2 ) );
+                prf( "    %3d: r %3d, g %3d, b %3d\n", e, GetBYTE( o ), GetBYTE( o + 1 ), GetBYTE( o + 2 ) );
             }
         }
         else if ( 0x74524e53 == type ) // tRNS transparency information
         {
-            printf( "transparency length:   %16d\n", len );
+            prf( "transparency length:   %16d\n", len );
             DumpBinaryData( offset + 8, 0, len, 8, offset + 8 );
         }
         else if ( 0x73424954 == type ) // sBIT
         {
-            printf( "significant bits len:  %16d\n", len );
+            prf( "significant bits len:  %16d\n", len );
             DumpBinaryData( offset + 8, 0, len, 8, offset + 8 );
         }
         else if ( 0x624b4744 == type ) // bKGD
         {
-            printf( "background color len:  %16d\n", len );
+            prf( "background color len:  %16d\n", len );
             DumpBinaryData( offset + 8, 0, len, 8, offset + 8 );
         }
         else if ( 0x74494d45 == type ) // tIME
         {
-            printf( "last modification:                    year %d, month %d, day %d, hour %d, minute %d, second %d\n",
+            prf( "last modification:                    year %d, month %d, day %d, hour %d, minute %d, second %d\n",
                     GetWORD( offset + 8, false ),
                     GetBYTE( offset + 10 ),
                     GetBYTE( offset + 11 ),
@@ -6599,18 +6653,18 @@ void ParsePNG()
 
             BYTE compressionMethod = GetBYTE( offset + 8 + keyLen + 1 );
             int valueLen = len - keyLen - 2;
-            printf( "compressed text key:                  %s, compression method %d, value %d bytes\n", acTextKey, compressionMethod, valueLen );
+            prf( "compressed text key:                  %s, compression method %d, value %d bytes\n", acTextKey, compressionMethod, valueLen );
             int dataOffset = offset + 8 + keyLen + valueLen + 2;
             DumpBinaryData( dataOffset, 0, valueLen, 8, dataOffset );
         }
         else if ( 0x69434350 == type ) // iCCP
         {
-            printf( "embedded ICC profile length %d\n", len );
+            prf( "embedded ICC profile length %d\n", len );
             DumpBinaryData( offset + 8, 0, len, 8, offset + 8 );
         }
         else if ( 0x6f464673 == type ) // oFFs
         {
-            printf( "%s tag %d\n", acChunkType, len );
+            prf( "%s tag %d\n", acChunkType, len );
             DumpBinaryData( offset + 8, 0, len, 8, offset + 8 );
         }
 #if false
@@ -6647,7 +6701,7 @@ void ParsePNG()
 #endif
         else
         {
-            printf( "unrecognized PNG chunk type %s %#x, length %d\n", acChunkType, type, len );
+            prf( "unrecognized PNG chunk type %s %#x, length %d\n", acChunkType, type, len );
             DumpBinaryData( offset + 8, 0, len, 8, offset + 8 );
 
             if ( 0 == *acChunkType )
@@ -6657,8 +6711,8 @@ void ParsePNG()
         offset += ( 12 + len );
     } while( true );
 
-    printf( "IDAT segments:         %16d\n", idatSegments );
-    printf( "IDAT data bytes:       %16d\n", idatSize );
+    prf( "IDAT segments:         %16d\n", idatSegments );
+    prf( "IDAT data bytes:       %16d\n", idatSize );
 } //ParsePNG
 
 const char * BmpCompression( DWORD c )
@@ -6723,64 +6777,64 @@ const char * BmpIntent( DWORD i )
 
 void ParseBMP()
 {
-    printf( "mimetype:                             image/bmp\n" );
+    prf( "mimetype:                             image/bmp\n" );
 
     BITMAPFILEHEADER bfh;
     GetBytes( 0, &bfh, sizeof bfh );
 
-    printf( "type:                         %#x %#x == %c%c\n", bfh.bfType & 0xff, bfh.bfType >> 8, bfh.bfType & 0xff, bfh.bfType >> 8 );
-    printf( "size of file field:%20d\n", bfh.bfSize );
+    prf( "type:                         %#x %#x == %c%c\n", bfh.bfType & 0xff, bfh.bfType >> 8, bfh.bfType & 0xff, bfh.bfType >> 8 );
+    prf( "size of file field:%20d\n", bfh.bfSize );
 
     if ( bfh.bfSize != g_pStream->Length() )
-        printf( "  (warning: file size %lld isn't the same as bitmap file header size %d)\n", g_pStream->Length(), bfh.bfSize );
+        prf( "  (warning: file size %lld isn't the same as bitmap file header size %d)\n", g_pStream->Length(), bfh.bfSize );
 
-    printf( "reserved 1:          %18d\n", bfh.bfReserved1 );
-    printf( "reserved 2:          %18d\n", bfh.bfReserved2 );
-    printf( "offset of bits:      %18d\n", bfh.bfOffBits );
+    prf( "reserved 1:          %18d\n", bfh.bfReserved1 );
+    prf( "reserved 2:          %18d\n", bfh.bfReserved2 );
+    prf( "offset of bits:      %18d\n", bfh.bfOffBits );
 
     BITMAPV5HEADER bih;
     GetBytes( sizeof bfh, &bih, sizeof bih );
 
-    printf( "header size:         %18d\n", bih.bV5Size );
-    printf( "width:               %18d\n", bih.bV5Width );
-    printf( "height:              %18d\n", bih.bV5Height );
-    printf( "planes:              %18d\n", bih.bV5Planes );
-    printf( "bit count:           %18d\n", bih.bV5BitCount );
-    printf( "compression:         %18d == %s\n", bih.bV5Compression, BmpCompression( bih.bV5Compression ) );
-    printf( "size of image:       %18d\n", bih.bV5SizeImage );
-    printf( "pixels per meter X:  %18d\n", bih.bV5XPelsPerMeter );
-    printf( "pixels per meter Y:  %18d\n", bih.bV5YPelsPerMeter );
-    printf( "color indices:       %18d\n", bih.bV5ClrUsed );
-    printf( "colors required:     %18d\n", bih.bV5ClrImportant );
+    prf( "header size:         %18d\n", bih.bV5Size );
+    prf( "width:               %18d\n", bih.bV5Width );
+    prf( "height:              %18d\n", bih.bV5Height );
+    prf( "planes:              %18d\n", bih.bV5Planes );
+    prf( "bit count:           %18d\n", bih.bV5BitCount );
+    prf( "compression:         %18d == %s\n", bih.bV5Compression, BmpCompression( bih.bV5Compression ) );
+    prf( "size of image:       %18d\n", bih.bV5SizeImage );
+    prf( "pixels per meter X:  %18d\n", bih.bV5XPelsPerMeter );
+    prf( "pixels per meter Y:  %18d\n", bih.bV5YPelsPerMeter );
+    prf( "color indices:       %18d\n", bih.bV5ClrUsed );
+    prf( "colors required:     %18d\n", bih.bV5ClrImportant );
 
     if ( bih.bV5Size >= sizeof BITMAPV4HEADER )
     {
         // >= bV5RedMask
 
         if ( BI_BITFIELDS == bih.bV5Compression )
-            printf( "RGB masks:                            %#010x %#010x %#010x\n", bih.bV5RedMask, bih.bV5GreenMask, bih.bV5BlueMask );
+            prf( "RGB masks:                            %#010x %#010x %#010x\n", bih.bV5RedMask, bih.bV5GreenMask, bih.bV5BlueMask );
 
         if ( LCS_CALIBRATED_RGB == bih.bV5CSType )
         {
-            printf( "gamma red:        %#21x\n", bih.bV5GammaRed );
-            printf( "gamma green:      %#21x\n", bih.bV5GammaGreen );
-            printf( "gamma blue:       %#21x\n", bih.bV5GammaBlue );
+            prf( "gamma red:        %#21x\n", bih.bV5GammaRed );
+            prf( "gamma green:      %#21x\n", bih.bV5GammaGreen );
+            prf( "gamma blue:       %#21x\n", bih.bV5GammaBlue );
         }
 
-        printf( "alpha mask:                  %#010x\n", bih.bV5AlphaMask );
-        printf( "color space:         %18d == %s\n", bih.bV5CSType, BmpColorSpace( bih.bV5CSType ) );
+        prf( "alpha mask:                  %#010x\n", bih.bV5AlphaMask );
+        prf( "color space:         %18d == %s\n", bih.bV5CSType, BmpColorSpace( bih.bV5CSType ) );
     }
 
     if ( bih.bV5Size >= sizeof BITMAPV5HEADER )
     {
         // >= bV5Intent
 
-        printf( "intent:              %18d == %s\n", bih.bV5Intent, BmpIntent( bih.bV5Intent ) );
+        prf( "intent:              %18d == %s\n", bih.bV5Intent, BmpIntent( bih.bV5Intent ) );
 
         if ( PROFILE_LINKED == bih.bV5CSType || PROFILE_EMBEDDED == bih.bV5CSType )
         {
-            printf( "profile offset:       %18d\n", bih.bV5ProfileData );
-            printf( "profile size:         %18d\n", bih.bV5ProfileSize );
+            prf( "profile offset:       %18d\n", bih.bV5ProfileData );
+            prf( "profile size:         %18d\n", bih.bV5ProfileSize );
         }
     }
 } //ParseBMP
@@ -6860,7 +6914,7 @@ void ReadMP3String( __int64 offset, WCHAR * pwc, int cwc, int maxBytes, bool lan
 
     if ( maxBytes > cbOutput )
     {
-        printf( "maxBytes %d is > cbOutput %d; truncating\n", maxBytes, cbOutput );
+        prf( "maxBytes %d is > cbOutput %d; truncating\n", maxBytes, cbOutput );
         maxBytes = cbOutput - 2;
     }
 
@@ -6956,10 +7010,10 @@ void ReadMP3String( __int64 offset, WCHAR * pwc, int cwc, int maxBytes, bool lan
     else if ( 2 == encoding )
     {
         // UTF-16. I've yet to find an mp3 file with this
-        printf( "MP3 file with encoding 2!\n" );
+        prf( "MP3 file with encoding 2!\n" );
     }
     else
-        printf( "unknown string encoding: %d\n", encoding );
+        prf( "unknown string encoding: %d\n", encoding );
 
     if ( invalidCharsToDot )
         ConvertInvalidCharsToDot( pwc );
@@ -7368,7 +7422,7 @@ void ParseMP3()
     if ( len < 128 )
         return;
 
-    printf( "mimetype:             audio/mpeg\n" );
+    prf( "mimetype:             audio/mpeg\n" );
 
     // some mp3 files have no header and start with 11 bits set.
     // other mp3 files have random header info that's not documented anywhere followed by 11 bits set.
@@ -7414,13 +7468,13 @@ void ParseMP3()
         
                 GetBytes( firstFrameOffset, &extendedHeader, sizeof extendedHeader );
                 firstFrameOffset += sizeof extendedHeader;
-                printf( "extended MP3 header exists\n" );
+                prf( "extended MP3 header exists\n" );
             }
         #endif
     
-        printf( "ID3 version:          ID3v2.%d.%d\n", start.ver[0], start.ver[1] );
-        printf( "  flags:              %#x\n", start.flags );
-        printf( "  data size:          %d\n", start.size );
+        prf( "ID3 version:          ID3v2.%d.%d\n", start.ver[0], start.ver[1] );
+        prf( "  flags:              %#x\n", start.flags );
+        prf( "  data size:          %d\n", start.size );
     
         __int64 frameOffset = firstFrameOffset;
     
@@ -7443,7 +7497,7 @@ void ParseMP3()
         while ( frameOffset < ( start.size + firstFrameOffset ) )
         {
             if ( g_FullInformation )
-                printf( "reading next frame at offset %I64d\n", frameOffset );
+                prf( "reading next frame at offset %I64d\n", frameOffset );
     
             memset( &frameHeader, 0, sizeof frameHeader );
             int frameHeaderSize = sizeof frameHeader;
@@ -7472,9 +7526,9 @@ void ParseMP3()
     
             if ( g_FullInformation )
             {
-                printf( "frame header %c%c%c%c\n", frameHeader.id[0], frameHeader.id[1], frameHeader.id[2], frameHeader.id[3] );
-                printf( "frame size %d == %#x\n", frameHeader.size, frameHeader.size );
-                printf( "frame flags %#x\n", frameHeader.flags );
+                prf( "frame header %c%c%c%c\n", frameHeader.id[0], frameHeader.id[1], frameHeader.id[2], frameHeader.id[3] );
+                prf( "frame size %d == %#x\n", frameHeader.size, frameHeader.size );
+                prf( "frame flags %#x\n", frameHeader.flags );
             }
     
             if ( 0 == frameHeader.size )
@@ -7482,13 +7536,13 @@ void ParseMP3()
     
             if ( frameHeader.size > 1024 * 1024 * 40 )
             {
-                printf( "invalid frame size is too large: %u == %#x\n", frameHeader.size, frameHeader.size );
+                prf( "invalid frame size is too large: %u == %#x\n", frameHeader.size, frameHeader.size );
                 break;
             }
     
             if ( !isValidMP3Frame( frameHeader.id ) )
             {
-                printf( "invalid frame id %c%c%c%c == %#x %#x %#x %#x\n", frameHeader.id[0], frameHeader.id[1], frameHeader.id[2], frameHeader.id[3],
+                prf( "invalid frame id %c%c%c%c == %#x %#x %#x %#x\n", frameHeader.id[0], frameHeader.id[1], frameHeader.id[2], frameHeader.id[3],
                         0xff & frameHeader.id[0], 0xff & frameHeader.id[1], 0xff & frameHeader.id[2], 0xff & frameHeader.id[3] );
                 break;
             }
@@ -7519,7 +7573,7 @@ void ParseMP3()
                 {
                     // 2 == UTF-16 isn't handled because I can't find a file like that to test
     
-                    printf( "invalid encoding for image text %d\n", encoding );
+                    prf( "invalid encoding for image text %d\n", encoding );
                     return;
                 }
     
@@ -7532,7 +7586,7 @@ void ParseMP3()
                 {
                     if ( i >= ( _countof( acMimeType ) - 1 ) )
                     {
-                        printf( "invalid mime type; it may not be null-terminated\n" );
+                        prf( "invalid mime type; it may not be null-terminated\n" );
                         return;
                     }
 
@@ -7568,8 +7622,8 @@ void ParseMP3()
     
                 byte pictureType = GetBYTE( o++ );
     
-                printf( "Embedded image:       %s\n", acMimeType );
-                printf( "  picture type:       %#x == %s\n", 0xff & pictureType, MP3PictureType( pictureType ) );
+                prf( "Embedded image:       %s\n", acMimeType );
+                prf( "  picture type:       %#x == %s\n", 0xff & pictureType, MP3PictureType( pictureType ) );
     
                 i = 0;
     
@@ -7612,19 +7666,19 @@ void ParseMP3()
 
                 if ( i >= ( _countof( awcField ) ) )
                 {
-                    printf( "invalid image description; couldn't find a null termination\n" );
+                    prf( "invalid image description; couldn't find a null termination\n" );
                     return;
                 }
     
                 awcField[ i ] = 0;
 
                 ConvertInvalidCharsToDot( awcField );
-                printf( "  description:        %ws\n", awcField );
+                wprf( L"  description:        %ws\n", awcField );
     
                 if ( o < ( oFrameData + frameHeader.size ) )
                 {
                     int imageSize = frameHeader.size - ( o - oFrameData );
-                    printf( "  image size:         %d at file offset %d\n", imageSize, o );
+                    prf( "  image size:         %d at file offset %d\n", imageSize, o );
     
                     // Sometimes there are multiple embedded images. Use the first with a reasonable size.
     
@@ -7640,7 +7694,7 @@ void ParseMP3()
                     }
                 }
                 else if ( g_FullInformation )
-                    printf( "invalid image offset %d is beyond size of the frame %d\n", o, frameHeader.size );
+                    prf( "invalid image offset %d is beyond size of the frame %d\n", o, frameHeader.size );
             }
             else if ( isMP3Frame( frameHeader.id, "COMM", "COM" ) )
             {
@@ -7651,7 +7705,7 @@ void ParseMP3()
     
                 ReadMP3String( frameOffset + frameHeaderSize, awcField, _countof( awcField ), frameHeader.size, true, true );
                 if ( 0 != awcField[0] )
-                    printf( "Comments:             %ws\n", awcField );
+                    wprf( L"Comments:             %ws\n", awcField );
             }
             else if ( isMP3Frame( frameHeader.id, "GEOB" ) )
             {
@@ -7670,7 +7724,7 @@ void ParseMP3()
             }
             else if ( isMP3Frame( frameHeader.id, "PCST", "PCS" ) )
             {
-                printf( "Podcast:              %ws\n", awcField );
+                wprf( L"Podcast:              %ws\n", awcField );
             }
             else if ( isMP3Frame( frameHeader.id, "POPM" ) )
             {
@@ -7682,170 +7736,170 @@ void ParseMP3()
             }
             else if ( isMP3Frame( frameHeader.id, "TALB", "TAL" ) )
             {
-                printf( "Album:                %ws\n", awcField );
+                wprf( L"Album:                %ws\n", awcField );
             }
             else if ( isMP3Frame( frameHeader.id, "TBPM", "TBP" ) )
             {
-                printf( "Beats per minute:     %ws\n", awcField );
+                wprf( L"Beats per minute:     %ws\n", awcField );
             }
             else if ( isMP3Frame( frameHeader.id, "TCMP", "TCP" ) )
             {
-                printf( "Compilation:          %ws\n", awcField );
+                wprf( L"Compilation:          %ws\n", awcField );
             }
             else if ( isMP3Frame( frameHeader.id, "TCOM", "TCM" ) )
             {
-                printf( "Composer:             %ws\n", awcField );
+                wprf( L"Composer:             %ws\n", awcField );
             }
             else if ( isMP3Frame( frameHeader.id, "TCON", "TCO" ) )
             {
-                printf( "Genre:                %ws", awcField );
+                wprf( L"Genre:                %ws", awcField );
                 if ( L'(' == awcField[0] )
-                    printf( " == %s\n", GetMP3Genre( awcField ) );
+                    prf( " == %s\n", GetMP3Genre( awcField ) );
                 else
-                    printf( "\n" );
+                    prf( "\n" );
             }
             else if ( isMP3Frame( frameHeader.id, "TCOP" ) )
             {
-                printf( "Copyright:            %ws\n", awcField );
+                wprf( L"Copyright:            %ws\n", awcField );
             }
             else if ( isMP3Frame( frameHeader.id, "TDAT", "TDA" ) )
             {
-                printf( "Date:                 %wc%wc/%wc%wc\n", awcField[0], awcField[1], awcField[2], awcField[3] );
+                wprf( L"Date:                 %wc%wc/%wc%wc\n", awcField[0], awcField[1], awcField[2], awcField[3] );
             }
             else if ( isMP3Frame( frameHeader.id, "TDEN" ) )
             {
-                printf( "Encoding time:        %ws\n", awcField );
+                wprf( L"Encoding time:        %ws\n", awcField );
             }
             else if ( isMP3Frame( frameHeader.id, "TDRC" ) )
             {
-                printf( "Recording time:       %ws\n", awcField );
+                wprf( L"Recording time:       %ws\n", awcField );
             }
             else if ( isMP3Frame( frameHeader.id, "TDRL" ) )
             {
-                printf( "Release time:         %ws\n", awcField );
+                wprf( L"Release time:         %ws\n", awcField );
             }
             else if ( isMP3Frame( frameHeader.id, "TENC", "TEN" ) )
             {
-                printf( "Encoded by:           %ws\n", awcField );
+                wprf( L"Encoded by:           %ws\n", awcField );
             }
             else if ( isMP3Frame( frameHeader.id, "TIME", "TIM" ) )
             {
-                printf( "Time:                 %wc%wc:%wc%wc\n", awcField[0], awcField[1], awcField[2], awcField[3] );
+                wprf( L"Time:                 %wc%wc:%wc%wc\n", awcField[0], awcField[1], awcField[2], awcField[3] );
             }
             else if ( isMP3Frame( frameHeader.id, "TIT1", "TT1" ) )
             {
-                printf( "Content group:        %ws\n", awcField );
+                wprf( L"Content group:        %ws\n", awcField );
             }
             else if ( isMP3Frame( frameHeader.id, "TIT2", "TT2" ) )
             {
-                printf( "Title:                %ws\n", awcField );
+                wprf( L"Title:                %ws\n", awcField );
             }
             else if ( isMP3Frame( frameHeader.id, "TIT3", "TT3" ) )
             {
-                printf( "Subtitle:             %ws\n", awcField );
+                wprf( L"Subtitle:             %ws\n", awcField );
             }
             else if ( isMP3Frame( frameHeader.id, "TLAN" ) )
             {
-                printf( "Languages:            %ws\n", awcField );
+                wprf( L"Languages:            %ws\n", awcField );
             }
             else if ( isMP3Frame( frameHeader.id, "TLEN" ) )
             {
-                printf( "Length:               %ws\n", awcField );
+                wprf( L"Length:               %ws\n", awcField );
             }
             else if ( isMP3Frame( frameHeader.id, "TMED" ) )
             {
-                printf( "Media type:           %ws\n", awcField );
+                wprf( L"Media type:           %ws\n", awcField );
             }
             else if ( isMP3Frame( frameHeader.id, "TOFN" ) )
             {
-                printf( "Original filename:    %ws\n", awcField );
+                wprf( L"Original filename:    %ws\n", awcField );
             }
             else if ( isMP3Frame( frameHeader.id, "TOPE" ) )
             {
-                printf( "Original artist:      %ws\n", awcField );
+                wprf( L"Original artist:      %ws\n", awcField );
             }
             else if ( isMP3Frame( frameHeader.id, "TORY" ) )
             {
-                printf( "Original release:    %ws\n", awcField );
+                wprf( L"Original release:    %ws\n", awcField );
             }
             else if ( isMP3Frame( frameHeader.id, "TOWN" ) )
             {
-                printf( "File owner:           %ws\n", awcField );
+                wprf( L"File owner:           %ws\n", awcField );
             }
             else if ( isMP3Frame( frameHeader.id, "TPE1", "TP1" ) )
             {
-                printf( "Lead performer(s):    %ws\n", awcField );
+                wprf( L"Lead performer(s):    %ws\n", awcField );
             }
             else if ( isMP3Frame( frameHeader.id, "TPE2", "TP2" ) )
             {
-                printf( "Band:                 %ws\n", awcField );
+                wprf( L"Band:                 %ws\n", awcField );
             }
             else if ( isMP3Frame( frameHeader.id, "TPE3", "TP3" ) )
             {
-                printf( "Conductor:            %ws\n", awcField );
+                wprf( L"Conductor:            %ws\n", awcField );
             }
             else if ( isMP3Frame( frameHeader.id, "TPOS", "TPA" ) )
             {
-                printf( "Part of set:          %ws\n", awcField );
+                wprf( L"Part of set:          %ws\n", awcField );
             }
             else if ( isMP3Frame( frameHeader.id, "TPUB" ) )
             {
-                printf( "Publisher:            %ws\n", awcField );
+                wprf( L"Publisher:            %ws\n", awcField );
             }
             else if ( isMP3Frame( frameHeader.id, "TRCK", "TRK" ) )
             {
-                printf( "Track:                %ws\n", awcField );
+                wprf( L"Track:                %ws\n", awcField );
             }
             else if ( isMP3Frame( frameHeader.id, "TRDA" ) )
             {
-                printf( "Recording dates:      %ws\n", awcField );
+                wprf( L"Recording dates:      %ws\n", awcField );
             }
             else if ( isMP3Frame( frameHeader.id, "TS2" ) )
             {
-                printf( "Artist (TS2):         %ws\n", awcField );
+                wprf( L"Artist (TS2):         %ws\n", awcField );
             }
             else if ( isMP3Frame( frameHeader.id, "TSA" ) )
             {
-                printf( "Album (TSA):          %ws\n", awcField );
+                wprf( L"Album (TSA):          %ws\n", awcField );
             }
             else if ( isMP3Frame( frameHeader.id, "TSO2" ) )
             {
-                printf( "iTunes artist sort:   %ws\n", awcField );
+                wprf( L"iTunes artist sort:   %ws\n", awcField );
             }
             else if ( isMP3Frame( frameHeader.id, "TSOA" ) )
             {
-                printf( "Album sort order:     %ws\n", awcField );
+                wprf( L"Album sort order:     %ws\n", awcField );
             }
             else if ( isMP3Frame( frameHeader.id, "TSOP" ) )
             {
-                printf( "Performer sort order: %ws\n", awcField );
+                wprf( L"Performer sort order: %ws\n", awcField );
             }
             else if ( isMP3Frame( frameHeader.id, "TSP" ) )
             {
-                printf( "Artist (TSP):         %ws\n", awcField );
+                wprf( L"Artist (TSP):         %ws\n", awcField );
             }
             else if ( isMP3Frame( frameHeader.id, "TSOT" ) )
             {
-                printf( "Title sort order:     %ws\n", awcField );
+                wprf( L"Title sort order:     %ws\n", awcField );
             }
             else if ( isMP3Frame( frameHeader.id, "TSRC" ) )
             {
-                printf( "ISRC:                 %ws\n", awcField );
+                wprf( L"ISRC:                 %ws\n", awcField );
             }
             else if ( isMP3Frame( frameHeader.id, "TSSE", "TSS" ) )
             {
-                printf( "Encoding software:    %ws\n", awcField );
+                wprf( L"Encoding software:    %ws\n", awcField );
             }
             else if ( isMP3Frame( frameHeader.id, "TST" ) )
             {
-                printf( "Title Sort Order :    %ws\n", awcField );
+                wprf( L"Title Sort Order :    %ws\n", awcField );
             }
             else if ( isMP3Frame( frameHeader.id, "TXXX" ) )
             {
             }
             else if ( isMP3Frame( frameHeader.id, "TYER", "TYE" ) )
             {
-                printf( "Year:                 %ws\n", awcField );
+                wprf( L"Year:                 %ws\n", awcField );
             }
             else if ( isMP3Frame( frameHeader.id, "UFID", "UFI" ) )
             {
@@ -7861,29 +7915,29 @@ void ParseMP3()
                 ReadMP3String( frameOffset + frameHeaderSize, awcField, _countof( awcField ), frameHeader.size, true, true, false );
 
                 if ( wcschr( awcField, L'\n' ) || wcschr( awcField, L'\r' ) || wcschr( awcField, 0xa ) )
-                    printf( "Lyrics:\n%ws\n", awcField );
+                    wprf( L"Lyrics:\n%ws\n", awcField );
                 else
-                    printf( "Lyrics:               %ws\n", awcField );
+                    wprf( L"Lyrics:               %ws\n", awcField );
             }
             else if ( isMP3Frame( frameHeader.id, "WFED" ) )
             {
-                printf( "Feed webpage:         %ws\n", awcField );
+                wprf( L"Feed webpage:         %ws\n", awcField );
             }
             else if ( isMP3Frame( frameHeader.id, "WOAR", "WAR" ) )
             {
-                printf( "Artist webpage:       %ws\n", awcField );
+                wprf( L"Artist webpage:       %ws\n", awcField );
             }
             else if ( isMP3Frame( frameHeader.id, "WOAF", "WAF" ) )
             {
-                printf( "Official webpage:     %ws\n", awcField );
+                wprf( L"Official webpage:     %ws\n", awcField );
             }
             else if ( isMP3Frame( frameHeader.id, "WXXX", "WXX" ) )
             {
-                printf( "Webpage:              %ws\n", awcField );
+                wprf( L"Webpage:              %ws\n", awcField );
             }
             else
             {
-                printf( "unknown frame id %c%c%c%c == %#x %#x %#x %#x\n", frameHeader.id[0], frameHeader.id[1], frameHeader.id[2], frameHeader.id[3],
+                prf( "unknown frame id %c%c%c%c == %#x %#x %#x %#x\n", frameHeader.id[0], frameHeader.id[1], frameHeader.id[2], frameHeader.id[3],
                         0xff & frameHeader.id[0], 0xff & frameHeader.id[1], 0xff & frameHeader.id[2], 0xff & frameHeader.id[3] );
             }
     
@@ -7891,7 +7945,7 @@ void ParseMP3()
     
             if ( frameOffset >= g_pStream->Length() )
             {
-                printf( "invalid frame offset is beyond the end of the file %#I64x\n", frameOffset );
+                prf( "invalid frame offset is beyond the end of the file %#I64x\n", frameOffset );
                 break;
             }
     
@@ -7899,7 +7953,7 @@ void ParseMP3()
     
             if ( frameOffset > ( start.size + firstFrameOffset ) )
             {
-                printf( "invalid frame offset %I64d is beyond the size in the header + firstFrame %I64d\n", frameOffset, start.size + firstFrameOffset );
+                prf( "invalid frame offset %I64d is beyond the size in the header + firstFrame %I64d\n", frameOffset, start.size + firstFrameOffset );
             }
         }
     }
@@ -7927,17 +7981,17 @@ void ParseMP3()
         if ( endTagExists )
         {
             //printf( "MP3 end of file tags:\n" );
-            printf( "song name:            %.30s\n", end.name );
-            printf( "artist:               %.30s\n", end.artist );
-            printf( "album:                %.30s\n", end.album );
-            printf( "year:                 %c%c%c%c\n", end.year[0], end.year[1], end.year[2], end.year[3] );
-            printf( "comment:              %.30s\n", end.comment );
+            prf( "song name:            %.30s\n", end.name );
+            prf( "artist:               %.30s\n", end.artist );
+            prf( "album:                %.30s\n", end.album );
+            prf( "year:                 %c%c%c%c\n", end.year[0], end.year[1], end.year[2], end.year[3] );
+            prf( "comment:              %.30s\n", end.comment );
 
             if ( 0 == end.comment[ 28 ] && 0 != end.comment[29 ] )
-                printf( "track:                %d\n", 0xff & end.comment[29] );
+                prf( "track:                %d\n", 0xff & end.comment[29] );
 
             if ( -1 != end.genre && 0 != end.genre ) // this throws away "blues", but it's usually incorrect anyway.
-                printf( "genre:                %d == %s\n", end.genre, GetMP3Genre( end.genre ) );
+                prf( "genre:                %d == %s\n", end.genre, GetMP3Genre( end.genre ) );
         }
     }
 
@@ -7965,12 +8019,12 @@ void ParseMP3()
 
     if ( delta == searchLen )
     {
-        printf( "can't find bitstream header pattern 0xffe0\n" );
+        prf( "can't find bitstream header pattern 0xffe0\n" );
         return;
     }
 
     if ( delta > 0 )
-        printf( "found bitstream header %d bytes from end of TAG set\n", delta );
+        prf( "found bitstream header %d bytes from end of TAG set\n", delta );
 
     // check for Variable Bitrate
     
@@ -8030,18 +8084,18 @@ void ParseMP3()
     vbr.m_music_length = _byteswap_ulong( vbr.m_music_length );
 
     DWORD h = vbr.header;
-    printf( "MPEGHeader:           %#x == ", h );
+    prf( "MPEGHeader:           %#x == ", h );
     for ( int i = 31; i > 0; i-- )
-        printf( 0 != ( ( h >> i ) & 0x1 ) ? "1" : "0" );
-    printf( "\n" );
+        prf( 0 != ( ( h >> i ) & 0x1 ) ? "1" : "0" );
+    prf( "\n" );
 
     if ( 0xffe00000 == ( h & 0xffe00000 ) )
     {
         int audioVersion = ( h >> 19 ) & 0x3;
-        printf( "MPEG audio Version:  %2d == %s\n", audioVersion, GetMPEGAudioVersion( audioVersion ) );
+        prf( "MPEG audio Version:  %2d == %s\n", audioVersion, GetMPEGAudioVersion( audioVersion ) );
     
         int layerDescription = ( h >> 17 ) & 0x3;
-        printf( "Layer:               %2d == %s\n", layerDescription, GetMPEGLayerDescription( layerDescription ) );
+        prf( "Layer:               %2d == %s\n", layerDescription, GetMPEGLayerDescription( layerDescription ) );
     
         const DWORD xing = 0x676e6958;  // "Xing"
         bool variableBitrate = false;
@@ -8049,80 +8103,80 @@ void ParseMP3()
         if ( 3 == audioVersion && xing == vbr.xing36 )
         {
             variableBitrate = true;
-            printf( "Variable bitrate:     xing for mpeg1 and channel != mono, flags %#x, xing offset %d\n", vbr.flags40, bitstreamOffset + delta + 36 );
+            prf( "Variable bitrate:     xing for mpeg1 and channel != mono, flags %#x, xing offset %d\n", vbr.flags40, bitstreamOffset + delta + 36 );
     
             if ( vbr.flags40 & 0x1 )
-                printf( "  VBR frames:         %d\n", vbr.frames44 );
+                prf( "  VBR frames:         %d\n", vbr.frames44 );
     
             if ( vbr.flags40 & 0x2 )
-                printf( "  VBR bytes:          %d\n", vbr.len48 );
+                prf( "  VBR bytes:          %d\n", vbr.len48 );
     
             if ( vbr.flags40 & 0x8 )
-                printf( "  VBR scale:          %d\n", vbr.scale152 );
+                prf( "  VBR scale:          %d\n", vbr.scale152 );
 
             if ( 0 != vbr.m_lame_version[0] )
             {
-                printf( "  Encoder:            " );
+                prf( "  Encoder:            " );
                 for ( int x = 0; x < 9; x++ )
                 {
                     if ( 0 == vbr.m_lame_version[x] )
                         break;
-                    printf( "%c", vbr.m_lame_version[x] );
+                    prf( "%c", vbr.m_lame_version[x] );
                 }
-                printf( "\n" );
+                prf( "\n" );
 
                 //printf( "  Encoder:            %.9s\n", vbr.m_lame_version );
-                printf( "  Revision:           %d\n", vbr.m_revision );
-                printf( "  VBR type:           %d\n", vbr.m_vbr_type );
-                printf( "  Lowpass frequency:  %3.1lf kHz\n", (double) vbr.m_lowpass_frequency * 100.0 / 1000.0 );
-                printf( "  Peak signal:        %#x\n", vbr.m_peak_signal );
-                printf( "  Average bitrate:    %d kbps\n", vbr.m_average_bit_rate );
-                printf( "  Source frequency:   %s\n", GetMP3SourceFrequency( vbr.m_source_frequency ) );
-                printf( "  Audio bytes:        %d\n", vbr.m_music_length );
+                prf( "  Revision:           %d\n", vbr.m_revision );
+                prf( "  VBR type:           %d\n", vbr.m_vbr_type );
+                prf( "  Lowpass frequency:  %3.1lf kHz\n", (double) vbr.m_lowpass_frequency * 100.0 / 1000.0 );
+                prf( "  Peak signal:        %#x\n", vbr.m_peak_signal );
+                prf( "  Average bitrate:    %d kbps\n", vbr.m_average_bit_rate );
+                prf( "  Source frequency:   %s\n", GetMP3SourceFrequency( vbr.m_source_frequency ) );
+                prf( "  Audio bytes:        %d\n", vbr.m_music_length );
     
                 if ( vbr.m_flag_no_gap_more )
-                    printf( "  No-gap next:        %d\n", vbr.m_flag_no_gap_more );
+                    prf( "  No-gap next:        %d\n", vbr.m_flag_no_gap_more );
                 if ( vbr.m_flag_no_gap_previous )
-                    printf( "  No-gap previous:    %d\n", vbr.m_flag_no_gap_previous );
+                    prf( "  No-gap previous:    %d\n", vbr.m_flag_no_gap_previous );
             }
         }
         else if ( 3 == audioVersion && xing == vbr.xing21 )
-            printf( "xing for mpeg1 and channel == mono\n" );
+            prf( "xing for mpeg1 and channel == mono\n" );
         else if ( 2 == audioVersion && xing == vbr.xing21 )
-            printf( "xing for mpeg2 and channel != mono\n" );
+            prf( "xing for mpeg2 and channel != mono\n" );
         else if ( 2 == audioVersion && xing == vbr.xing13 )
-            printf( "xing for mpeg2 and channel == mono\n" );
+            prf( "xing for mpeg2 and channel == mono\n" );
     
         int protectedBit = ( h >> 16 ) & 0x1;
-        printf( "Protected:           %2d == %s\n", protectedBit, GetMPEGProtected( protectedBit ) );
+        prf( "Protected:           %2d == %s\n", protectedBit, GetMPEGProtected( protectedBit ) );
     
         int bitrate = ( h >> 12 ) & 0xf;
         char acScratch[ 10 ];
         char const * pcBitrate = GetMPEGBitrate( bitrate, audioVersion, layerDescription, acScratch );
-        printf( "Bitrate:             %2d == %s kbps\n", bitrate, variableBitrate ? "variable" : pcBitrate );
+        prf( "Bitrate:             %2d == %s kbps\n", bitrate, variableBitrate ? "variable" : pcBitrate );
     
         int samplerate = ( h >> 10 ) & 0x3;
         char const * pcSamplerate = GetMPEGSamplerate( samplerate, audioVersion, acScratch );
-        printf( "Sample rate:         %2d == %s Hz\n", samplerate, pcSamplerate );
+        prf( "Sample rate:         %2d == %s Hz\n", samplerate, pcSamplerate );
     
         int channelmode = ( h >> 6 ) & 0x3;
-        printf( "Channel mode:        %2d == %s\n", channelmode, GetMPEGChannelMode( channelmode ) );
+        prf( "Channel mode:        %2d == %s\n", channelmode, GetMPEGChannelMode( channelmode ) );
     
         int modeextension = ( h >> 4 ) & 0x3;
-        printf( "Mode extension:      %2d == %s\n", modeextension, GetMPEGModeExtension( modeextension, layerDescription ) );
+        prf( "Mode extension:      %2d == %s\n", modeextension, GetMPEGModeExtension( modeextension, layerDescription ) );
     
         int copyright = ( h >> 3 ) & 0x1;
-        printf( "Copyright:           %2d == %s\n", copyright, copyright ? "true" : "false" );
+        prf( "Copyright:           %2d == %s\n", copyright, copyright ? "true" : "false" );
     
         int original = ( h >> 2 ) & 0x1;
-        printf( "Original media:      %2d == %s\n", original, original ? "true" : "false" );
+        prf( "Original media:      %2d == %s\n", original, original ? "true" : "false" );
     
         int emphasis = h & 0x3;
-        printf( "Emphasis:            %2d == %s\n", emphasis, GetMPEGEmphasis( emphasis ) );
+        prf( "Emphasis:            %2d == %s\n", emphasis, GetMPEGEmphasis( emphasis ) );
     }
     else
     {
-        printf( "top 11 bits of frame sync aren't set; metadata is suspect\n" );
+        prf( "top 11 bits of frame sync aren't set; metadata is suspect\n" );
     }
 
     #pragma pack(pop)
@@ -8221,7 +8275,7 @@ const char * GetAsfGuid( GUID & id )
 
 void PrintAsfGuid( const char * pcPrefix, GUID & id, QWORD size )
 {
-    printf( "%s{%08lx-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x} == %s, size %I64d == %#I64x\n",
+    prf( "%s{%08lx-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x} == %s, size %I64d == %#I64x\n",
             pcPrefix,
             id.Data1,
             id.Data2,
@@ -8289,7 +8343,7 @@ void ParseAsf()
     __int64 len = g_pStream->Length();
     if ( len < 128 )
     {
-        printf( "ASF file is too small\n" );
+        prf( "ASF file is too small\n" );
         return;
     }
 
@@ -8298,7 +8352,7 @@ void ParseAsf()
 
     if ( 0x75b22630 != dwHead )
     {
-        printf( "can't find an ASF header (0x75b22630 expected): %#x\n", dwHead );
+        prf( "can't find an ASF header (0x75b22630 expected): %#x\n", dwHead );
         return;
     }
 
@@ -8308,7 +8362,7 @@ void ParseAsf()
     while ( frameOffset < len )
     {
         if ( g_FullInformation )
-            printf( "reading next frame at offset %I64d\n", frameOffset );
+            prf( "reading next frame at offset %I64d\n", frameOffset );
 
         AsfObject obj;
         GetBytes( frameOffset, &obj, sizeof obj );
@@ -8320,7 +8374,7 @@ void ParseAsf()
     
         if ( obj.size > 1024 * 1024 * 40 )
         {
-            printf( "invalid frame size is too large: %I64u == %#I64x\n", obj.size, obj.size );
+            prf( "invalid frame size is too large: %I64u == %#I64x\n", obj.size, obj.size );
             return;
         }
 
@@ -8330,7 +8384,7 @@ void ParseAsf()
             AsfHeaderObject headobj;
             GetBytes( frameOffset, &headobj, sizeof headobj );
 
-            printf( "header object count: %d\n", headobj.numObjects );
+            prf( "header object count: %d\n", headobj.numObjects );
 
             __int64 offset = frameOffset + sizeof headobj;
 
@@ -8348,25 +8402,25 @@ void ParseAsf()
 
                     if ( g_FullInformation )
                     {
-                        printf( "    title length: %u\n", cdo.titleLen );
-                        printf( "    author length: %u\n", cdo.authorLen );
-                        printf( "    copyright length: %u\n", cdo.copyrightLen );
-                        printf( "    description length: %u\n", cdo.descriptionLen );
-                        printf( "    rating length: %u\n", cdo.ratingLen );
+                        prf( "    title length: %u\n", cdo.titleLen );
+                        prf( "    author length: %u\n", cdo.authorLen );
+                        prf( "    copyright length: %u\n", cdo.copyrightLen );
+                        prf( "    description length: %u\n", cdo.descriptionLen );
+                        prf( "    rating length: %u\n", cdo.ratingLen );
                     }
 
                     if ( ( cdo.titleLen >= 0 ) && ( cdo.titleLen < ( sizeof awcBuf - 2 ) ) )
                     {
                         GetBytes( offset + sizeof cdo, awcBuf, cdo.titleLen );
                         awcBuf[ cdo.titleLen / 2 ] = 0;
-                        printf( "    %-30s: %ws\n", "Title", awcBuf );
+                        wprf( L"    %-30s: %ws\n", "Title", awcBuf );
                     }
 
                     if ( ( cdo.authorLen >= 0 ) && ( cdo.authorLen < ( sizeof awcBuf - 2 ) ) )
                     {
                         GetBytes( offset + sizeof cdo + cdo.titleLen, awcBuf, cdo.authorLen );
                         awcBuf[ cdo.authorLen / 2 ] = 0;
-                        printf( "    %-30s: %ws\n", "Author", awcBuf );
+                        wprf( L"    %-30s: %ws\n", "Author", awcBuf );
                     }
                 }
                 else if ( ASF_Extended_Content_Description_Object == headerObject.id )
@@ -8375,7 +8429,7 @@ void ParseAsf()
                     WORD cdCount = GetWORD( ecdOffset, true );
                     ecdOffset += sizeof WORD;
 
-                    printf( "    extended content count        : %u\n", cdCount );
+                    prf( "    extended content count        : %u\n", cdCount );
 
                     for ( WORD cd = 0; cd < cdCount; cd++ )
                     {
@@ -8383,7 +8437,7 @@ void ParseAsf()
                         ecdOffset += sizeof WORD;
 
                         if ( g_FullInformation )
-                            printf( "      descriptor name length: %u\n", namelen );
+                            prf( "      descriptor name length: %u\n", namelen );
 
                         unique_ptr<byte> name( new byte[ 2 + namelen ] );
                         GetBytes( ecdOffset, name.get(), namelen );
@@ -8392,7 +8446,7 @@ void ParseAsf()
                         WCHAR * pwcName = (WCHAR *) name.get();
                         pwcName[ namelen / 2 ] = 0;
                         if ( g_FullInformation )
-                            printf( "      name: %ws\n", pwcName );
+                            wprf( L"      name: %ws\n", pwcName );
 
                         WORD valuetype = GetWORD( ecdOffset, true );
                         ecdOffset += sizeof WORD;
@@ -8405,40 +8459,40 @@ void ParseAsf()
                         ecdOffset += valuelen;
 
                         if ( g_FullInformation )
-                            printf( "      value type %u, length %u\n", valuetype, valuelen );
+                            prf( "      value type %u, length %u\n", valuetype, valuelen );
 
-                        printf( "    %-30ws: ", pwcName );
+                        prf( "    %-30ws: ", pwcName );
 
                         if ( 0 == valuetype )
                         {
                             WCHAR * pwcValue = (WCHAR *) value.get();
                             pwcValue[ valuelen / 2 ] = 0;
-                            printf( "%ws\n", pwcValue );
+                            wprf( L"%ws\n", pwcValue );
                         }
                         else if ( 1 == valuetype )
                         {
-                            printf( "\n" );
+                            prf( "\n" );
                             DumpBinaryData( ecdOffset - valuelen, 0, valuelen, 6, ecdOffset - valuelen );
                         }
                         else if ( 2 == valuetype )
                         {
                             BOOL x = * ( BOOL * ) value.get();
-                            printf( "%s\n", x ? "true" : "false" );
+                            prf( "%s\n", x ? "true" : "false" );
                         }
                         else if ( 3 == valuetype )
                         {
                             DWORD x = * ( DWORD * ) value.get();
-                            printf( "%u\n", x );
+                            prf( "%u\n", x );
                         }
                         else if ( 4 == valuetype )
                         {
                             QWORD x = * ( QWORD * ) value.get();
-                            printf( "%I64u\n", x );
+                            prf( "%I64u\n", x );
                         }
                         else if ( 5 == valuetype )
                         {
                             WORD x = * ( WORD * ) value.get();
-                            printf( "%u\n", x );
+                            prf( "%u\n", x );
                         }
                     }
                 }
@@ -8447,7 +8501,7 @@ void ParseAsf()
                     AsfHeaderExtensionObject ext;
                     GetBytes( offset, &ext, sizeof ext );
 
-                    printf( "    Header Extension Object size %u\n", ext.dataSize );
+                    prf( "    Header Extension Object size %u\n", ext.dataSize );
                     DumpBinaryData( offset + sizeof ext, 0, ext.dataSize, 6, offset + sizeof ext );
                 }
                 else if ( ASF_File_Properties_Object == headerObject.id )
@@ -8456,8 +8510,8 @@ void ParseAsf()
                     GetBytes( offset, &props, sizeof props );
 
                     QWORD durationSecs = props.playDuration / 10000000;
-                    printf( "    %-30s: %I64u seconds\n", "Duration", durationSecs );
-                    printf( "    %-30s: %u bits per second\n", "Maximum Bitrate", props.maxBitrate );
+                    prf( "    %-30s: %I64u seconds\n", "Duration", durationSecs );
+                    prf( "    %-30s: %u bits per second\n", "Maximum Bitrate", props.maxBitrate );
                 }
                 else if ( ASF_Stream_Bitrate_Properties_Object == headerObject.id )
                 {
@@ -8474,8 +8528,8 @@ void ParseAsf()
                         DWORD averageBitrate = GetDWORD( o, true );
                         o += sizeof DWORD;
         
-                        printf( "    %-30s: %u\n", "Stream Number", flags & 0xef );
-                        printf( "    %-30s: %u bits per second\n", "Average Bitrate", averageBitrate );
+                        prf( "    %-30s: %u\n", "Stream Number", flags & 0xef );
+                        prf( "    %-30s: %u bits per second\n", "Average Bitrate", averageBitrate );
                     }
                 }
 
@@ -8594,7 +8648,7 @@ const char * WavExtendedFormatType( GUID & guid )
 
 void PrintGUID( GUID & guid )
 {
-    printf( "Guid = {%08lX-%04hX-%04hX-%02hhX%02hhX-%02hhX%02hhX%02hhX%02hhX%02hhX%02hhX}",
+    prf( "Guid = {%08lX-%04hX-%04hX-%02hhX%02hhX-%02hhX%02hhX%02hhX%02hhX%02hhX%02hhX}",
             guid.Data1, guid.Data2, guid.Data3,
             guid.Data4[0], guid.Data4[1], guid.Data4[2], guid.Data4[3],
             guid.Data4[4], guid.Data4[5], guid.Data4[6], guid.Data4[7] );
@@ -8647,7 +8701,7 @@ void ParseWav()
     __int64 len = g_pStream->Length();
     if ( len < sizeof header )
     {
-        printf( "Wav file is too small\n" );
+        prf( "Wav file is too small\n" );
         return;
     }
 
@@ -8655,18 +8709,18 @@ void ParseWav()
 
     if ( memcmp( & header.riff, "RIFF", sizeof header.riff ) )
     {
-        printf( "Wav header isn't RIFF\n" );
+        prf( "Wav header isn't RIFF\n" );
         return;
     }
 
     if ( memcmp( & header.wave, "WAVE", sizeof header.wave ) )
     {
-        printf( "Wav wave header isn't WAVE\n" );
+        prf( "Wav wave header isn't WAVE\n" );
         return;
     }
 
-    printf( "header.size (file size - 8):   %d\n", header.size );
-    printf( "mimetype:                      audio/x-wav\n" );
+    prf( "header.size (file size - 8):   %d\n", header.size );
+    prf( "mimetype:                      audio/x-wav\n" );
 
     __int64 offset = sizeof header;
 
@@ -8680,25 +8734,25 @@ void ParseWav()
         if ( 0 == chunk.format )
             break;
 
-        printf( "chunk: %c%c%c%c, size %d\n", chunk.format & 0xff, ( chunk.format >> 8 ) & 0xff,
+        prf( "chunk: %c%c%c%c, size %d\n", chunk.format & 0xff, ( chunk.format >> 8 ) & 0xff,
                                               ( chunk.format >> 16 ) & 0xff, ( chunk.format >> 24 ) & 0xff,
                                               chunk.formatSize );
 
         if ( !memcmp( &chunk.format, "fmt ", 4 ) )
         {
-            printf( "  type of format:              %d -- %s\n",    chunk.formatType, WavFormatType( chunk.formatType ) );
+            prf( "  type of format:              %d -- %s\n",    chunk.formatType, WavFormatType( chunk.formatType ) );
             if ( 0xfffe == chunk.formatType )
             {
-                printf( "  extended format:             %s\n", WavExtendedFormatType( chunk.subFormat ) );
-                printf( "                               " );
+                prf( "  extended format:             %s\n", WavExtendedFormatType( chunk.subFormat ) );
+                prf( "                               " );
                 PrintGUID( chunk.subFormat );
-                printf( "\n" );
+                prf( "\n" );
             }
-            printf( "  channels:                    %d\n", chunk.channels );
-            printf( "  sample rate (samples/sec):   %d\n", chunk.sampleRate );
-            printf( "  dataRate (Bytes/sec):        %d\n", chunk.dataRate );
-            printf( "  blockAlign:                  %d\n", chunk.blockAlign );
-            printf( "  bits per sample:             %d\n", chunk.bitsPerSample );
+            prf( "  channels:                    %d\n", chunk.channels );
+            prf( "  sample rate (samples/sec):   %d\n", chunk.sampleRate );
+            prf( "  dataRate (Bytes/sec):        %d\n", chunk.dataRate );
+            prf( "  blockAlign:                  %d\n", chunk.blockAlign );
+            prf( "  bits per sample:             %d\n", chunk.bitsPerSample );
 
             fmtSubchunk = chunk;
         }
@@ -8706,9 +8760,9 @@ void ParseWav()
         {
             int samples = chunk.formatSize / fmtSubchunk.blockAlign;
 
-            printf( "  data size:                   %d\n", chunk.formatSize );
-            printf( "  sample count:                %d\n", samples );
-            printf( "  seconds:                     %lf\n", (double) samples / (double) fmtSubchunk.sampleRate );
+            prf( "  data size:                   %d\n", chunk.formatSize );
+            prf( "  sample count:                %d\n", samples );
+            prf( "  seconds:                     %lf\n", (double) samples / (double) fmtSubchunk.sampleRate );
 
             DumpBinaryData( offset + 8, 0, chunk.formatSize, 2, offset + 8 );
         }
@@ -8722,7 +8776,7 @@ void ParseWav()
             {
                 DWORD samplesPerChannel;
                 memcpy( &samplesPerChannel, &chunk.formatType, sizeof( samplesPerChannel ) );
-                printf( "  samples per channel:         %u\n", samplesPerChannel );
+                prf( "  samples per channel:         %u\n", samplesPerChannel );
             }
         }
         else if ( !memcmp( &chunk.format, "PEAK", 4 ) )
@@ -8734,18 +8788,18 @@ void ParseWav()
             if ( chunk.formatSize != ( sizeof( WavPeakchunk::version ) +
                                        sizeof( WavPeakchunk::timeStamp ) +
                                        fmtSubchunk.channels * sizeof( PositionPeak ) ) )
-                printf( "peak chunk is malformed\n" );
+                prf( "peak chunk is malformed\n" );
             else
             {
                 GetBytes( offset, ppeak, chunkSize );
-                printf( "  version:                   %d\n", ppeak->version );
+                prf( "  version:                   %d\n", ppeak->version );
                 if ( 1 == ppeak->version )
                 {
                     time_t the_time_t = (time_t) ppeak->timeStamp;
                     struct tm the_tm = * localtime( & the_time_t );
-                    printf( "  timestamp:                   %#x == %s", ppeak->timeStamp, asctime( & the_tm ) );
+                    prf( "  timestamp:                   %#x == %s", ppeak->timeStamp, asctime( & the_tm ) );
                     for ( DWORD c = 0; c < fmtSubchunk.channels; c++ )
-                        printf( "  channel %d:                   value %f and position %u\n", c, ppeak->peak[ c ].value, ppeak->peak[ c ].position );
+                        prf( "  channel %d:                   value %f and position %u\n", c, ppeak->peak[ c ].value, ppeak->peak[ c ].position );
                 }
             }
         }
@@ -8793,7 +8847,7 @@ void ParseICO()
     __int64 len = g_pStream->Length();
     if ( len < sizeof header )
     {
-        printf( "Ico/Cur file is too small\n" );
+        prf( "Ico/Cur file is too small\n" );
         return;
     }
 
@@ -8801,13 +8855,13 @@ void ParseICO()
 
     if ( 0 != header.reserved0 )
     {
-        printf( "Ico/Cur file's first byte isn't 0\n" );
+        prf( "Ico/Cur file's first byte isn't 0\n" );
         return;
     }
 
-    printf( "mimetype:                             image/ico\n" );
-    printf( "file type:                            %u == %s\n", header.type, IcoType( header.type ) );
-    printf( "image count:                          %u\n", header.count );
+    prf( "mimetype:                             image/ico\n" );
+    prf( "file type:                            %u == %s\n", header.type, IcoType( header.type ) );
+    prf( "image count:                          %u\n", header.count );
 
     for ( WORD d = 0; d < header.count; d++ )
     {
@@ -8815,30 +8869,30 @@ void ParseICO()
 
         GetBytes( sizeof( IcoHeader ) + d * sizeof( IcoDirectoryEntry ), &entry, sizeof entry );
 
-        printf( "  directory entry                     %u\n", d );
-        printf( "    width                             %u\n", entry.width );
-        printf( "    height                            %u\n", entry.height );
-        printf( "    palette colors                    %u\n", entry.paletteColors );
-        printf( "    reserved                          %u\n", entry.reserved0 );
+        prf( "  directory entry                     %u\n", d );
+        prf( "    width                             %u\n", entry.width );
+        prf( "    height                            %u\n", entry.height );
+        prf( "    palette colors                    %u\n", entry.paletteColors );
+        prf( "    reserved                          %u\n", entry.reserved0 );
 
         if ( 1 == header.type )
         {
-            printf( "    color planes                      %u\n", entry.colorPlanes );
-            printf( "    bits per pixel                    %u\n", entry.bpp );
+            prf( "    color planes                      %u\n", entry.colorPlanes );
+            prf( "    bits per pixel                    %u\n", entry.bpp );
         }
         else if ( 2 == header.type )
         {
-            printf( "    horizontal hotspot from left      %u\n", entry.colorPlanes );
-            printf( "    vertical hotspot from top         %u\n", entry.bpp );
+            prf( "    horizontal hotspot from left      %u\n", entry.colorPlanes );
+            prf( "    vertical hotspot from top         %u\n", entry.bpp );
         }
 
-        printf( "    image data size                   %u\n", entry.dataSize );
-        printf( "    image data offset                 %u\n", entry.dataOffset );
+        prf( "    image data size                   %u\n", entry.dataSize );
+        prf( "    image data offset                 %u\n", entry.dataOffset );
 
 
         DWORD dwHeader0 = GetDWORD( entry.dataOffset, false );
         DWORD dwHeader4 = GetDWORD( 4 + entry.dataOffset, false );
-        printf( "    image format                      %s\n", ( 0x89504e47 == dwHeader0 && 0xd0a1a0a == dwHeader4 ) ? "PNG" : "BMP" );
+        prf( "    image format                      %s\n", ( 0x89504e47 == dwHeader0 && 0xd0a1a0a == dwHeader4 ) ? "PNG" : "BMP" );
     }
 
 } //ParseICO
@@ -8871,42 +8925,42 @@ struct RafHeader
 
 void AttemptFujifilmParse()
 {
-    printf( "Fujifilm RAF raw file:\n" );
+    prf( "Fujifilm RAF raw file:\n" );
     RafHeader raf = { 0 };
     GetBytes( 0, &raf, sizeof raf );
     raf.littleEndian();
 
-    printf( "  RAF magic:                          " );
+    prf( "  RAF magic:                          " );
     for ( int i = 0; i < sizeof raf.magic; i++ )
-        printf( "%c", raf.magic[ i ] );
-    printf( "\n" );
+        prf( "%c", raf.magic[ i ] );
+    prf( "\n" );
 
-    printf( "  RAF format version:                 " );
+    prf( "  RAF format version:                 " );
     for ( int i = 0; i < sizeof raf.formatVersion; i++ )
-        printf( "%c", raf.formatVersion[ i ] );
-    printf( "\n" );
+        prf( "%c", raf.formatVersion[ i ] );
+    prf( "\n" );
 
-    printf( "  RAF camera number ID:               " );
+    prf( "  RAF camera number ID:               " );
     for ( int i = 0; i < sizeof raf.cameraNumberID; i++ )
-        printf( "%c", raf.cameraNumberID[ i ] );
-    printf( "\n" );
+        prf( "%c", raf.cameraNumberID[ i ] );
+    prf( "\n" );
 
-    printf( "  RAF camera body name:               %s\n", raf.camerabodyname );
+    prf( "  RAF camera body name:               %s\n", raf.camerabodyname );
 
-    printf( "  RAF sub version:                    " );
+    prf( "  RAF sub version:                    " );
     for ( int i = 0; i < sizeof raf.subVersion; i++ )
-        printf( "%c", raf.subVersion[ i ] );
-    printf( "\n" );
+        prf( "%c", raf.subVersion[ i ] );
+    prf( "\n" );
 
-    printf( "  RAF jpg offset:                     %#x\n", raf.jpgOffset );
-    printf( "  RAF jpg length:                     %#x\n", raf.jpgLength );
-    printf( "  RAF cfa header offset:              %#x\n", raf.cfaHeaderOffset );
-    printf( "  RAF cfa header length:              %#x\n", raf.cfaHeaderLength );
-    printf( "  RAF cfa offset:                     %#x\n", raf.cfaOffset );
-    printf( "  RAF cfa length:                     %#x\n", raf.cfaLength );
+    prf( "  RAF jpg offset:                     %#x\n", raf.jpgOffset );
+    prf( "  RAF jpg length:                     %#x\n", raf.jpgLength );
+    prf( "  RAF cfa header offset:              %#x\n", raf.cfaHeaderOffset );
+    prf( "  RAF cfa header length:              %#x\n", raf.cfaHeaderLength );
+    prf( "  RAF cfa offset:                     %#x\n", raf.cfaOffset );
+    prf( "  RAF cfa length:                     %#x\n", raf.cfaLength );
 
     DWORD recordCount = GetDWORD( raf.cfaHeaderOffset, false );
-    printf( "  RAF count of records:               %d\n", recordCount );
+    prf( "  RAF count of records:               %d\n", recordCount );
 
     DWORD recordOffset = raf.cfaHeaderOffset + sizeof DWORD;
 
@@ -8917,13 +8971,13 @@ void AttemptFujifilmParse()
         WORD size = GetWORD( recordOffset, false );
         recordOffset += sizeof WORD;
 
-        printf( "    RAF cfa record tag                %d == %#x\n", tagID, tagID );
-        printf( "    RAF cfa record size               %d\n", size );
+        prf( "    RAF cfa record tag                %d == %#x\n", tagID, tagID );
+        prf( "    RAF cfa record size               %d\n", size );
 
         if ( 4 == size )
         {
             DWORD val = GetDWORD( recordOffset, false );
-            printf( "    RAF cfa record value:             %#x\n", val );
+            prf( "    RAF cfa record value:             %#x\n", val );
         }
 
         recordOffset += size;
@@ -8937,11 +8991,11 @@ void EnumerateImageData( WCHAR const * pwc )
 
     if ( !g_pStream->Ok() )
     {
-        printf( "can't open file %ws\n", pwc );
+        wprf( L"can't open file %ws\n", pwc );
         return;
     }
 
-    printf( "file size: %28I64d\n", GetStreamLength() );
+    prf( "file size: %28I64d\n", GetStreamLength() );
     WCHAR * pwcExt = PathFindExtension( pwc );
     DWORD heifOffsetBase = 0;
 
@@ -8954,16 +9008,16 @@ void EnumerateImageData( WCHAR const * pwc )
 
         if ( 0 == g_Heif_Exif_Offset )
         {
-            printf( "can't find Exif data in this heif (.heic/.hif) file\n" );
+            prf( "can't find Exif data in this heif (.heic/.hif) file\n" );
             return;
         }
 
-        printf( "mimetype:                             image/heic\n" );
+        prf( "mimetype:                             image/heic\n" );
         DWORD o = GetDWORD( g_Heif_Exif_Offset, false );
 
         heifOffsetBase = o + g_Heif_Exif_Offset + 4;
         g_pStream->Seek( heifOffsetBase );
-        printf( "file size: %I64d\n", GetStreamLength() );
+        prf( "file size: %I64d\n", GetStreamLength() );
 
         //printf( "o: %d, heifOffsetBase: %d\n", o, heifOffsetBase );
     }
@@ -8976,11 +9030,11 @@ void EnumerateImageData( WCHAR const * pwc )
 
         if ( 0 == g_Canon_CR3_Exif_IFD0 )
         {
-            printf( "can't find Exif data in this Canon CR3 file\n" );
+            prf( "can't find Exif data in this Canon CR3 file\n" );
             return;
         }
 
-        printf( "mimetype:                             image/x-canon-cr3\n" );
+        prf( "mimetype:                             image/x-canon-cr3\n" );
         heifOffsetBase = g_Canon_CR3_Exif_IFD0;
         g_pStream->Seek( heifOffsetBase );
 
@@ -9012,12 +9066,12 @@ void EnumerateImageData( WCHAR const * pwc )
 
     if ( 0 == readbytes )
     {
-        printf( "can't read from the file\n" );
+        prf( "can't read from the file\n" );
         return;
     }
 
     if ( g_FullInformation )
-        printf( "header %#x\n", header );
+        prf( "header %#x\n", header );
 
     if ( 0x43614c66 == header )
     {
@@ -9029,14 +9083,14 @@ void EnumerateImageData( WCHAR const * pwc )
 
             embeddedImage->Read( &header, sizeof header );
 
-            printf( "Embedded image metadata:\n" );
+            prf( "Embedded image metadata:\n" );
 
             if ( g_FullInformation )
-                printf( "header of image embedded in flac: %#x\n", header );
+                prf( "header of image embedded in flac: %#x\n", header );
 
             stream.reset( embeddedImage );
             g_pStream = embeddedImage;
-            printf( "file size: %28I64d\n", GetStreamLength() );
+            prf( "file size: %28I64d\n", GetStreamLength() );
         }
         else
         {
@@ -9048,7 +9102,7 @@ void EnumerateImageData( WCHAR const * pwc )
         // likely mp3
 
         if ( wcsicmp( pwcExt, L".mp3" ) )
-            printf( "file header says mp3, but file extension isn't mp3. Trying anyway!\n" );
+            prf( "file header says mp3, but file extension isn't mp3. Trying anyway!\n" );
 
         ParseMP3();
 
@@ -9058,14 +9112,14 @@ void EnumerateImageData( WCHAR const * pwc )
 
             embeddedImage->Read( &header, sizeof header );
 
-            printf( "Embedded image metadata:\n" );
+            prf( "Embedded image metadata:\n" );
 
             if ( g_FullInformation )
-                printf( "header of image embedded in mp3: %#x\n", header );
+                prf( "header of image embedded in mp3: %#x\n", header );
 
             stream.reset( embeddedImage );
             g_pStream = embeddedImage;
-            printf( "file size: %I64d\n", GetStreamLength() );
+            prf( "file size: %I64d\n", GetStreamLength() );
         }
         else
         {
@@ -9082,7 +9136,7 @@ void EnumerateImageData( WCHAR const * pwc )
          ( 0x474e5089 != header ) &&                  // PNG
          ( 0x4d42     != ( header & 0xffff ) ) )      // BMP
     {
-        printf( "header %#x is unrecognized in file %ws\n", header, pwc );
+        wprf( L"header %#x is unrecognized in file %ws\n", header, pwc );
         return;
     }
 
@@ -9104,7 +9158,7 @@ void EnumerateImageData( WCHAR const * pwc )
 
         if ( 0x0d0a1a0a != nextFour )
         {
-            printf( "second four bytes of PNG not recognized: %#x\n", nextFour );
+            prf( "second four bytes of PNG not recognized: %#x\n", nextFour );
             return;
         }
 
@@ -9118,7 +9172,7 @@ void EnumerateImageData( WCHAR const * pwc )
         int exifMaybe = ParseOldJpg();
 
         if ( g_FullInformation )
-            printf( "exifMaybe offset %#x\n", exifMaybe );
+            prf( "exifMaybe offset %#x\n", exifMaybe );
 
         if ( 0 == exifMaybe )
             return;
@@ -9142,7 +9196,7 @@ void EnumerateImageData( WCHAR const * pwc )
         if ( ( 0x002a4949 == maybe ) || ( 0x2a004d4d == maybe ) )
         {
             if ( g_FullInformation )
-                printf( "found exif info pointed to by app1 data at offset %d\n", exifMaybe + 5 );
+                prf( "found exif info pointed to by app1 data at offset %d\n", exifMaybe + 5 );
             exifHeaderOffset = exifMaybe;
             headerBase = exifHeaderOffset;
             startingOffset = exifHeaderOffset + 4;
@@ -9164,18 +9218,18 @@ void EnumerateImageData( WCHAR const * pwc )
 
         if ( 0xd8ff != ( jpgSig & 0xffff ) )
         {
-            printf( "unexpected JPG header in RAF file: %#x, %ws\n", jpgSig, pwc );
+            wprf( L"unexpected JPG header in RAF file: %#x, %ws\n", jpgSig, pwc );
             return;
         }
 
-        printf( "Embedded JPG in RAF:\n" );
+        prf( "Embedded JPG in RAF:\n" );
         int exifMaybe = ParseOldJpg( jpgOffset );
         DWORD exifSig = GetDWORD( jpgOffset + exifHeaderOffset, true );
         //printf( "jpg exif Sig: %#x\n", exifSig );
 
         if ( 0x002a4949 != exifSig )
         {
-            printf( "unexpected EXIF header in RAF file %#x, %ws\n", exifSig, pwc );
+            wprf( L"unexpected EXIF header in RAF file %#x, %ws\n", exifSig, pwc );
             return;
         }
 
@@ -9213,24 +9267,24 @@ void EnumerateImageData( WCHAR const * pwc )
         littleEndian = false;
 
     if ( g_FullInformation )
-        printf( "little endian: %#x, starting offset %d, headerBase %d\n", littleEndian, startingOffset, headerBase );
+        prf( "little endian: %#x, starting offset %d, headerBase %d\n", littleEndian, startingOffset, headerBase );
 
     DWORD IFDOffset = GetDWORD( startingOffset, littleEndian );
 
     if ( !wcsicmp( pwcExt, L".dng" ) )
-        printf( "mimetype:                             image/x-adobe-dng\n" );
+        prf( "mimetype:                             image/x-adobe-dng\n" );
     else if ( !wcsicmp( pwcExt, L".tif" ) || !wcsicmp( pwcExt, L".tiff" ) )
-        printf( "mimetype:                             image/tiff\n" );
+        prf( "mimetype:                             image/tiff\n" );
     else if ( !wcsicmp( pwcExt, L".rw2" ) )
-        printf( "mimetype:                             image/x-panasonic-rw2\n" );
+        prf( "mimetype:                             image/x-panasonic-rw2\n" );
     else if ( !wcsicmp( pwcExt, L".cr2" ) )
-        printf( "mimetype:                             image/x-canon-cr2\n" );
+        prf( "mimetype:                             image/x-canon-cr2\n" );
     else if ( !wcsicmp( pwcExt, L".arw" ) )
-        printf( "mimetype:                             image/x-sony-arw\n" );
+        prf( "mimetype:                             image/x-sony-arw\n" );
     else if ( !wcsicmp( pwcExt, L".raf" ) )
-        printf( "mimetype:                             image/x-fujifilm-raf\n" );
+        prf( "mimetype:                             image/x-fujifilm-raf\n" );
     else if ( !wcsicmp( pwcExt, L".orf" ) )
-        printf( "mimetype:                             image/x-olympus-orf\n" );
+        prf( "mimetype:                             image/x-olympus-orf\n" );
 
     EnumerateIFD0( 0, IFDOffset, headerBase, littleEndian, pwcExt );
 
@@ -9244,11 +9298,11 @@ void EnumerateImageData( WCHAR const * pwc )
 
         if ( !g_pStream->Ok() )
         {
-            printf( "can't open file %ws\n", pwc );
+            wprf( L"can't open file %ws\n", pwc );
             return;
         }
 
-        printf( "file size: %I64d\n", GetStreamLength() );
+        prf( "file size: %I64d\n", GetStreamLength() );
         int exifMaybe = ParseOldJpg();
         if ( 0 != exifMaybe )
         {
@@ -9271,7 +9325,7 @@ void EnumerateImageData( WCHAR const * pwc )
             if ( ( 0x002a4949 == maybe ) || ( 0x2a004d4d == maybe ) )
             {
                 if ( g_FullInformation )
-                    printf( "found exif info pointed to by app1 data at offset %d\n", exifMaybe + 5 );
+                    prf( "found exif info pointed to by app1 data at offset %d\n", exifMaybe + 5 );
                 exifHeaderOffset = exifMaybe;
                 headerBase = exifHeaderOffset;
                 startingOffset = exifHeaderOffset + 4;
@@ -9286,7 +9340,7 @@ void EnumerateImageData( WCHAR const * pwc )
 
     if ( 0 != g_Canon_CR3_Exif_Exif_IFD )
     {
-        printf( "Canon CR3 Exif IFD:\n" );
+        prf( "Canon CR3 Exif IFD:\n" );
 
         WORD endian = GetWORD( g_Canon_CR3_Exif_Exif_IFD, littleEndian );
 
@@ -9295,7 +9349,7 @@ void EnumerateImageData( WCHAR const * pwc )
 
     if ( 0 != g_Canon_CR3_Exif_Makernotes_IFD )
     {
-        printf( "Canon CR3 Makernotes:\n" );
+        prf( "Canon CR3 Makernotes:\n" );
 
         WORD endian = GetWORD( g_Canon_CR3_Exif_Makernotes_IFD, littleEndian );
 
@@ -9304,7 +9358,7 @@ void EnumerateImageData( WCHAR const * pwc )
 
     if ( 0 != g_Canon_CR3_Exif_GPS_IFD  )
     {
-        printf( "Canon CR3 Exif GPS IFD:\n" );
+        prf( "Canon CR3 Exif GPS IFD:\n" );
 
         WORD endian = GetWORD( g_Canon_CR3_Exif_GPS_IFD, littleEndian );
 
@@ -9322,7 +9376,7 @@ extern "C" int __cdecl wmain( int argc, WCHAR * argv[] )
 
     _set_se_translator([](unsigned int u, EXCEPTION_POINTERS *pExp)
     {
-        wprintf( L"translating exception %x\n", u );
+        wprf( L"translating exception %x\n", u );
         std::string error = "SE Exception: ";
         switch (u)
         {
@@ -9335,7 +9389,7 @@ extern "C" int __cdecl wmain( int argc, WCHAR * argv[] )
                 error += result;
         };
 
-        wprintf( L"throwing std::exception\n" );
+        wprf( L"throwing std::exception\n" );
     
         throw std::exception(error.c_str());
     });
@@ -9383,15 +9437,13 @@ extern "C" int __cdecl wmain( int argc, WCHAR * argv[] )
 
     try
     {
-        printf( "parsing input file " );
-        printWide( awcFilename );
-        printf( "\n" );
+        wprf( L"parsing input file %ws\n", awcFilename );
 
         EnumerateImageData( awcFilename );
 
         if ( ( 0 != g_Embedded_Image_Offset ) || ( 0 != g_Embedded_Image_Length ) )
         {
-            printf( "Embedded image found: offset %I64d length %I64d", g_Embedded_Image_Offset, g_Embedded_Image_Length );
+            prf( "Embedded image found: offset %I64d length %I64d", g_Embedded_Image_Offset, g_Embedded_Image_Length );
 
             FILE * fpIn = _wfopen( awcFilename, L"rb" );
             CFile fileIn( fpIn );
@@ -9404,22 +9456,20 @@ extern "C" int __cdecl wmain( int argc, WCHAR * argv[] )
     
                 fread( &x, sizeof x, 1, fpIn );
 
-                printf( "  embedded image header: %#llx; image is likely %s", x, LikelyImageHeader( x ) );
+                prf( "  embedded image header: %#llx; image is likely %s", x, LikelyImageHeader( x ) );
             }
 
-            printf( "\n" );
+            prf( "\n" );
         }
 
         if ( g_FullInformation )
         {
             if ( ( 0 == g_Embedded_Image_Offset ) || ( 0 == g_Embedded_Image_Length ) )
-                printf( "No embedded image found in the file\n" );
+                prf( "No embedded image found in the file\n" );
         }
 
         if ( 0 != awcEmbeddedImage[0] )
         {
-            //printf( "embedded file %ws, offset %I64d, length %I64d\n", awcEmbeddedImage, g_Embedded_Image_Offset, g_Embedded_Image_Length );
- 
             if ( ( 0 != g_Embedded_Image_Offset ) && ( 0 != g_Embedded_Image_Length ) )
             {
                 FILE * fpIn = _wfopen( awcFilename, L"rb" );
@@ -9427,7 +9477,7 @@ extern "C" int __cdecl wmain( int argc, WCHAR * argv[] )
     
                 if ( NULL == fpIn )
                 {
-                    printf( "can't open input file %ws\n", awcFilename );
+                    wprf( L"can't open input file %ws\n", awcFilename );
                     Usage();
                 }
     
@@ -9441,29 +9491,29 @@ extern "C" int __cdecl wmain( int argc, WCHAR * argv[] )
                 unsigned long long x = * (unsigned long long *) pb;
 
                 if ( !IsPerhapsAnImageHeader( x ) )
-                    printf( "warning, embedded image not written: file doesn't have a recognized header; instead it has: %#llx\n", x );
+                    prf( "warning, embedded image not written: file doesn't have a recognized header; instead it has: %#llx\n", x );
 
                 FILE * fpOut = _wfopen( awcEmbeddedImage, L"wb" );
                 CFile fileOut( fpOut );
     
                 if ( NULL == fpOut )
                 {
-                    printf( "can't open embedded image output file %ws\n", awcEmbeddedImage );
+                    wprf( L"can't open embedded image output file %ws\n", awcEmbeddedImage );
                     Usage();
                 }
     
                 fwrite( pb, g_Embedded_Image_Length, 1, fpOut );
-                printf( "Embedded image containing %lld bytes written to %ws\n", g_Embedded_Image_Length, awcEmbeddedImage );
+                wprf( L"Embedded image containing %lld bytes written to %ws\n", g_Embedded_Image_Length, awcEmbeddedImage );
             }
             else
             {
-                printf( "embedded JPG not found\n" );
+                prf( "embedded JPG not found\n" );
             }
         }
     }
     catch( ... )
     {
-        printf( "caught exception\n" );
+        prf( "caught exception\n" );
     }
 
     return 0;
