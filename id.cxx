@@ -488,6 +488,82 @@ void DumpBinaryData( __int64 initialOffset, __int64 headerBase, DWORD length, DW
     }
 } //DumpBinaryData
 
+void DumpShortData( __int64 initialOffset, __int64 headerBase, DWORD length, DWORD indent, DWORD offsetOfSmallValue )
+{
+    __int64 offset = initialOffset + headerBase;
+
+    // In case the data is inline in the record
+
+    if ( length <= 2 )
+        offset = offsetOfSmallValue;
+
+    if ( length > 0x100 && ! g_FullInformation)
+        length = 0x100;
+
+    __int64 itemSize = 2;
+    __int64 beyond = offset + itemSize * length;
+    const __int64 itemsPerRow = 16;
+    int16_t buf[ itemsPerRow ];
+
+    while ( offset < beyond )
+    {
+        for ( int i = 0; i < indent; i++ )
+            prf( " " );
+
+        prf( "%#10llx  ", offset );
+
+        __int64 cap = __min( offset + itemSize * itemsPerRow, beyond );
+        __int64 toread = ( ( offset + itemsPerRow ) > beyond ) ? ( length % itemsPerRow ) : itemsPerRow;
+
+        GetBytes( offset, buf, toread * itemSize );
+
+        for ( __int64 o = offset; o < cap; o += itemSize )
+            prf( "%04x ", 0xffff & buf[ ( o - offset ) / itemSize ] );
+
+        offset += ( itemSize * itemsPerRow );
+
+        prf( "\n" );
+    }
+} //DumpShortData
+
+void DumpLongData( __int64 initialOffset, __int64 headerBase, DWORD length, DWORD indent, DWORD offsetOfSmallValue )
+{
+    __int64 offset = initialOffset + headerBase;
+
+    // In case the data is inline in the record
+
+    if ( length <= 4 )
+        offset = offsetOfSmallValue;
+
+    if ( length > 0x100 && ! g_FullInformation)
+        length = 0x100;
+
+    __int64 itemSize = 4;
+    __int64 beyond = offset + itemSize * length;
+    const __int64 itemsPerRow = 8;
+    int32_t buf[ itemsPerRow ];
+
+    while ( offset < beyond )
+    {
+        for ( int i = 0; i < indent; i++ )
+            prf( " " );
+
+        prf( "%#10llx  ", offset );
+
+        __int64 cap = __min( offset + itemSize * itemsPerRow, beyond );
+        __int64 toread = ( ( offset + itemsPerRow ) > beyond ) ? ( length % itemsPerRow ) : itemsPerRow;
+
+        GetBytes( offset, buf, toread * itemSize );
+
+        for ( __int64 o = offset; o < cap; o += itemSize )
+            prf( "%08x ", 0xffffffff & buf[ ( o - offset ) / itemSize ] );
+
+        offset += ( itemSize * itemsPerRow );
+
+        prf( "\n" );
+    }
+} //DumpLongData
+
 void DumpBinaryData( byte * pData, DWORD length, DWORD indent )
 {
     __int64 offset = 0;
@@ -570,7 +646,7 @@ void EnumerateFujifilmMakernotes( int depth, __int64 IFDOffset, __int64 headerBa
             if ( g_FullInformation )
             {
                 Space( depth );
-                prf( "makernote tag %d ID %d, type %d, count %d, offset/value %d\n", i, head.id, head.type, head.count, head.offset );
+                prf( "fujifilm makernote tag %d ID %d, type %d, count %d, offset/value %d\n", i, head.id, head.type, head.count, head.offset );
             }
 
             Space( depth );
@@ -1587,7 +1663,7 @@ void EnumerateNikonMakernotes( int depth, __int64 IFDOffset, __int64 headerBase,
             }
             else
             {
-                prf( "makernote tag %d ID %d==%#x, type %d, count %d, offset/value %d\n", i, head.id, head.id, head.type, head.count, head.offset );
+                prf( "nikon makernote tag %d ID %d==%#x, type %d, count %d, offset/value %d\n", i, head.id, head.id, head.type, head.count, head.offset );
 
                 if ( 7 == head.type )
                     DumpBinaryData( head.offset + originalNikonMakernotesOffset, headerBase, head.count, 4, IFDOffset - 4 );
@@ -1597,6 +1673,125 @@ void EnumerateNikonMakernotes( int depth, __int64 IFDOffset, __int64 headerBase,
         IFDOffset = GetDWORD( IFDOffset + headerBase, littleEndian );
     }
 } //EnumerateNikonMakernotes
+
+void EnumerateCanonMakernotes( int depth, __int64 IFDOffset, __int64 headerBase, bool littleEndian )
+{
+    char acBuffer[ 100 ];
+    vector<IFDHeader> aHeaders( MaxIFDHeaders );
+
+    while ( 0 != IFDOffset ) 
+    {
+        WORD NumTags = GetWORD( IFDOffset + headerBase, littleEndian );
+        Space( depth );
+        prf( "canon makernote IFDOffset %#llx %lld, NumTags %d, headerBase %#llx %lld\n", IFDOffset, IFDOffset, NumTags, headerBase, headerBase );
+        IFDOffset += 2;
+
+        if ( NumTags > MaxIFDHeaders )
+        {
+            Space( depth );
+            prf( "numtags is > 200; it's likely not in EXIF format, so the data may be noise. skipping\n" );
+            break;
+        }
+    
+        if ( !GetIFDHeaders( IFDOffset + headerBase, aHeaders.data(), NumTags, littleEndian ) )
+        {
+            Space( depth );
+            prf( "canon makernotes has a tag that's invalid. skipping\n" );
+            break;
+        }
+
+        for ( int i = 0; i < NumTags; i++ )
+        {
+            IFDHeader & head = aHeaders[ i ];
+            IFDOffset += sizeof IFDHeader;
+
+            if ( g_FullInformation )
+            {
+                Space( depth );
+                prf( "  CanonMakernote tag %d ID %d, type %d, count %d, offset/value %d\n", i, head.id, head.type, head.count, head.offset );
+            }
+
+            Space( depth );
+
+            if ( 6 == head.id && 2 == head.type )
+            {
+                ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
+                GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
+                prf( "  ImageType:                      %s\n", acBuffer );
+            }
+            else if ( 7 == head.id && 2 == head.type )
+            {
+                ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
+                GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
+                prf( "  FirmwareVersion:                %s\n", acBuffer );
+            }
+            else if ( 149 == head.id && 2 == head.type )
+            {
+                ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
+                GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
+                prf( "  LensModel:                      %s\n", acBuffer );
+            }
+            else if ( 150 == head.id && 2 == head.type )
+            {
+                ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
+                GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
+                prf( "  InternalSerialNumber:           %s\n", acBuffer );
+            }
+            else if ( 151 == head.id && 7 == head.type )
+            {
+                prf( "  DustRemovealData:\n" );
+                DumpBinaryData( head.offset, headerBase, head.count, 4, IFDOffset - 4 );
+            }
+            else if ( 152 == head.id && 3 == head.type && 4 == head.count )
+            {
+                prf( "  CropInfo:\n" );
+                DumpShortData( head.offset, headerBase, head.count, 4, IFDOffset - 4 );
+            }
+            else
+            {
+                prf( "  CanonMakernote tag %d ID %d==%#x, type %d, count %d, offset/value %d: ", i, head.id, head.id, head.type, head.count, head.offset );
+
+                if ( 2 == head.type )
+                {
+                    ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
+                    GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
+                    prf( " %s\n", acBuffer );
+                }
+                else if ( 3 == head.type )
+                {
+                    if ( 1 == head.count )
+                        prf( " %d\n", head.offset );
+                    else
+                    {
+                        prf( "\n" );
+                        DumpShortData( head.offset, headerBase, head.count, 4, IFDOffset - 4 );
+                    }
+
+                }
+                else if ( 4 == head.type )
+                {
+                    if ( 1 == head.count )
+                        prf( " %d\n", head.offset );
+                    else
+                    {
+                        prf( "\n" );
+                        DumpLongData( head.offset, headerBase, head.count, 4, IFDOffset - 4 );
+                    }
+
+                }
+                else if ( 7 == head.type )
+                {
+                    prf( "\n" );
+                    DumpBinaryData( head.offset, headerBase, head.count, 4, IFDOffset - 4 );
+                }
+                else
+                    prf( "\n" );
+            }
+        }
+
+        IFDOffset = GetDWORD( IFDOffset + headerBase, littleEndian );
+    }
+} //EnumerateCanonMakernotes
 
 void DetectGarbage( char * pc )
 {
@@ -1998,9 +2193,12 @@ void EnumerateMakernotes( int depth, __int64 IFDOffset, __int64 headerBase, bool
         IFDOffset += 12;
         isSony = true;
     }
-    else if ( !strcmp( g_acMake, "CANON" ) )
+    else if ( !strcmp( g_acMake, "CANON" ) ||
+              !strcmp( g_acMake, "Canon" ) ) // M3 uses this
     {
         isCanon = true;
+        EnumerateCanonMakernotes( 0, IFDOffset, headerBase, littleEndian );
+        return;
     }
     else if ( !strcmp( g_acMake, "" ) ) // Panasonic really did his
     {
@@ -9341,27 +9539,21 @@ void EnumerateImageData( WCHAR const * pwc )
     if ( 0 != g_Canon_CR3_Exif_Exif_IFD )
     {
         prf( "Canon CR3 Exif IFD:\n" );
-
         WORD endian = GetWORD( g_Canon_CR3_Exif_Exif_IFD, littleEndian );
-
         EnumerateExifTags( 0, 8, g_Canon_CR3_Exif_Exif_IFD, ( 0x4949 == endian ) );
     }
 
     if ( 0 != g_Canon_CR3_Exif_Makernotes_IFD )
     {
         prf( "Canon CR3 Makernotes:\n" );
-
         WORD endian = GetWORD( g_Canon_CR3_Exif_Makernotes_IFD, littleEndian );
-
-        EnumerateMakernotes( 0, 8, g_Canon_CR3_Exif_Makernotes_IFD, ( 0x4949 == endian ) );
+        EnumerateCanonMakernotes( 0, 8, g_Canon_CR3_Exif_Makernotes_IFD, ( 0x4949 == endian ) );
     }
 
     if ( 0 != g_Canon_CR3_Exif_GPS_IFD  )
     {
         prf( "Canon CR3 Exif GPS IFD:\n" );
-
         WORD endian = GetWORD( g_Canon_CR3_Exif_GPS_IFD, littleEndian );
-
         EnumerateGPSTags( 0, 8, g_Canon_CR3_Exif_GPS_IFD, ( 0x4949 == endian ) );
     }
 } //EnumerateImageData
