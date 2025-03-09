@@ -49,7 +49,7 @@ using namespace std;
 typedef unsigned __int64 QWORD;
 
 CStream * g_pStream = NULL;
-static const int MaxIFDHeaders = 200; // assume anything more than this is a corrupt or badly parsed file
+static const int MaxIFDHeaders = 210; // assume anything more than this is a corrupt or badly parsed file
 bool g_FullInformation = false;
 DWORD g_Heif_Exif_ItemID                = 0xffffffff;
 __int64 g_Heif_Exif_Offset              = 0;
@@ -627,7 +627,7 @@ void EnumerateFujifilmMakernotes( int depth, __int64 IFDOffset, __int64 headerBa
         if ( NumTags > MaxIFDHeaders )
         {
             Space( depth );
-            prf( "numtags is > 200; it's likely not in EXIF format, so the data may be noise. skipping (%d)\n", NumTags );
+            prf( "numtags is > MaxIFDHeaders; it's likely not in EXIF format, so the data may be noise. skipping (%d)\n", NumTags );
             break;
         }
     
@@ -990,7 +990,7 @@ void EnumerateGenericIFD( int depth, __int64 IFDOffset, __int64 headerBase, bool
         if ( NumTags > MaxIFDHeaders )
         {
             Space( depth );
-            prf( "numtags is > 200; it's likely not in EXIF format, so the data may be noise. skipping\n" );
+            prf( "numtags is > MaxIFDHeaders; it's likely not in EXIF format, so the data may be noise. skipping (%d)\n", NumTags );
             break;
         }
     
@@ -1449,7 +1449,7 @@ void EnumerateInteropIFD( int depth, __int64 IFDOffset, __int64 headerBase, bool
         if ( NumTags > MaxIFDHeaders )
         {
             Space( depth );
-            prf( "numtags is > 200; it's likely not in EXIF format, so the data may be noise. skipping\n" );
+            prf( "numtags is > MaxIFDHeaders; it's likely not in EXIF format, so the data may be noise. skipping (%d)\n", NumTags );
             break;
         }
     
@@ -1507,7 +1507,7 @@ void EnumerateNikonPreviewIFD( int depth, __int64 IFDOffset, __int64 headerBase,
         if ( NumTags > MaxIFDHeaders )
         {
             Space( depth );
-            prf( "numtags is > 200; it's likely not in EXIF format, so the data may be noise. skipping\n" );
+            prf( "numtags is > MaxIFDHeaders; it's likely not in EXIF format, so the data may be noise. skipping (%d)\n", NumTags );
             break;
         }
     
@@ -1588,7 +1588,7 @@ void EnumerateNikonMakernotes( int depth, __int64 IFDOffset, __int64 headerBase,
         if ( NumTags > MaxIFDHeaders )
         {
             Space( depth );
-            prf( "numtags is > 200; it's likely not in EXIF format, so the data may be noise. skipping\n" );
+            prf( "numtags is > MaxIFDHeaders; it's likely not in EXIF format, so the data may be noise. skipping (%d)\n", NumTags );
             break;
         }
     
@@ -1689,7 +1689,7 @@ void EnumerateCanonMakernotes( int depth, __int64 IFDOffset, __int64 headerBase,
         if ( NumTags > MaxIFDHeaders )
         {
             Space( depth );
-            prf( "numtags is > 200; it's likely not in EXIF format, so the data may be noise. skipping\n" );
+            prf( "numtags is > MaxIFDHeaders; it's likely not in EXIF format, so the data may be noise. skipping (%d)\n", NumTags );
             break;
         }
     
@@ -1822,7 +1822,7 @@ void EnumeratePanasonicMakernotes( int depth, __int64 IFDOffset, __int64 headerB
         if ( NumTags > MaxIFDHeaders )
         {
             Space( depth );
-            prf( "numtags is > 200; it's likely not in EXIF format, so the data may be noise. skipping\n" );
+            prf( "numtags is > MaxIFDHeaders; it's likely not in EXIF format, so the data may be noise. skipping (%d)\n", NumTags );
             break;
         }
     
@@ -1913,7 +1913,7 @@ void EnumerateOlympusCameraSettingsIFD( int depth, __int64 IFDOffset, __int64 he
         if ( NumTags > MaxIFDHeaders )
         {
             Space( depth );
-            prf( "numtags is > 200; it's likely not in EXIF format, so the data may be noise. skipping\n" );
+            prf( "numtags is > MaxIFDHeaders; it's likely not in EXIF format, so the data may be noise. skipping (%d)\n", NumTags );
             break;
         }
     
@@ -2238,7 +2238,7 @@ void EnumerateMakernotes( int depth, __int64 IFDOffset, __int64 headerBase, bool
         if ( NumTags > MaxIFDHeaders )
         {
             Space( depth );
-            prf( "        numtags is > 200; it's likely not in EXIF format, so the data may be noise. skipping (value is %#xs )\n", NumTags );
+            prf( "numtags is > MaxIFDHeaders; it's likely not in EXIF format, so the data may be noise. skipping (%d)\n", NumTags );
             break;
         }
     
@@ -2396,7 +2396,7 @@ void EnumeratePanasonicCameraTags( int depth, __int64 IFDOffset, __int64 headerB
         if ( NumTags > MaxIFDHeaders )
         {
             Space( depth );
-            prf( "numtags is > 200; it's likely not in EXIF format, so the data may be noise. skipping\n" );
+            prf( "numtags is > MaxIFDHeaders; it's likely not in EXIF format, so the data may be noise. skipping (%d)\n", NumTags );
             break;
         }
     
@@ -2877,7 +2877,7 @@ void EnumerateGPSTags( int depth, __int64 IFDOffset, __int64 headerBase, bool li
         if ( NumTags > MaxIFDHeaders )
         {
             Space( depth );
-            prf( "numtags is > 200; it's likely not in EXIF format, so the data may be noise. skipping\n" );
+            prf( "numtags is > MaxIFDHeaders; it's likely not in EXIF format, so the data may be noise. skipping (%d)\n", NumTags );
             break;
         }
     
@@ -3296,7 +3296,7 @@ void EnumerateExifTags( int depth, __int64 IFDOffset, __int64 headerBase, bool l
         if ( NumTags > MaxIFDHeaders )
         {
             Space( depth );
-            prf( "numtags is > 200; it's likely not in EXIF format, so the data may be noise. skipping (%d)\n", NumTags );
+            prf( "numtags is > MaxIFDHeaders; it's likely not in EXIF format, so the data may be noise. skipping (%d)\n", NumTags );
             break;
         }
     
@@ -5611,7 +5611,7 @@ void EnumerateIFD0( int depth, __int64 IFDOffset, __int64 headerBase, bool littl
         if ( NumTags > MaxIFDHeaders )
         {
             Space( depth );
-            prf( "numtags is > 200; it's likely not in EXIF format, so the data may be noise. skipping\n" );
+            prf( "numtags is > MaxIFDHeaders; it's likely not in EXIF format, so the data may be noise. skipping (value is %#xs )\n", NumTags );
             break;
         }
     
