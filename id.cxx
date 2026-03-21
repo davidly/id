@@ -9185,6 +9185,7 @@ void AttemptFujifilmParse()
     }
 } //AttemptFujifilmParse
 
+#pragma pack( push, 1 )
 struct RIFFChunk
 {
     char CC[ 4 ];
@@ -9193,7 +9194,7 @@ struct RIFFChunk
 
 struct WebPVP8X
 {
-    uint8_t bits;
+    uint8_t flags;
     uint8_t reserved[ 3 ];
     uint8_t widthm1[ 3 ];
     uint8_t heightm1[ 3 ];
@@ -9207,6 +9208,34 @@ struct WebPVP8
     uint16_t height;
 };
 
+struct WebPVP8L
+{
+    uint8_t signature; // 0x2f
+    uint32_t metadata; // 31..29  28     27..14  13..0
+                       // version alpha  height  width
+};
+
+struct WebPAnim
+{
+    uint8_t b;
+    uint8_t g;
+    uint8_t r;
+    uint8_t a;
+    uint16_t loopCount;
+};
+
+struct WebPAnmf
+{
+    uint8_t x[ 3 ];
+    uint8_t y[ 3 ];
+    uint8_t widthm1[ 3 ];
+    uint8_t heightm1[ 3 ];
+    uint8_t duration[ 3 ];
+    uint8_t flags;
+};
+
+#pragma pack(pop)
+
 void EnumerateWebP()
 {
     RIFFChunk chunk;
@@ -9218,36 +9247,86 @@ void EnumerateWebP()
     while ( offset < length )
     {
         GetBytes( offset, &chunk, sizeof( chunk ) );
-        prf( "riff chunk CC: %c%c%c%c size %u\n", chunk.CC[ 0 ], chunk.CC[ 1 ], chunk.CC[ 2 ], chunk.CC[ 3 ], chunk.size );
+        prf( "chunk: %c%c%c%c size %u\n", chunk.CC[ 0 ], chunk.CC[ 1 ], chunk.CC[ 2 ], chunk.CC[ 3 ], chunk.size );
 
         if ( !strncmp( & chunk.CC[0], "VP8X", 4 ) )
         {
             struct WebPVP8X vp8x;
             GetBytes( offset + 8, &vp8x, sizeof( vp8x ) );
+            prf( "  flags:       %#x\n", vp8x.flags );
+            prf( "  Anim exists  %u\n", ( 0 != ( vp8x.flags & 0x2 ) ) ); 
+            prf( "  XMP  exists  %u\n", ( 0 != ( vp8x.flags & 0x4 ) ) ); 
+            prf( "  EXIF exists  %u\n", ( 0 != ( vp8x.flags & 0x8 ) ) ); 
+            prf( "  Alpha exists %u\n", ( 0 != ( vp8x.flags & 0x10 ) ) );   
+            prf( "  ICCP exists  %u\n", ( 0 != ( vp8x.flags & 0x20 ) ) );
             DWORD width = 0, height = 0;
             memcpy( &width, vp8x.widthm1, 3 );
             memcpy( &height, vp8x.heightm1, 3 );
             width++;
             height++;
-            printf( "  width    %u\n", width );
-            printf( "  height   %u\n", height );
+            prf( "  width        %u\n", width );
+            prf( "  height       %u\n", height );
         }
-        if ( !strncmp( & chunk.CC[0], "VP8 ", 4 ) )
+        else if ( !strncmp( & chunk.CC[0], "VP8 ", 4 ) )
         {
             struct WebPVP8 vp8;
             GetBytes( offset + 8, &vp8, sizeof( vp8 ) );
-            printf( "  width    %u\n", vp8.width );
-            printf( "  height   %u\n", vp8.height );
+            prf( "  width       %u\n", vp8.width );
+            prf( "  height      %u\n", vp8.height );
+        }
+        else if ( !strncmp( & chunk.CC[0], "VP8L ", 4 ) )
+        {
+            struct WebPVP8L vp8l;
+            GetBytes( offset + 8, &vp8l, sizeof( vp8l ) );
+            prf( "  signature    %#x\n", vp8l.signature );
+            prf( "  metadata     %#x\n", vp8l.metadata );
+            prf( "    width      %u\n", 1 + ( vp8l.metadata & 0x3fff ) );
+            prf( "    height     %u\n", 1 + ( ( vp8l.metadata >> 14 ) & 0x3fff ) );
+            prf( "    alpha      %u\n", ( vp8l.metadata >> 28 ) & 1 );
+            prf( "    version    %u\n", ( vp8l.metadata >> 29 ) & 3 );
         }
         else if ( !strncmp( & chunk.CC[0], "EXIF", 4 ) )
         {
             g_WebP_Exif_Offset = offset + 8;
             g_WebP_Exif_Length = chunk.size;
-            printf( "  exif offset %llu\n", g_WebP_Exif_Offset );
-            printf( "  exif length %llu\n", g_WebP_Exif_Length );
+            prf( "  exif offset  %llu\n", g_WebP_Exif_Offset );
+            prf( "  exif length  %llu\n", g_WebP_Exif_Length );
+        }
+        else if ( !strncmp( & chunk.CC[0], "ANIM", 4 ) )
+        {
+            struct WebPAnim anim;
+            GetBytes( offset + 8, &anim, sizeof( anim ) );
+            prf( "  background color rgba: %#x %#x %#x %#x\n", anim.b, anim.g, anim.r, anim.a );
+            prf( "  loop count:            %u\n", anim.loopCount );
+        }
+        else if ( !strncmp( & chunk.CC[0], "ANMF", 4 ) )
+        {
+            struct WebPAnmf anmf;
+            GetBytes( offset + 8, &anmf, sizeof( anmf ) );
+
+            uint32_t x = 0, y = 0;
+            memcpy( &x, anmf.x, 3 );
+            memcpy( &y, anmf.y, 3 );
+            prf( "  x            %u\n", x * 2 );
+            prf( "  y            %u\n", y * 2 );
+
+            uint32_t width = 0, height = 0;
+            memcpy( &width, anmf.widthm1, 3 );
+            memcpy( &height, anmf.heightm1, 3 );
+            prf( "  width        %u\n", width );
+            prf( "  height       %u\n", height );
+
+            uint32_t duration = 0;
+            memcpy( &duration, anmf.duration, 3 );
+            prf( "  duration ms  %u\n", duration );
+
+            prf( "  alpha blend  %u\n", ( 0 != ( anmf.flags & 0x40 ) ) );
+            prf( "  dispose      %u\n", ( 0 != ( anmf.flags & 0x80 ) ) );
         }
 
         offset += 8 + chunk.size;
+        if ( offset & 1 )
+            offset++;
     }
 } //EnumerateWebP
 
@@ -9312,10 +9391,7 @@ void EnumerateImageData( WCHAR const * pwc )
         EnumerateWebP();
 
         if ( 0 == g_WebP_Exif_Offset )
-        {
-            prf( "can't find Exif data in this WebP file\n" );
             return;
-        }
     }
     else if ( !wcsicmp( pwcExt, L".wma" ) || !wcsicmp( pwcExt, L".wmv" ) )
     {
