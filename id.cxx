@@ -60,6 +60,9 @@ __int64 g_Canon_CR3_Exif_Makernotes_IFD = 0;
 __int64 g_Canon_CR3_Exif_GPS_IFD        = 0;
 __int64 g_Canon_CR3_Embedded_JPG_Length = 0;
 
+__int64 g_WebP_Exif_Offset              = 0;
+__int64 g_WebP_Exif_Length              = 0;
+    
 __int64 g_Embedded_Image_Offset = 0;
 __int64 g_Embedded_Image_Length = 0;
 WCHAR * g_Embedded_File_Extension = L".JPG";
@@ -9182,6 +9185,72 @@ void AttemptFujifilmParse()
     }
 } //AttemptFujifilmParse
 
+struct RIFFChunk
+{
+    char CC[ 4 ];
+    DWORD size;
+};
+
+struct WebPVP8X
+{
+    uint8_t bits;
+    uint8_t reserved[ 3 ];
+    uint8_t widthm1[ 3 ];
+    uint8_t heightm1[ 3 ];
+};
+
+struct WebPVP8
+{
+    uint8_t frameTag[ 3 ];
+    uint8_t startCode[ 3 ];
+    uint16_t width;
+    uint16_t height;
+};
+
+void EnumerateWebP()
+{
+    RIFFChunk chunk;
+    __int64 offset = 12;
+    __int64 length = GetStreamLength();
+
+    prf( "mimetype:                            image/webp\n" );
+
+    while ( offset < length )
+    {
+        GetBytes( offset, &chunk, sizeof( chunk ) );
+        prf( "riff chunk CC: %c%c%c%c size %u\n", chunk.CC[ 0 ], chunk.CC[ 1 ], chunk.CC[ 2 ], chunk.CC[ 3 ], chunk.size );
+
+        if ( !strncmp( & chunk.CC[0], "VP8X", 4 ) )
+        {
+            struct WebPVP8X vp8x;
+            GetBytes( offset + 8, &vp8x, sizeof( vp8x ) );
+            DWORD width = 0, height = 0;
+            memcpy( &width, vp8x.widthm1, 3 );
+            memcpy( &height, vp8x.heightm1, 3 );
+            width++;
+            height++;
+            printf( "  width    %u\n", width );
+            printf( "  height   %u\n", height );
+        }
+        if ( !strncmp( & chunk.CC[0], "VP8 ", 4 ) )
+        {
+            struct WebPVP8 vp8;
+            GetBytes( offset + 8, &vp8, sizeof( vp8 ) );
+            printf( "  width    %u\n", vp8.width );
+            printf( "  height   %u\n", vp8.height );
+        }
+        else if ( !strncmp( & chunk.CC[0], "EXIF", 4 ) )
+        {
+            g_WebP_Exif_Offset = offset + 8;
+            g_WebP_Exif_Length = chunk.size;
+            printf( "  exif offset %llu\n", g_WebP_Exif_Offset );
+            printf( "  exif length %llu\n", g_WebP_Exif_Length );
+        }
+
+        offset += 8 + chunk.size;
+    }
+} //EnumerateWebP
+
 void EnumerateImageData( WCHAR const * pwc )
 {
     g_pStream = new CStream( pwc );
@@ -9238,6 +9307,16 @@ void EnumerateImageData( WCHAR const * pwc )
 
         //printf( "o: %d, heifOffsetBase: %d\n", o, heifOffsetBase );
     }
+    else if ( !wcsicmp( pwcExt, L".webp" ) )        // Google's image format
+    {
+        EnumerateWebP();
+
+        if ( 0 == g_WebP_Exif_Offset )
+        {
+            prf( "can't find Exif data in this WebP file\n" );
+            return;
+        }
+    }
     else if ( !wcsicmp( pwcExt, L".wma" ) || !wcsicmp( pwcExt, L".wmv" ) )
     {
         ParseAsf();
@@ -9291,9 +9370,7 @@ void EnumerateImageData( WCHAR const * pwc )
             prf( "file size: %28I64d\n", GetStreamLength() );
         }
         else
-        {
             return;
-        }
     }
     else if ( 0x03334449 == header || 0x02334449 == header || 0x04334449 == header || 0xfbff == ( header & 0xffff ) || !wcsicmp( pwcExt, L".mp3" ) )
     {
@@ -9320,9 +9397,7 @@ void EnumerateImageData( WCHAR const * pwc )
             prf( "file size: %I64d\n", GetStreamLength() );
         }
         else
-        {
             return;
-        }
     }
 
     if ( ( 0xd8ff     != ( header & 0xffff ) ) &&     // JPG
@@ -9332,7 +9407,8 @@ void EnumerateImageData( WCHAR const * pwc )
          ( 0x00554949 != header ) &&                  // RW2 panasonic
          ( 0x494a5546 != header ) &&                  // RAF fujifilm
          ( 0x474e5089 != header ) &&                  // PNG
-         ( 0x4d42     != ( header & 0xffff ) ) )      // BMP
+         ( 0x4d42     != ( header & 0xffff ) ) &&     // BMP
+         ( 0x66697845 != header ) )                   // RIFF WebP
     {
         wprf( L"header %#x is unrecognized in file %ws\n", header, pwc );
         return;
@@ -9452,13 +9528,31 @@ void EnumerateImageData( WCHAR const * pwc )
     }
     else if ( 0x002a4949 == header )
     {
-        // Canon mirrorless .hif files
+        // Canon mirrorless .heif files
 
         if ( 0 != heifOffsetBase )
         {
             headerBase = heifOffsetBase;
             startingOffset += heifOffsetBase;
         }
+    }
+    else if ( 0x66697845 == header )                   // RIFF WebP
+    {
+        DWORD payload = GetDWORD( 8, true );
+        if ( strncmp( (char *) &payload, "WEBP", 4 ) )
+        {
+            printf( "RIFF file isn't a webp... payload %#x\n", payload );
+            return;
+        }
+
+        if ( 0 == g_WebP_Exif_Offset )
+        {
+            printf( "WebP image doesn't have EXIF data\n" );
+            return;
+        }
+
+        headerBase = g_WebP_Exif_Offset + 6; // headerBase should point at the first endian byte (e.g. 0x49)
+        startingOffset = headerBase + 4; // the first dword to read with the idf offset is 4 beyond that
     }
     
     if ( 0x4d4d == ( header & 0xffff ) ) // NEF
