@@ -54,6 +54,25 @@ bool g_FullInformation = false;
 DWORD g_Heif_Exif_ItemID                = 0xffffffff;
 __int64 g_Heif_Exif_Offset              = 0;
 __int64 g_Heif_Exif_Length              = 0;
+struct HeifProperty
+{
+    string type;
+    DWORD width = 0;
+    DWORD height = 0;
+    BYTE bitsPerChannel = 0;
+    BYTE lumaBitDepth = 0;
+    BYTE chromaBitDepth = 0;
+    BYTE rotation = 0;
+    BYTE mirrorAxis = 0;
+    bool hasRotation = false;
+    bool hasMirror = false;
+    vector<BYTE> iccProfile;
+};
+DWORD g_Heif_Primary_ItemID = 0xffffffff;
+vector<HeifProperty> g_Heif_Properties;
+vector<DWORD> g_Heif_Primary_Properties;
+bool g_Heif_ReadingProperties = false;
+__int64 g_Heif_Idat_Offset = 0;
 __int64 g_Canon_CR3_Exif_IFD0           = 0;
 __int64 g_Canon_CR3_Exif_Exif_IFD       = 0;
 __int64 g_Canon_CR3_Exif_Makernotes_IFD = 0;
@@ -251,11 +270,17 @@ void Usage()
     prf( "      Some image formats aren't supported yet: presumably many others\n" );
     prf( "      By default, just the first 256 bytes of binary data is displayed. Use -f for all data\n" );
     prf( "      Embedded images may be JPG, PNG, HIF, or some other format\n" );
-    prf( "      Fujifilm RAF files are only supported in that the embedded JPG is parsed\n" );
+    prf( "      Fujifilm RAF headers, CFA metadata, raw dimensions, and embedded JPG metadata are parsed\n" );
     exit( 1 );
 } //Usage
 
 __int64 GetStreamLength() { return g_pStream->Length(); }
+
+bool IsFileRangeValid( __int64 offset, __int64 length )
+{
+    __int64 fileLength = GetStreamLength();
+    return offset >= 0 && length >= 0 && offset <= fileLength && length <= fileLength - offset;
+}
 
 unsigned long long GetULONGLONG( __int64 offset, bool littleEndian )
 {
@@ -382,14 +407,16 @@ void GetString( __int64 offset, char * pcOutput, int outputSize, int maxBytes )
     }
 } //GetString
 
-WCHAR * GetUTF8( __int64 offset, DWORD length )
+unique_ptr<WCHAR[]> GetUTF8( __int64 offset, DWORD length )
 {
-    if ( !g_pStream->Seek( offset ) )
-        return NULL;
+    if ( length > INT_MAX || offset < 0 || offset > g_pStream->Length() ||
+         length > (QWORD) ( g_pStream->Length() - offset ) )
+        return nullptr;
 
-    unique_ptr<char> bytes( new char[ length + 1 ] );
-    g_pStream->Read( bytes.get(), length );
-    bytes.get()[ length ] = 0;
+    unique_ptr<char[]> bytes( new char[ (size_t) length + 1 ] );
+    if ( !g_pStream->Seek( offset ) || g_pStream->Read( bytes.get(), length ) != length )
+        return nullptr;
+    bytes[ length ] = 0;
 
     #if false
         prf( "field %d bytes read: %s\n", length, bytes.get() );
@@ -409,9 +436,11 @@ WCHAR * GetUTF8( __int64 offset, DWORD length )
         prf( "\n" );
     #endif
 
-    int cwc = MultiByteToWideChar( CP_UTF8, 0, bytes.get(), length + 1, NULL, 0 );
-    WCHAR * pwc = new WCHAR[ cwc ];
-    MultiByteToWideChar( CP_UTF8, 0, bytes.get(), length + 1, pwc, cwc );
+    int cwc = length ? MultiByteToWideChar( CP_UTF8, 0, bytes.get(), (int) length, NULL, 0 ) : 0;
+    unique_ptr<WCHAR[]> pwc( new WCHAR[ (size_t) cwc + 1 ] );
+    if ( cwc && !MultiByteToWideChar( CP_UTF8, 0, bytes.get(), (int) length, pwc.get(), cwc ) )
+        return nullptr;
+    pwc[ cwc ] = 0;
 
     // Convert some well-known Unicode chars to ascii equivalents so they
     // appear correctly in a CMD window
@@ -609,35 +638,327 @@ void DumpBinaryData( byte * pData, DWORD length, DWORD indent )
     }
 } //DumpBinaryData
 
+const char * FujifilmMakerNoteName( WORD tag )
+{
+    switch ( tag )
+    {
+        case 0x0000: return "Version";
+        case 0x0010: return "Internal serial number";
+        case 0x1000: return "Quality";
+        case 0x1001: return "Sharpness";
+        case 0x1002: return "White balance";
+        case 0x1003: return "Saturation";
+        case 0x1004: return "Contrast";
+        case 0x1005: return "Color temperature";
+        case 0x1006: return "Contrast setting";
+        case 0x100a: return "White balance fine tune";
+        case 0x100b: return "Noise reduction";
+        case 0x100e: return "High ISO noise reduction";
+        case 0x100f: return "Clarity";
+        case 0x1010: return "Flash mode";
+        case 0x1011: return "Flash strength";
+        case 0x1020: return "Macro";
+        case 0x1021: return "Focus mode";
+        case 0x1022: return "Focus area";
+        case 0x1023: return "Focus point";
+        case 0x102b: return "Focus priority";
+        case 0x102d: return "Focus setting";
+        case 0x102e: return "Continuous focus setting";
+        case 0x1030: return "Slow sync";
+        case 0x1031: return "Picture mode";
+        case 0x1032: return "Exposure count";
+        case 0x1033: return "EXR auto";
+        case 0x1034: return "EXR mode";
+        case 0x1040: return "Shadow tone";
+        case 0x1041: return "Highlight tone";
+        case 0x1044: return "Digital zoom";
+        case 0x1045: return "Lens modulation optimizer";
+        case 0x1047: return "Grain effect roughness";
+        case 0x1048: return "Color Chrome effect";
+        case 0x1049: return "Monochromatic color warm-cool";
+        case 0x104b: return "Monochromatic color magenta-green";
+        case 0x104c: return "Grain effect size";
+        case 0x104d: return "Crop mode";
+        case 0x104e: return "Color Chrome FX blue";
+        case 0x1050: return "Shutter type";
+        case 0x1051: return "Crop flag";
+        case 0x1052: return "Crop top-left";
+        case 0x1053: return "Crop size";
+        case 0x1100: return "Auto bracketing";
+        case 0x1101: return "Sequence number";
+        case 0x1102: return "White balance bracketing";
+        case 0x1103: return "Drive setting";
+        case 0x1105: return "Pixel shift shots";
+        case 0x1106: return "Pixel shift offset";
+        case 0x1150: return "Composite image mode";
+        case 0x1151: return "Composite image count 1";
+        case 0x1152: return "Composite image count 2";
+        case 0x1153: return "Panorama angle";
+        case 0x1154: return "Panorama direction";
+        case 0x1201: return "Advanced filter";
+        case 0x1210: return "FinePix color mode";
+        case 0x1300: return "Blur warning";
+        case 0x1301: return "Focus warning";
+        case 0x1302: return "Exposure warning";
+        case 0x1400: return "Dynamic range";
+        case 0x1401: return "Film mode";
+        case 0x1402: return "Dynamic range setting";
+        case 0x1403: return "Development dynamic range";
+        case 0x1404: return "Minimum focal length";
+        case 0x1405: return "Maximum focal length";
+        case 0x1406: return "Maximum aperture at minimum focal length";
+        case 0x1407: return "Maximum aperture at maximum focal length";
+        case 0x140b: return "Auto dynamic range";
+        case 0x1422: return "Image stabilization";
+        case 0x1425: return "Scene recognition";
+        case 0x1431: return "Rating";
+        case 0x1436: return "Image generation";
+        case 0x1438: return "Image count";
+        case 0x1443: return "Dynamic range priority";
+        case 0x1444: return "Dynamic range priority auto";
+        case 0x1445: return "Dynamic range priority fixed";
+        case 0x1446: return "Flicker reduction";
+        case 0x1447: return "Fujifilm model";
+        case 0x1448: return "Fujifilm model 2";
+        case 0x144a: return "White balance red";
+        case 0x144b: return "White balance green";
+        case 0x144c: return "White balance blue";
+        case 0x144d: return "Roll angle";
+        case 0x4005: return "Face element selected";
+        case 0x4100: return "Faces detected";
+        default: return NULL;
+    }
+}
+
+const char * FujifilmMakerNoteValueName( WORD tag, DWORD value )
+{
+    if ( 0x1001 == tag )
+    {
+        switch ( value )
+        {
+            case 0: return "-4 (softest)";
+            case 1: return "-3 (very soft)";
+            case 2: return "-2 (soft)";
+            case 3: return "0 (normal)";
+            case 4: return "+2 (hard)";
+            case 5: return "+3 (very hard)";
+            case 6: return "+4 (hardest)";
+            case 0x82: return "-1 (medium soft)";
+            case 0x84: return "+1 (medium hard)";
+            case 0xffff: return "n/a";
+        }
+    }
+    else if ( 0x1020 == tag )
+    {
+        if ( 0 == value ) return "Off";
+        if ( 1 == value ) return "On";
+    }
+    else if ( 0x1021 == tag )
+    {
+        if ( 0 == value ) return "Auto";
+        if ( 1 == value ) return "Manual";
+        if ( 0xffff == value ) return "Movie";
+    }
+    else if ( 0x1002 == tag )
+    {
+        switch ( value )
+        {
+            case 0x000: return "Auto";
+            case 0x001: return "Auto (white priority)";
+            case 0x002: return "Auto (ambiance priority)";
+            case 0x100: return "Daylight";
+            case 0x200: return "Cloudy";
+            case 0x300: return "Daylight fluorescent";
+            case 0x301: return "Day white fluorescent";
+            case 0x302: return "White fluorescent";
+            case 0x303: return "Warm white fluorescent";
+            case 0x304: return "Living room warm white fluorescent";
+            case 0x400: return "Incandescent";
+            case 0x500: return "Flash";
+            case 0x600: return "Underwater";
+            case 0xf00: return "Custom";
+            case 0xf01: return "Custom 2";
+            case 0xf02: return "Custom 3";
+            case 0xf03: return "Custom 4";
+            case 0xf04: return "Custom 5";
+            case 0xff0: return "Kelvin";
+        }
+    }
+    else if ( 0x1003 == tag )
+    {
+        switch ( value )
+        {
+            case 0x000: return "0 (normal)";
+            case 0x080: return "+1 (medium high)";
+            case 0x0c0: return "+3 (very high)";
+            case 0x0e0: return "+4 (highest)";
+            case 0x100: return "+2 (high)";
+            case 0x180: return "-1 (medium low)";
+            case 0x200: return "Low";
+            case 0x300: return "None (B&W)";
+            case 0x301: return "B&W red filter";
+            case 0x302: return "B&W yellow filter";
+            case 0x303: return "B&W green filter";
+            case 0x310: return "B&W sepia";
+            case 0x400: return "-2 (low)";
+            case 0x4c0: return "-3 (very low)";
+            case 0x4e0: return "-4 (lowest)";
+            case 0x500: return "Acros";
+            case 0x501: return "Acros red filter";
+            case 0x502: return "Acros yellow filter";
+            case 0x503: return "Acros green filter";
+        }
+    }
+    else if ( 0x1004 == tag || 0x1006 == tag )
+    {
+        if ( 0 == value ) return "Normal";
+        if ( 0x80 == value ) return "Medium high";
+        if ( 0x100 == value ) return "High";
+        if ( 0x180 == value ) return "Medium low";
+        if ( 0x200 == value ) return "Low";
+        if ( 0x300 == value && 0x1006 == tag ) return "Low";
+    }
+    else if ( 0x1050 == tag )
+    {
+        switch ( value )
+        {
+            case 0: return "Mechanical";
+            case 1: return "Electronic";
+            case 2: return "Electronic (long shutter speed)";
+            case 3: return "Electronic front curtain";
+        }
+    }
+    else if ( 0x1100 == tag )
+    {
+        if ( 0 == value ) return "Off";
+        if ( 1 == value ) return "On";
+        if ( 2 == value ) return "Pre-shot";
+        if ( 6 == value ) return "Pixel shift";
+    }
+    else if ( 0x1150 == tag )
+    {
+        if ( 0 == value ) return "n/a";
+        if ( 1 == value ) return "Pro low-light";
+        if ( 2 == value ) return "Pro focus";
+        if ( 32 == value ) return "Panorama";
+        if ( 128 == value ) return "HDR";
+        if ( 1024 == value ) return "Multi-exposure";
+    }
+    else if ( 0x1154 == tag )
+    {
+        if ( 1 == value ) return "Right";
+        if ( 2 == value ) return "Left";
+        if ( 3 == value ) return "Up";
+        if ( 4 == value ) return "Down";
+    }
+    else if ( 0x1436 == tag )
+    {
+        if ( 0 == value ) return "Original image";
+        if ( 1 == value ) return "Re-developed from RAW";
+    }
+    else if ( 0x1443 == tag )
+    {
+        if ( 0 == value ) return "Auto";
+        if ( 1 == value ) return "Fixed";
+    }
+    else if ( 0x1444 == tag )
+    {
+        if ( 1 == value ) return "Weak";
+        if ( 2 == value ) return "Strong";
+        if ( 3 == value ) return "Plus";
+    }
+    else if ( 0x1445 == tag )
+    {
+        if ( 1 == value ) return "Weak";
+        if ( 2 == value ) return "Strong";
+    }
+    else if ( 0x1400 == tag )
+    {
+        if ( 1 == value ) return "Standard";
+        if ( 3 == value ) return "Wide";
+    }
+    else if ( 0x1401 == tag )
+    {
+        switch ( value )
+        {
+            case 0x000: return "Provia/Standard";
+            case 0x100: return "Studio Portrait";
+            case 0x110: return "Studio Portrait Enhanced Saturation";
+            case 0x120: return "Astia/Smooth Skin Tone";
+            case 0x200: return "Velvia/Fujichrome";
+            case 0x400: return "Velvia";
+            case 0x500: return "Pro Neg. Std";
+            case 0x501: return "Pro Neg. Hi";
+            case 0x600: return "Classic Chrome";
+            case 0x700: return "Eterna";
+            case 0x800: return "Classic Negative";
+            case 0x900: return "Bleach Bypass";
+            case 0xa00: return "Nostalgic Neg";
+            case 0xb00: return "Reala ACE";
+        }
+    }
+    else if ( 0x1402 == tag )
+    {
+        if ( 0 == value ) return "Auto";
+        if ( 1 == value ) return "Manual";
+        if ( 0x100 == value ) return "Standard (100%)";
+        if ( 0x200 == value ) return "Wide 1 (230%)";
+        if ( 0x201 == value ) return "Wide 2 (400%)";
+        if ( 0x8000 == value ) return "Film simulation";
+    }
+    else if ( 0x1300 == tag )
+    {
+        if ( 0 == value ) return "None";
+        if ( 1 == value ) return "Blur warning";
+    }
+    else if ( 0x1301 == tag )
+    {
+        if ( 0 == value ) return "Good";
+        if ( 1 == value ) return "Out of focus";
+    }
+    else if ( 0x1302 == tag )
+    {
+        if ( 0 == value ) return "Good";
+        if ( 1 == value ) return "Bad exposure";
+    }
+
+    return NULL;
+}
+
 void EnumerateFujifilmMakernotes( int depth, __int64 IFDOffset, __int64 headerBase, bool littleEndian )
 {
     // https://www.exiv2.org/tags-fujifilm.html
 
-    char acBuffer[ 100 ];
     vector<IFDHeader> aHeaders( MaxIFDHeaders );
+    // In Fuji files, the base is relative to the IFD start, not the preceding base.
+    __int64 tagHeaderBase = IFDOffset - 12;
 
-    // In Fuji files, the base is not relative to the prior base; it's relative to the IFD start.
-
-    DWORD tagHeaderBase = IFDOffset - 12;
-
-    while ( 0 != IFDOffset ) 
+    while ( 0 != IFDOffset )
     {
-        WORD NumTags = GetWORD( IFDOffset + headerBase, littleEndian );
-        Space( depth );
-        prf( "makernote IFDOffset %lld, NumTags %d, headerBase %lld, tagHeaderBase %d\n", IFDOffset, NumTags, headerBase, tagHeaderBase );
-        IFDOffset += 2;
-
-        if ( NumTags > MaxIFDHeaders )
+        if ( !IsFileRangeValid( IFDOffset + headerBase, 2 ) )
         {
             Space( depth );
-            prf( "numtags is > MaxIFDHeaders; it's likely not in EXIF format, so the data may be noise. skipping (%d)\n", NumTags );
+            prf( "Fujifilm MakerNote IFD header is outside the file; skipping\n" );
             break;
         }
-    
+
+        WORD NumTags = GetWORD( IFDOffset + headerBase, littleEndian );
+        Space( depth );
+        prf( "Fujifilm MakerNote IFD: %u tags\n", NumTags );
+        IFDOffset += 2;
+
+        if ( NumTags > MaxIFDHeaders ||
+             !IsFileRangeValid( IFDOffset + headerBase, (__int64) NumTags * sizeof( IFDHeader ) + sizeof( DWORD ) ) )
+        {
+            Space( depth );
+            prf( "Fujifilm MakerNote tag table is invalid; skipping\n" );
+            break;
+        }
+
         if ( !GetIFDHeaders( IFDOffset + headerBase, aHeaders.data(), NumTags, littleEndian ) )
         {
             Space( depth );
-            prf( "fujifilm makernotes has a tag that's invalid. skipping\n" );
+            prf( "Fujifilm MakerNote contains an invalid tag; skipping\n" );
             break;
         }
 
@@ -645,58 +966,166 @@ void EnumerateFujifilmMakernotes( int depth, __int64 IFDOffset, __int64 headerBa
         {
             IFDHeader & head = aHeaders[ i ];
             IFDOffset += sizeof IFDHeader;
+            const char * tagName = FujifilmMakerNoteName( head.id );
 
             if ( g_FullInformation )
             {
                 Space( depth );
-                prf( "fujifilm makernote tag %d ID %d, type %d, count %d, offset/value %d\n", i, head.id, head.type, head.count, head.offset );
+                prf( "Fujifilm MakerNote tag %d ID %#x, type %d, count %u, value/offset %#x\n",
+                     i, head.id, head.type, head.count, head.offset );
             }
 
             Space( depth );
+            prf( "Fujifilm %s%s", tagName ? tagName : "MakerNote tag", tagName ? ": " : " " );
+            if ( !tagName )
+                prf( "%#x: ", head.id );
 
-            if ( 0 == head.id )
-                prf( "fujifilm makernote Version           %d\n", head.offset );
-            else if ( 16 == head.id )
+            if ( 2 == head.type )
             {
-                ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
-                GetString( stringOffset + tagHeaderBase + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                prf( "fujifilm makernote Serial #:         %s\n", acBuffer );
+                __int64 stringOffset = ( head.count <= 4 )
+                    ? IFDOffset - 4 + tagHeaderBase + headerBase
+                    : (__int64) head.offset + tagHeaderBase + headerBase;
+
+                if ( head.count > 0 && head.count <= 0x10000 &&
+                     IsFileRangeValid( stringOffset, head.count ) )
+                {
+                    vector<char> text( min( head.count, (DWORD) 1024 ) + 1, 0 );
+                    GetBytes( stringOffset, text.data(), (int) text.size() - 1 );
+                    for ( size_t c = 0; c + 1 < text.size(); c++ )
+                    {
+                        unsigned char ch = (unsigned char) text[ c ];
+                        if ( 0 == ch )
+                            break;
+                        if ( ch < ' ' || ch > '~' )
+                        {
+                            text[ c ] = 0;
+                            break;
+                        }
+                    }
+                    prf( "%s\n", text.data() );
+                }
+                else
+                    prf( "(invalid string range; %u bytes)\n", head.count );
             }
-            else if ( 4096 == head.id )
+            else if ( 7 == head.type && 4 == head.count &&
+                      ( 0x0000 == head.id || 0x1408 == head.id || 0x1409 == head.id ) )
             {
-                ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
-                GetString( stringOffset + tagHeaderBase + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                prf( "fujifilm makernote Quality:          %s\n", acBuffer );
+                char version[ 5 ] = {};
+                __int64 versionOffset = IFDOffset - 4 + headerBase;
+                if ( IsFileRangeValid( versionOffset, 4 ) )
+                {
+                    GetBytes( versionOffset, version, 4 );
+                    prf( "%.*s\n", 4, version );
+                }
+                else
+                    prf( "(invalid version data range)\n" );
             }
-            else if ( 4097 == head.id && 4 == head.type )
-                prf( "Fujifilm Sharpness:                  %d\n", head.offset );
-            else if ( 4098 == head.id && 4 == head.type )
-                prf( "Fujifilm WhiteBalance:               %d\n", head.offset );
-            else if ( 4099 == head.id && 4 == head.type )
-                prf( "Fujifilm Saturation:                 %d\n", head.offset );
-            else if ( 5169 == head.id && 4 == head.type )
+            else if ( 1 == head.type || 6 == head.type || 3 == head.type || 8 == head.type ||
+                      4 == head.type || 9 == head.type || 5 == head.type || 10 == head.type )
             {
-                prf( "Fujifilm Rating:                     %d\n", head.offset );
+                DWORD valueSize = ( 1 == head.type || 2 == head.type || 6 == head.type || 7 == head.type ) ? 1 :
+                                  ( 3 == head.type || 8 == head.type ) ? 2 :
+                                  ( 5 == head.type || 10 == head.type ) ? 8 : 4;
+                unsigned __int64 byteCount = (unsigned __int64) head.count * valueSize;
+                __int64 valuesOffset = ( byteCount <= 4 )
+                    ? IFDOffset - 4 + headerBase
+                    : (__int64) head.offset + tagHeaderBase + headerBase;
+
+                if ( 0 == head.count || byteCount > INT_MAX ||
+                     !IsFileRangeValid( valuesOffset, (__int64) byteCount ) )
+                {
+                    prf( "(invalid numeric data range; type %u, count %u)\n", head.type, head.count );
+                }
+                else if ( 5 == head.type || 10 == head.type )
+                {
+                    DWORD valuesToPrint = min( head.count, 4u );
+                    if ( valuesToPrint > 1 )
+                        prf( "[%u values] ", head.count );
+                    for ( DWORD v = 0; v < valuesToPrint; v++ )
+                    {
+                        if ( v )
+                            prf( ", " );
+                        if ( 5 == head.type )
+                        {
+                            DWORD numerator = GetDWORD( valuesOffset + v * 8, littleEndian );
+                            DWORD denominator = GetDWORD( valuesOffset + v * 8 + 4, littleEndian );
+                            if ( denominator )
+                                prf( "%u / %u = %.6f", numerator, denominator, (double) numerator / denominator );
+                            else
+                                prf( "%u / 0", numerator );
+                        }
+                        else
+                        {
+                            LONG numerator = (LONG) GetDWORD( valuesOffset + v * 8, littleEndian );
+                            LONG denominator = (LONG) GetDWORD( valuesOffset + v * 8 + 4, littleEndian );
+                            if ( denominator )
+                                prf( "%ld / %ld = %.6f", numerator, denominator, (double) numerator / denominator );
+                            else
+                                prf( "%ld / 0", numerator );
+                        }
+                    }
+                    if ( valuesToPrint < head.count )
+                        prf( ", ..." );
+                    prf( "\n" );
+                }
+                else if ( 1 == head.count )
+                {
+                    DWORD value = head.offset;
+                    if ( 1 == head.type || 6 == head.type )
+                        value &= 0xff;
+                    else if ( 3 == head.type || 8 == head.type )
+                        value &= 0xffff;
+
+                    if ( 9 == head.type )
+                        prf( "%ld", (LONG) value );
+                    else
+                        prf( "%u (0x%x)", value, value );
+
+                    const char * valueName = FujifilmMakerNoteValueName( head.id, value );
+                    if ( valueName )
+                        prf( " (%s)", valueName );
+                    prf( "\n" );
+                }
+                else
+                {
+                    DWORD valuesToPrint = min( head.count, 8u );
+                    prf( "[%u values] ", head.count );
+                    for ( DWORD v = 0; v < valuesToPrint; v++ )
+                    {
+                        if ( v )
+                            prf( ", " );
+                        if ( 1 == head.type || 6 == head.type )
+                            prf( "%u", GetBYTE( valuesOffset + v ) );
+                        else if ( 3 == head.type || 8 == head.type )
+                            prf( "%u", GetWORD( valuesOffset + v * 2, littleEndian ) );
+                        else if ( 9 == head.type )
+                            prf( "%ld", (LONG) GetDWORD( valuesOffset + v * 4, littleEndian ) );
+                        else
+                            prf( "%u", GetDWORD( valuesOffset + v * 4, littleEndian ) );
+                    }
+                    if ( valuesToPrint < head.count )
+                        prf( ", ..." );
+                    prf( "\n" );
+                }
             }
             else
             {
-                prf( "fujifilm makernote tag %d ID %d==%#x, type %d, count %d, offset/value %d", i, head.id, head.id, head.type, head.count, head.offset );
-
-                if ( 2 == head.type )
+                prf( "(type %u, count %u, value/offset %#x)\n", head.type, head.count, head.offset );
+                if ( 7 == head.type && head.count > 0 )
                 {
-                    ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
-                    GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                    prf( " %s", acBuffer );
+                    __int64 dataOffset = ( head.count <= 4 )
+                        ? IFDOffset - 4 + headerBase
+                        : (__int64) head.offset + tagHeaderBase + headerBase;
+                    DWORD dataLength = min( head.count, (DWORD) 0x100 );
+                    if ( IsFileRangeValid( dataOffset, dataLength ) )
+                        DumpBinaryData( dataOffset, 0, dataLength, depth + 1, dataOffset );
                 }
-
-                prf( "\n" );
-
-                if ( 7 == head.type )
-                    DumpBinaryData( head.offset, headerBase, head.count, 4, IFDOffset - 4 );
             }
         }
 
-        IFDOffset = GetDWORD( IFDOffset + headerBase, littleEndian );
+        IFDOffset += sizeof( DWORD );
+        DWORD nextIFD = GetDWORD( IFDOffset - sizeof( DWORD ) + headerBase, littleEndian );
+        IFDOffset = nextIFD;
     }
 } //EnumerateFujifilmMakernotes
 
@@ -779,6 +1208,321 @@ const char * SonyRawFileType( DWORD x )
 
     return "unknown";
 } //SonyRawFileType
+
+const char * SonyMakerNoteTagName( WORD tag )
+{
+    switch ( tag )
+    {
+        case 258: return "Quality";
+        case 260: return "FlashExposureComp";
+        case 8194: return "Rating";
+        case 8196: return "Contrast";
+        case 8197: return "Saturation";
+        case 8198: return "Sharpness";
+        case 8199: return "Brightness";
+        case 8200: return "LongExposureNoiseReduction";
+        case 8201: return "HighISONoiseReduction";
+        case 8202: return "HDR";
+        case 8203: return "MultiFrameNoiseReduction";
+        case 8206: return "PictureEffect";
+        case 8207: return "SoftSkinEffect";
+        case 8209: return "VignettingCorrection";
+        case 8210: return "LateralChromaticAberration";
+        case 8211: return "DistortionCorrectionSetting";
+        case 8212: return "WBShiftAB_GM";
+        case 8214: return "AutoPortraitFramed";
+        case 8215: return "FlashAction";
+        case 8218: return "ElectronicFrontCurtainShutter";
+        case 8219: return "FocusMode";
+        case 8220: return "AFAreaModeSetting";
+        case 8221: return "FlexibleSpotPosition";
+        case 8222: return "AFPointSelected";
+        case 8224: return "AFPointsUsed";
+        case 8225: return "AFTracking";
+        case 8226: return "FocalPlaneAFPointsUsed";
+        case 8227: return "MultiFrameNREffect";
+        case 8230: return "WBShiftAB_GM_Precise";
+        case 8231: return "FocusLocation";
+        case 8232: return "VariableLowPassFilter";
+        case 8233: return "RAWFileType";
+        case 8235: return "PrioritySetInAWB";
+        case 8236: return "MeteringMode2";
+        case 8237: return "ExposureStandardAdjustment";
+        case 8238: return "Quality";
+        case 8239: return "PixelShiftInfo";
+        case 8241: return "SerialNumber";
+        case 45056: return "FileFormat";
+        case 45057: return "SonyModelID";
+        case 45088: return "CreativeStyle";
+        case 45089: return "ColorTemperature";
+        case 45090: return "ColorCompensationFilter";
+        case 45091: return "SceneMode";
+        case 45092: return "ZoneMatching";
+        case 45093: return "DynamicRangeOptimizer";
+        case 45094: return "ImageStabilization";
+        case 45095: return "LensType";
+        case 45097: return "ColorMode";
+        case 45098: return "LensSpec";
+        case 45099: return "FullImageSize";
+        case 45100: return "PreviewImageSize";
+        case 45120: return "Macro";
+        case 45121: return "ExposureMode";
+        case 45122: return "FocusMode";
+        case 45123: return "AFAreaMode";
+        case 45124: return "AFIlluminator";
+        case 45127: return "JPEGQuality";
+        case 45128: return "FlashLevel";
+        case 45129: return "ReleaseMode";
+        case 45130: return "SequenceNumber";
+        case 45131: return "Anti-Blur";
+        case 45134: return "FocusMode";
+        case 45135: return "DynamicRangeOptimizer";
+        case 45136: return "HighISONoiseReduction2";
+        case 45138: return "IntelligentAuto";
+        case 45140: return "WhiteBalance";
+        default: return NULL;
+    }
+}
+
+const char * SonyMakerNoteValueName( WORD tag, DWORD value )
+{
+    switch ( tag )
+    {
+        case 8209:
+        case 8210:
+        case 8211:
+            if ( 0 == value ) return "Off";
+            if ( 2 == value ) return "Auto";
+            if ( 0xffffffff == value ) return "n/a";
+            break;
+        case 8219:
+            if ( 0 == value ) return "Manual";
+            if ( 2 == value ) return "AF-S";
+            if ( 3 == value ) return "AF-C";
+            if ( 4 == value ) return "AF-A";
+            if ( 6 == value ) return "DMF";
+            if ( 7 == value ) return "AF-D";
+            break;
+        case 8233:
+            if ( 0 == value ) return "Compressed RAW";
+            if ( 1 == value ) return "Uncompressed RAW";
+            if ( 65535 == value ) return "n/a";
+            break;
+        case 8235:
+            if ( 0 == value ) return "Standard";
+            if ( 1 == value ) return "Ambience";
+            if ( 2 == value ) return "White";
+            break;
+        case 45093:
+            if ( 0 == value ) return "Off";
+            if ( 1 == value ) return "Standard";
+            if ( 2 == value ) return "Advanced Auto";
+            if ( 3 == value ) return "Auto";
+            if ( value >= 8 && value <= 12 )
+            {
+                static const char * const levels[] = {
+                    "Advanced Lv1", "Advanced Lv2", "Advanced Lv3",
+                    "Advanced Lv4", "Advanced Lv5"
+                };
+                return levels[ value - 8 ];
+            }
+            if ( value >= 16 && value <= 20 )
+            {
+                static const char * const levels[] = {
+                    "Lv1", "Lv2", "Lv3", "Lv4", "Lv5"
+                };
+                return levels[ value - 16 ];
+            }
+            break;
+        case 45094:
+            if ( 0 == value ) return "Off";
+            if ( 1 == value ) return "On";
+            if ( 0xffffffff == value ) return "n/a";
+            break;
+        case 45122:
+            if ( 1 == value ) return "AF-S";
+            if ( 2 == value ) return "AF-C";
+            if ( 4 == value ) return "Permanent-AF";
+            if ( 65535 == value ) return "n/a";
+            break;
+        case 45127:
+            if ( 0 == value ) return "Standard";
+            if ( 1 == value ) return "Fine";
+            if ( 2 == value ) return "Extra Fine";
+            if ( 65535 == value ) return "n/a";
+            break;
+        case 45134:
+            if ( 0 == value ) return "Manual";
+            if ( 2 == value ) return "AF-S";
+            if ( 3 == value ) return "AF-C";
+            if ( 5 == value ) return "Semi-manual";
+            if ( 6 == value ) return "DMF";
+            break;
+        case 45135:
+            if ( 0 == value ) return "Off";
+            if ( 1 == value ) return "Standard";
+            if ( 2 == value ) return "Plus";
+            break;
+        case 45136:
+            if ( 0 == value ) return "Normal";
+            if ( 1 == value ) return "High";
+            if ( 2 == value ) return "Low";
+            if ( 3 == value ) return "Off";
+            if ( 65535 == value ) return "n/a";
+            break;
+        case 45138:
+            if ( 0 == value ) return "Off";
+            if ( 1 == value ) return "On";
+            if ( 2 == value ) return "Advanced";
+            break;
+        case 45140:
+            switch ( value )
+            {
+                case 0: return "Auto";
+                case 4: return "Custom";
+                case 5: return "Daylight";
+                case 6: return "Cloudy";
+                case 7: return "Cool White Fluorescent";
+                case 8: return "Day White Fluorescent";
+                case 9: return "Daylight Fluorescent";
+                case 10: return "Incandescent2";
+                case 11: return "Warm White Fluorescent";
+                case 14: return "Incandescent";
+                case 15: return "Flash";
+                case 17: return "Underwater 1 (Blue Water)";
+                case 18: return "Underwater 2 (Green Water)";
+                case 19: return "Underwater Auto";
+            }
+            break;
+    }
+
+    return NULL;
+}
+
+void PrintSonyMakerNoteTag( int depth, const char * name, const IFDHeader & head,
+                            __int64 inlineValueOffset, __int64 headerBase, bool littleEndian )
+{
+    DWORD valueSize = ( 1 == head.type || 2 == head.type || 6 == head.type || 7 == head.type ) ? 1 :
+                      ( 3 == head.type || 8 == head.type ) ? 2 :
+                      ( 4 == head.type || 9 == head.type ) ? 4 :
+                      ( 5 == head.type || 10 == head.type ) ? 8 : 0;
+    unsigned __int64 byteCount = (unsigned __int64) head.count * valueSize;
+    __int64 valuesOffset = ( byteCount <= 4 )
+        ? inlineValueOffset + headerBase
+        : (__int64) head.offset + headerBase;
+
+    Space( depth );
+    if ( 0 == valueSize || 0 == head.count || byteCount > INT_MAX ||
+         !IsFileRangeValid( valuesOffset, (__int64) byteCount ) )
+    {
+        prf( "Sony %s: (invalid or unsupported data; type %u, count %u)\n",
+             name, head.type, head.count );
+        return;
+    }
+
+    if ( 2 == head.type )
+    {
+        vector<char> text( min( head.count, 1024u ) + 1, 0 );
+        DWORD textLength = min( head.count, (DWORD) text.size() - 1 );
+        GetBytes( valuesOffset, text.data(), (int) textLength );
+        for ( DWORD i = 0; i < textLength; i++ )
+        {
+            unsigned char ch = (unsigned char) text[ i ];
+            if ( 0 == ch )
+                break;
+            if ( ch < ' ' || ch > '~' )
+                text[ i ] = '?';
+        }
+        prf( "Sony %s: %s\n", name, text.data() );
+        return;
+    }
+
+    DWORD valuesToPrint = min( head.count, 16u );
+    prf( "Sony %s: ", name );
+    for ( DWORD i = 0; i < valuesToPrint; i++ )
+    {
+        if ( i )
+            prf( ", " );
+
+        __int64 valueOffset = valuesOffset + (__int64) i * valueSize;
+        if ( 1 == head.count && 1 == head.type )
+        {
+            const char * valueName = SonyMakerNoteValueName( head.id, GetBYTE( valueOffset ) );
+            if ( valueName )
+            {
+                prf( "%s", valueName );
+                continue;
+            }
+        }
+        else if ( 1 == head.count && 3 == head.type )
+        {
+            const char * valueName = SonyMakerNoteValueName( head.id, GetWORD( valueOffset, littleEndian ) );
+            if ( valueName )
+            {
+                prf( "%s", valueName );
+                continue;
+            }
+        }
+        else if ( 1 == head.count && 4 == head.type )
+        {
+            const char * valueName = SonyMakerNoteValueName( head.id, GetDWORD( valueOffset, littleEndian ) );
+            if ( valueName )
+            {
+                prf( "%s", valueName );
+                continue;
+            }
+        }
+
+        if ( 1 == head.type )
+            prf( "%u", GetBYTE( valueOffset ) );
+        else if ( 6 == head.type )
+            prf( "%d", (signed char) GetBYTE( valueOffset ) );
+        else if ( 3 == head.type )
+            prf( "%u", GetWORD( valueOffset, littleEndian ) );
+        else if ( 8 == head.type )
+            prf( "%d", (short) GetWORD( valueOffset, littleEndian ) );
+        else if ( 4 == head.type )
+            prf( "%u", GetDWORD( valueOffset, littleEndian ) );
+        else if ( 9 == head.type )
+            prf( "%ld", (LONG) GetDWORD( valueOffset, littleEndian ) );
+        else if ( 5 == head.type || 10 == head.type )
+        {
+            if ( 10 == head.type )
+            {
+                LONG numerator = (LONG) GetDWORD( valueOffset, littleEndian );
+                LONG denominator = (LONG) GetDWORD( valueOffset + 4, littleEndian );
+                if ( denominator )
+                    prf( "%ld/%ld=%.8g", numerator, denominator,
+                         (double) numerator / denominator );
+                else
+                    prf( "%ld/0", numerator );
+            }
+            else
+            {
+                DWORD numerator = GetDWORD( valueOffset, littleEndian );
+                DWORD denominator = GetDWORD( valueOffset + 4, littleEndian );
+                if ( denominator )
+                    prf( "%u/%u=%.8g", numerator, denominator,
+                         (double) numerator / denominator );
+                else
+                    prf( "%u/0", numerator );
+            }
+        }
+        else
+            prf( "%02x", GetBYTE( valueOffset ) );
+    }
+    if ( valuesToPrint < head.count )
+        prf( ", ..." );
+    if ( 45057 == head.id && 1 == head.count && 3 == head.type )
+    {
+        WORD modelID = GetWORD( valuesOffset, littleEndian );
+        if ( 297 == modelID )
+            prf( " (DSC-RX100)" );
+        else if ( 298 == modelID )
+            prf( " (DSC-RX1)" );
+    }
+    prf( "\n" );
+}
 
 const char * ExifHCUsage( DWORD x )
 {
@@ -971,6 +1715,121 @@ const char * CompressionType( DWORD x )
 
     return "unknown";
 } //CompressionType
+
+void PrintDngRationalArray( const char * name, const IFDHeader & head, __int64 headerBase, bool littleEndian )
+{
+    if ( ( 5 != head.type && 10 != head.type ) || 0 == head.count )
+    {
+        prf( "%-37s (unsupported rational type %u, count %u)\n", name, head.type, head.count );
+        return;
+    }
+
+    unsigned __int64 byteCount = (unsigned __int64) head.count * 8;
+    __int64 valuesOffset = (__int64) head.offset + headerBase;
+    if ( byteCount > INT_MAX || !IsFileRangeValid( valuesOffset, (__int64) byteCount ) )
+    {
+        prf( "%-37s (invalid rational data range; count %u)\n", name, head.count );
+        return;
+    }
+
+    prf( "%-37s", name );
+    DWORD valuesToPrint = min( head.count, 32u );
+    for ( DWORD valueIndex = 0; valueIndex < valuesToPrint; valueIndex++ )
+    {
+        if ( valueIndex )
+            prf( ", " );
+
+        __int64 valueOffset = valuesOffset + (__int64) valueIndex * 8;
+        if ( 10 == head.type )
+        {
+            LONG numerator = (LONG) GetDWORD( valueOffset, littleEndian );
+            LONG denominator = (LONG) GetDWORD( valueOffset + 4, littleEndian );
+            if ( denominator )
+                prf( "%.10g", (double) numerator / denominator );
+            else
+                prf( "%ld/0", numerator );
+        }
+        else
+        {
+            DWORD numerator = GetDWORD( valueOffset, littleEndian );
+            DWORD denominator = GetDWORD( valueOffset + 4, littleEndian );
+            if ( denominator )
+                prf( "%.10g", (double) numerator / denominator );
+            else
+                prf( "%u/0", numerator );
+        }
+    }
+    if ( valuesToPrint < head.count )
+        prf( ", ..." );
+    prf( "\n" );
+}
+
+void PrintDngBlackLevel( const IFDHeader & head, __int64 inlineValueOffset,
+                         __int64 headerBase, bool littleEndian )
+{
+    DWORD valueSize = ( 1 == head.type || 6 == head.type ) ? 1 :
+                      ( 3 == head.type || 8 == head.type ) ? 2 :
+                      ( 4 == head.type || 9 == head.type ) ? 4 :
+                      ( 5 == head.type || 10 == head.type ) ? 8 : 0;
+    unsigned __int64 byteCount = (unsigned __int64) head.count * valueSize;
+    __int64 valuesOffset = ( byteCount <= 4 )
+        ? inlineValueOffset + headerBase
+        : (__int64) head.offset + headerBase;
+
+    if ( 0 == valueSize || 0 == head.count || byteCount > INT_MAX ||
+         !IsFileRangeValid( valuesOffset, (__int64) byteCount ) )
+    {
+        prf( "BlackLevel:                         (invalid data range; type %u, count %u)\n",
+             head.type, head.count );
+        return;
+    }
+
+    prf( "BlackLevel:                         " );
+    DWORD valuesToPrint = min( head.count, 32u );
+    for ( DWORD valueIndex = 0; valueIndex < valuesToPrint; valueIndex++ )
+    {
+        if ( valueIndex )
+            prf( ", " );
+
+        __int64 valueOffset = valuesOffset + (__int64) valueIndex * valueSize;
+        if ( 5 == head.type || 10 == head.type )
+        {
+            if ( 10 == head.type )
+            {
+                LONG numerator = (LONG) GetDWORD( valueOffset, littleEndian );
+                LONG denominator = (LONG) GetDWORD( valueOffset + 4, littleEndian );
+                if ( denominator )
+                    prf( "%.10g", (double) numerator / denominator );
+                else
+                    prf( "%ld/0", numerator );
+            }
+            else
+            {
+                DWORD numerator = GetDWORD( valueOffset, littleEndian );
+                DWORD denominator = GetDWORD( valueOffset + 4, littleEndian );
+                if ( denominator )
+                    prf( "%.10g", (double) numerator / denominator );
+                else
+                    prf( "%u/0", numerator );
+            }
+        }
+        else if ( 1 == head.type )
+            prf( "%u", GetBYTE( valueOffset ) );
+        else if ( 6 == head.type )
+            prf( "%d", (signed char) GetBYTE( valueOffset ) );
+        else if ( 3 == head.type )
+            prf( "%u", GetWORD( valueOffset, littleEndian ) );
+        else if ( 8 == head.type )
+            prf( "%d", (short) GetWORD( valueOffset, littleEndian ) );
+        else if ( 4 == head.type )
+            prf( "%u", GetDWORD( valueOffset, littleEndian ) );
+        else
+            prf( "%ld", (LONG) GetDWORD( valueOffset, littleEndian ) );
+    }
+    if ( valuesToPrint < head.count )
+        prf( ", ..." );
+    prf( "\n" );
+}
 
 void EnumerateGenericIFD( int depth, __int64 IFDOffset, __int64 headerBase, bool littleEndian )
 {
@@ -1201,11 +2060,17 @@ void EnumerateGenericIFD( int depth, __int64 IFDOffset, __int64 headerBase, bool
             else if ( 28688 == head.id && 3 == head.type && 4 == head.count )
             {
                 prf( "Sony Tone Curve:                    " );
-                DWORD o = head.offset + headerBase;
+                __int64 o = ( head.count * 2 <= 4 )
+                    ? IFDOffset - 4 + headerBase
+                    : (__int64) head.offset + headerBase;
+                if ( !IsFileRangeValid( o, 8 ) )
+                {
+                    prf( "(invalid data range)\n" );
+                    continue;
+                }
                 for ( int i = 0; i < 4; i++ )
                 {
-                    DWORD x = GetDWORD( o, littleEndian );
-                    o += 4;
+                    WORD x = GetWORD( o + i * 2, littleEndian );
                     prf( "%d", x );
                     if ( 3 != i )
                         prf( ", " );
@@ -1250,58 +2115,12 @@ void EnumerateGenericIFD( int depth, __int64 IFDOffset, __int64 headerBase, bool
             }
             else if ( 50713 == head.id && 3 == head.type && 2 == head.count )
             {
-                short a = head.offset & 0xffff;
-                short b = ( head.offset >> 16 ) && 0xffff;
-                prf( "BlackLevelRepeatDim                 %#x / %#x\n", a, b );
+                WORD rows = GetWORD( IFDOffset - 4 + headerBase, littleEndian );
+                WORD columns = GetWORD( IFDOffset - 2 + headerBase, littleEndian );
+                prf( "BlackLevelRepeatDim                 %u, %u\n", rows, columns );
             }                                               
-            else if ( 50714 == head.id && 4 == head.type && 4 == head.count )
-            {
-                LONG num1 = GetDWORD( head.offset +      headerBase, littleEndian );
-                LONG den1 = GetDWORD( head.offset +  4 + headerBase, littleEndian );
-                double d1 = (double) num1 / (double) den1;
-
-                LONG num2 = GetDWORD( head.offset +  8 + headerBase, littleEndian );
-                LONG den2 = GetDWORD( head.offset + 12 + headerBase, littleEndian );
-                double d2 = (double) num2 / (double) den2;
-
-                LONG num3 = GetDWORD( head.offset + 16 + headerBase, littleEndian );
-                LONG den3 = GetDWORD( head.offset + 20 + headerBase, littleEndian );
-                double d3 = (double) num3 / (double) den3;
-
-                LONG num4 = GetDWORD( head.offset + 24 + headerBase, littleEndian );
-                LONG den4 = GetDWORD( head.offset + 28 + headerBase, littleEndian );
-                double d4 = (double) num4 / (double) den4;
-
-                prf( "BlackLevel:                         %lf, %lf, %lf, %lf\n", d1, d2, d3, d4 );
-            }
-            else if ( 50714 == head.id && 3 == head.type && 4 == head.count )
-            {
-                WORD num1 = GetWORD( head.offset +      headerBase, littleEndian );
-                WORD den1 = GetWORD( head.offset +  2 + headerBase, littleEndian );
-                double d1 = (double) num1 / (double) den1;
-
-                WORD num2 = GetWORD( head.offset +  4 + headerBase, littleEndian );
-                WORD den2 = GetWORD( head.offset +  6 + headerBase, littleEndian );
-                double d2 = (double) num2 / (double) den2;
-
-                WORD num3 = GetWORD( head.offset +  8 + headerBase, littleEndian );
-                WORD den3 = GetWORD( head.offset + 10 + headerBase, littleEndian );
-                double d3 = (double) num3 / (double) den3;
-
-                WORD num4 = GetWORD( head.offset + 12 + headerBase, littleEndian );
-                WORD den4 = GetWORD( head.offset + 14 + headerBase, littleEndian );
-                double d4 = (double) num4 / (double) den4;
-
-                prf( "BlackLevel:                         %lf, %lf, %lf, %lf\n", d1, d2, d3, d4 );
-            }
-            else if ( 50714 == head.id && 5 == head.type && 1 == head.count ) // Hasselblad uses this
-            {
-                LONG num = GetDWORD( head.offset +      headerBase, littleEndian );
-                LONG den = GetDWORD( head.offset +  4 + headerBase, littleEndian );
-
-                double d = (double) num / (double) den;
-                prf( "BlackLevel:                         %d / %d = %lf\n", num, den, d );
-            }
+            else if ( 50714 == head.id )
+                PrintDngBlackLevel( head, IFDOffset - 4, headerBase, littleEndian );
             else if ( 50717 == head.id && 4 == head.type && 1 == head.count )
                 prf( "WhiteLevel:                         %d\n", head.offset );
             else if ( 50717 == head.id && 3 == head.type && 1 == head.count ) // Hasselblad uses this
@@ -1573,16 +2392,333 @@ void EnumerateNikonPreviewIFD( int depth, __int64 IFDOffset, __int64 headerBase,
     }
 } //EnumerateNikonPreviewIFD
 
+const char * NikonMakernoteTagName( WORD tag )
+{
+    switch ( tag )
+    {
+        case 0x0001: return "Version";
+        case 0x0002: return "ISO";
+        case 0x0003: return "ColorMode";
+        case 0x0004: return "Quality";
+        case 0x0005: return "WhiteBalance";
+        case 0x0006: return "Sharpness";
+        case 0x0007: return "FocusMode";
+        case 0x0008: return "FlashSetting";
+        case 0x0009: return "FlashType";
+        case 0x000b: return "WhiteBalanceFineTune";
+        case 0x000c: return "WhiteBalanceLevels";
+        case 0x000d: return "ProgramShift";
+        case 0x000e: return "ExposureDifference";
+        case 0x000f: return "ISOSelection";
+        case 0x0010: return "DataDump";
+        case 0x0011: return "PreviewIFD";
+        case 0x0012: return "FlashExposureCompensation";
+        case 0x0013: return "ISOSetting";
+        case 0x0016: return "ImageBoundary";
+        case 0x0017: return "FlashExposureCompensation";
+        case 0x0018: return "FlashExposureBracket";
+        case 0x0019: return "ExposureBracketCompensation";
+        case 0x001a: return "ImageProcessing";
+        case 0x001b: return "HighSpeedCrop";
+        case 0x001c: return "ExposureTuning";
+        case 0x001d: return "SerialNumber";
+        case 0x001e: return "ColorSpace";
+        case 0x001f: return "VibrationReductionInfo";
+        case 0x0020: return "ImageAuthentication";
+        case 0x0022: return "ActiveD-Lighting";
+        case 0x0023: return "PictureControl";
+        case 0x0024: return "WorldTime";
+        case 0x0025: return "ISOInfo";
+        case 0x002a: return "VignetteControl";
+        case 0x0034: return "ShutterMode";
+        case 0x0037: return "MechanicalShutterCount";
+        case 0x003f: return "WhiteBalanceFineTune2";
+        case 0x0080: return "ImageAdjustment";
+        case 0x0081: return "ToneCompensation";
+        case 0x0082: return "AuxiliaryLens";
+        case 0x0083: return "LensType";
+        case 0x0084: return "Lens";
+        case 0x0085: return "FocusDistance";
+        case 0x0086: return "DigitalZoom";
+        case 0x0087: return "FlashMode";
+        case 0x0088: return "AFInfo";
+        case 0x0089: return "ShootingMode";
+        case 0x008a: return "AutoBracketRelease";
+        case 0x008b: return "LensFStops";
+        case 0x008c: return "ContrastCurve";
+        case 0x008d: return "ColorHue";
+        case 0x008f: return "SceneMode";
+        case 0x0090: return "LightSource";
+        case 0x0091: return "ShotInfo";
+        case 0x0092: return "HueAdjustment";
+        case 0x0093: return "NEFCompression";
+        case 0x0094: return "Saturation";
+        case 0x0095: return "NoiseReduction";
+        case 0x0096: return "LinearizationTable";
+        case 0x0097: return "ColorBalance";
+        case 0x0098: return "LensData";
+        case 0x0099: return "RawImageCenter";
+        case 0x009a: return "SensorPixelSize";
+        case 0x009c: return "SceneAssist";
+        case 0x009e: return "RetouchHistory";
+        case 0x00a0: return "SerialNumber";
+        case 0x00a2: return "ImageDataSize";
+        case 0x00a5: return "ImageCount";
+        case 0x00a6: return "DeletedImageCount";
+        case 0x00a7: return "ShutterCount";
+        case 0x00a8: return "FlashInfo";
+        case 0x00a9: return "ImageOptimization";
+        case 0x00aa: return "Saturation2";
+        case 0x00ab: return "VariProgram";
+        case 0x00ac: return "ImageStabilization";
+        case 0x00ad: return "AFResponse";
+        case 0x00b0: return "MultiExposure";
+        case 0x00b1: return "HighISONoiseReduction";
+        case 0x00b6: return "PowerUpTime";
+        case 0x00b7: return "AFInfo2";
+        case 0x00b8: return "FileInfo";
+        case 0x00bb: return "RetouchInfo";
+        case 0x00c0: return "PictureControlData";
+    }
+
+    return NULL;
+} //NikonMakernoteTagName
+
+DWORD NikonMakernoteTypeSize( WORD type )
+{
+    switch ( type )
+    {
+        case 1: case 2: case 6: case 7: return 1;
+        case 3: case 8: return 2;
+        case 4: case 9: case 11: return 4;
+        case 5: case 10: case 12: return 8;
+    }
+
+    return 0;
+} //NikonMakernoteTypeSize
+
+void PrintNikonMakernoteValue( int depth, const char * name, WORD tag, const IFDHeader & head,
+                              __int64 valueOffset, bool littleEndian )
+{
+    Space( depth );
+    prf( "makernote Nikon.%s: ", name );
+
+    if ( 2 == head.type )
+    {
+        char value[ 256 ];
+        if ( head.count >= sizeof value || !IsFileRangeValid( valueOffset, head.count ) )
+        {
+            prf( "%u bytes (string unavailable)\n", head.count );
+            return;
+        }
+
+        GetString( valueOffset, value, _countof( value ), head.count );
+        prf( "%s\n", value );
+        return;
+    }
+
+    if ( 7 == head.type )
+    {
+        if ( 0x0001 == tag && head.count <= 16 && IsFileRangeValid( valueOffset, head.count ) )
+        {
+            char value[ 17 ];
+            GetString( valueOffset, value, _countof( value ), head.count );
+            if ( 4 == strlen( value ) &&
+                 value[ 0 ] >= '0' && value[ 0 ] <= '9' &&
+                 value[ 1 ] >= '0' && value[ 1 ] <= '9' )
+                prf( "%d.%c%c\n", ( value[ 0 ] - '0' ) * 10 + value[ 1 ] - '0', value[ 2 ], value[ 3 ] );
+            else
+                prf( "%s\n", value );
+        }
+        else
+            prf( "%u bytes of binary data\n", head.count );
+        return;
+    }
+
+    if ( !IsIntType( head.type ) && 5 != head.type && 10 != head.type )
+    {
+        prf( "%u values (TIFF type %u)\n", head.count, head.type );
+        return;
+    }
+
+    DWORD typeSize = NikonMakernoteTypeSize( head.type );
+    if ( 0 == typeSize || head.count > 32 || !IsFileRangeValid( valueOffset, (QWORD) typeSize * head.count ) )
+    {
+        prf( "%u values (data unavailable)\n", head.count );
+        return;
+    }
+
+    if ( 1 == head.count && ( 1 == head.type || 3 == head.type || 4 == head.type ) )
+    {
+        QWORD value = 1 == head.type ? GetBYTE( valueOffset ) :
+                      3 == head.type ? GetWORD( valueOffset, littleEndian ) :
+                                       GetDWORD( valueOffset, littleEndian );
+        if ( 0x001e == tag && 1 == value )
+        {
+            prf( "sRGB (1)\n" );
+            return;
+        }
+        if ( 0x001e == tag && 2 == value )
+        {
+            prf( "Adobe RGB (2)\n" );
+            return;
+        }
+        if ( 0x0083 == tag && 0 == value )
+        {
+            prf( "AF (0)\n" );
+            return;
+        }
+        if ( 0x0083 == tag && 2 == value )
+        {
+            prf( "D (2)\n" );
+            return;
+        }
+        if ( 0x0083 == tag && 6 == value )
+        {
+            prf( "G (6)\n" );
+            return;
+        }
+        if ( 0x0087 == tag && 0 == value )
+        {
+            prf( "Did Not Fire (0)\n" );
+            return;
+        }
+        if ( 0x0093 == tag && 1 == value )
+        {
+            prf( "Lossy (type 1) (1)\n" );
+            return;
+        }
+        if ( 0x0093 == tag && 2 == value )
+        {
+            prf( "Uncompressed (2)\n" );
+            return;
+        }
+        if ( 0x0093 == tag && 3 == value )
+        {
+            prf( "Lossless (3)\n" );
+            return;
+        }
+        if ( 0x0093 == tag && 10 == value )
+        {
+            prf( "Packed 14 bits (10)\n" );
+            return;
+        }
+        if ( 0x0089 == tag && 0 == value )
+        {
+            prf( "Single-Frame (0)\n" );
+            return;
+        }
+        if ( 0x0089 == tag && 32 == value )
+        {
+            prf( "Single-Frame, Auto ISO (32)\n" );
+            return;
+        }
+        if ( 0x00b1 == tag && 6 == value )
+        {
+            prf( "High (6)\n" );
+            return;
+        }
+    }
+
+    if ( 0x0084 == tag && 5 == head.type && 4 == head.count )
+    {
+        DWORD minFocalNumerator = GetDWORD( valueOffset, littleEndian );
+        DWORD minFocalDenominator = GetDWORD( valueOffset + 4, littleEndian );
+        DWORD maxFocalNumerator = GetDWORD( valueOffset + 8, littleEndian );
+        DWORD maxFocalDenominator = GetDWORD( valueOffset + 12, littleEndian );
+        DWORD minApertureNumerator = GetDWORD( valueOffset + 16, littleEndian );
+        DWORD minApertureDenominator = GetDWORD( valueOffset + 20, littleEndian );
+        DWORD maxApertureNumerator = GetDWORD( valueOffset + 24, littleEndian );
+        DWORD maxApertureDenominator = GetDWORD( valueOffset + 28, littleEndian );
+        if ( minFocalDenominator && maxFocalDenominator && minApertureDenominator && maxApertureDenominator )
+        {
+            double minFocal = (double) minFocalNumerator / minFocalDenominator;
+            double maxFocal = (double) maxFocalNumerator / maxFocalDenominator;
+            double minAperture = (double) minApertureNumerator / minApertureDenominator;
+            double maxAperture = (double) maxApertureNumerator / maxApertureDenominator;
+            if ( minFocal == maxFocal && minAperture == maxAperture )
+                prf( "%.4g mm f/%.4g\n", minFocal, minAperture );
+            else
+                prf( "%.4g-%.4g mm, f/%.4g-f/%.4g\n", minFocal, maxFocal, minAperture, maxAperture );
+            return;
+        }
+    }
+
+    if ( 0x009a == tag && 5 == head.type && 2 == head.count )
+    {
+        DWORD widthNumerator = GetDWORD( valueOffset, littleEndian );
+        DWORD widthDenominator = GetDWORD( valueOffset + 4, littleEndian );
+        DWORD heightNumerator = GetDWORD( valueOffset + 8, littleEndian );
+        DWORD heightDenominator = GetDWORD( valueOffset + 12, littleEndian );
+        if ( widthDenominator && heightDenominator )
+        {
+            prf( "%.4g x %.4g um\n",
+                 (double) widthNumerator / widthDenominator,
+                 (double) heightNumerator / heightDenominator );
+            return;
+        }
+    }
+
+    DWORD count = head.count;
+    for ( DWORD i = 0; i < count; i++ )
+    {
+        if ( 0 != i )
+            prf( ", " );
+
+        __int64 offset = valueOffset + (__int64) i * typeSize;
+        if ( 1 == head.type || 6 == head.type )
+            prf( "%d", 6 == head.type ? (char) GetBYTE( offset ) : GetBYTE( offset ) );
+        else if ( 3 == head.type || 8 == head.type )
+        {
+            WORD value = GetWORD( offset, littleEndian );
+            prf( "%d", 8 == head.type ? (short) value : value );
+        }
+        else if ( 4 == head.type || 9 == head.type )
+        {
+            DWORD value = GetDWORD( offset, littleEndian );
+            prf( "%lld", (long long) ( 9 == head.type ? (LONG) value : value ) );
+        }
+        else
+        {
+            DWORD numerator = GetDWORD( offset, littleEndian );
+            DWORD denominator = GetDWORD( offset + 4, littleEndian );
+            if ( 10 == head.type )
+            {
+                if ( (LONG) denominator )
+                    prf( "%.6g", (double) (LONG) numerator / (LONG) denominator );
+                else
+                    prf( "%d/0", (LONG) numerator );
+            }
+            else
+            {
+                if ( denominator )
+                    prf( "%.6g", (double) numerator / denominator );
+                else
+                    prf( "%u/0", numerator );
+            }
+        }
+    }
+
+    prf( "\n" );
+} //PrintNikonMakernoteValue
+
 void EnumerateNikonMakernotes( int depth, __int64 IFDOffset, __int64 headerBase, bool littleEndian )
 {
     // https://www.exiv2.org/tags-nikon.html
 
     char acBuffer[ 100 ];
-    DWORD originalNikonMakernotesOffset = IFDOffset - 8; // the -8 here is just from trial and error. But it works.
+    __int64 originalNikonMakernotesOffset = IFDOffset - 8;
     vector<IFDHeader> aHeaders( MaxIFDHeaders );
 
     while ( 0 != IFDOffset ) 
     {
+        if ( !IsFileRangeValid( IFDOffset + headerBase, sizeof( WORD ) ) )
+        {
+            Space( depth );
+            prf( "nikon makernote IFD header is outside the file; skipping\n" );
+            break;
+        }
+
         WORD NumTags = GetWORD( IFDOffset + headerBase, littleEndian );
         Space( depth );
         prf( "nikon makernote IFDOffset %#llx %lld, NumTags %d, headerBase %#llx %lld\n", IFDOffset, IFDOffset, NumTags, headerBase, headerBase );
@@ -1592,6 +2728,14 @@ void EnumerateNikonMakernotes( int depth, __int64 IFDOffset, __int64 headerBase,
         {
             Space( depth );
             prf( "numtags is > MaxIFDHeaders; it's likely not in EXIF format, so the data may be noise. skipping (%d)\n", NumTags );
+            break;
+        }
+
+        if ( !IsFileRangeValid( IFDOffset - 2 + headerBase,
+                                2 + (__int64) NumTags * sizeof( IFDHeader ) + sizeof( DWORD ) ) )
+        {
+            Space( depth );
+            prf( "nikon makernote IFD is outside the file; skipping\n" );
             break;
         }
     
@@ -1666,16 +2810,271 @@ void EnumerateNikonMakernotes( int depth, __int64 IFDOffset, __int64 headerBase,
             }
             else
             {
-                prf( "nikon makernote tag %d ID %d==%#x, type %d, count %d, offset/value %d\n", i, head.id, head.id, head.type, head.count, head.offset );
+                char unknownTagName[ 32 ];
+                const char * tagName = NikonMakernoteTagName( head.id );
+                DWORD typeSize = NikonMakernoteTypeSize( head.type );
+                QWORD valueSize = (QWORD) typeSize * head.count;
+                __int64 valueOffset = valueSize <= sizeof( head.offset )
+                    ? IFDOffset - 4 + headerBase
+                    : (__int64) head.offset + originalNikonMakernotesOffset + headerBase;
+                if ( NULL == tagName )
+                {
+                    sprintf_s( unknownTagName, _countof( unknownTagName ), "Tag%04X", head.id );
+                    tagName = unknownTagName;
+                }
 
-                if ( 7 == head.type )
-                    DumpBinaryData( head.offset + originalNikonMakernotesOffset, headerBase, head.count, 4, IFDOffset - 4 );
+                PrintNikonMakernoteValue( depth, tagName, head.id, head, valueOffset, littleEndian );
             }
         }
 
         IFDOffset = GetDWORD( IFDOffset + headerBase, littleEndian );
     }
 } //EnumerateNikonMakernotes
+
+const char * CanonCameraSettingsTagName( DWORD tag )
+{
+    switch ( tag )
+    {
+        case 1:  return "MacroMode";
+        case 2:  return "SelfTimer";
+        case 3:  return "Quality";
+        case 4:  return "CanonFlashMode";
+        case 5:  return "ContinuousDrive";
+        case 7:  return "FocusMode";
+        case 9:  return "RecordMode";
+        case 10: return "CanonImageSize";
+        case 11: return "EasyMode";
+        case 12: return "DigitalZoom";
+        case 13: return "Contrast";
+        case 14: return "Saturation";
+        case 15: return "Sharpness";
+        case 16: return "CameraISO";
+        case 17: return "MeteringMode";
+        case 18: return "FocusRange";
+        case 19: return "AFPoint";
+        case 20: return "CanonExposureMode";
+        case 22: return "LensType";
+        case 23: return "MaxFocalLength";
+        case 24: return "MinFocalLength";
+        case 25: return "FocalUnits";
+        case 26: return "MaxAperture";
+        case 27: return "MinAperture";
+        case 28: return "FlashActivity";
+        case 29: return "FlashBits";
+        case 32: return "FocusContinuous";
+        case 33: return "AESetting";
+        case 34: return "ImageStabilization";
+        case 35: return "DisplayAperture";
+        case 36: return "ZoomSourceWidth";
+        case 37: return "ZoomTargetWidth";
+        case 39: return "SpotMeteringMode";
+        case 40: return "PhotoEffect";
+        case 41: return "ManualFlashOutput";
+        case 42: return "ColorTone";
+        case 46: return "SRAWQuality";
+    }
+
+    return NULL;
+} //CanonCameraSettingsTagName
+
+const char * CanonShotInfoTagName( DWORD tag )
+{
+    switch ( tag )
+    {
+        case 1:  return "AutoISO";
+        case 2:  return "BaseISO";
+        case 3:  return "MeasuredEV";
+        case 4:  return "TargetAperture";
+        case 5:  return "TargetExposureTime";
+        case 6:  return "ExposureCompensation";
+        case 7:  return "WhiteBalance";
+        case 8:  return "SlowShutter";
+        case 9:  return "SequenceNumber";
+        case 10: return "OpticalZoomCode";
+        case 12: return "CameraTemperature";
+        case 13: return "FlashGuideNumber";
+        case 14: return "AFPointsInFocus";
+        case 15: return "FlashExposureComp";
+        case 16: return "AutoExposureBracketing";
+        case 17: return "AEBBracketValue";
+        case 18: return "ControlMode";
+        case 20: return "FocusDistanceUpper";
+        case 21: return "FNumber";
+        case 22: return "ExposureTime";
+        case 23: return "MeasuredEV2";
+        case 24: return "BulbDuration";
+        case 26: return "CameraType";
+        case 27: return "AutoRotate";
+        case 28: return "NDFilter";
+        case 29: return "SelfTimer2";
+        case 33: return "FlashOutput";
+    }
+
+    return NULL;
+} //CanonShotInfoTagName
+
+const char * CanonFileInfoTagName( DWORD tag )
+{
+    switch ( tag )
+    {
+        case 3:  return "BracketMode";
+        case 4:  return "BracketValue";
+        case 5:  return "BracketShotNumber";
+        case 6:  return "RawJpgQuality";
+        case 7:  return "RawJpgSize";
+        case 8:  return "LongExposureNoiseReduction2";
+        case 9:  return "WBBracketMode";
+        case 12: return "WBBracketValueAB";
+        case 13: return "WBBracketValueGM";
+        case 14: return "FilterEffect";
+        case 15: return "ToningEffect";
+        case 19: return "LiveViewShooting";
+        case 20: return "FocusDistanceUpper";
+        case 21: return "FocusDistanceLower";
+        case 25: return "FlashExposureLock";
+        case 61: return "RFLensType";
+    }
+
+    return NULL;
+} //CanonFileInfoTagName
+
+bool EnumerateCanonPackedShorts( int depth, const char * name, __int64 offset, __int64 headerBase, DWORD count, bool littleEndian, bool shotInfo )
+{
+    if ( g_FullInformation || count < 2 ||
+         GetWORD( offset + headerBase, littleEndian ) != (unsigned __int64) count * sizeof( WORD ) )
+        return false;
+
+    Space( depth );
+    prf( "  %s:\n", name );
+
+    for ( DWORD tag = 1; tag < count; tag++ )
+    {
+        WORD value = GetWORD( offset + headerBase + tag * sizeof( WORD ), littleEndian );
+        const char * tagName = shotInfo ? CanonShotInfoTagName( tag ) : CanonCameraSettingsTagName( tag );
+
+        if ( NULL != tagName )
+        {
+            Space( depth + 1 );
+            if ( shotInfo && 2 == tag )
+            {
+                if ( 0 != value && 0xffff != value )
+                    prf( "%-30s : ISO %.0lf (raw %u)\n", tagName, 100.0 * pow( 2.0, (double) value / 32.0 - 5.0 ), value );
+                else
+                    prf( "%-30s : %u (raw; unavailable)\n", tagName, value );
+            }
+            else if ( shotInfo && ( 4 == tag || 21 == tag ) )
+            {
+                if ( 0xffff != value )
+                    prf( "%-30s : f/%.1lf (raw %u)\n", tagName, pow( 2.0, (double) value / 64.0 ), value );
+                else
+                    prf( "%-30s : %u (raw; unavailable)\n", tagName, value );
+            }
+            else if ( shotInfo && ( 5 == tag || 22 == tag ) )
+            {
+                short signedValue = (short) value;
+                if ( 0xffff == value )
+                    prf( "%-30s : %u (raw; unavailable)\n", tagName, value );
+                else if ( signedValue < 0 )
+                    prf( "%-30s : %.0lf s (raw %u)\n", tagName, pow( 2.0, -(double) signedValue / 32.0 ), value );
+                else
+                    prf( "%-30s : 1/%.0lf s (raw %u)\n", tagName, pow( 2.0, (double) signedValue / 32.0 ), value );
+            }
+            else if ( shotInfo && 3 == tag )
+                prf( "%-30s : %u (raw; scaling varies by camera)\n", tagName, value );
+            else if ( shotInfo && 12 == tag )
+            {
+                if ( 0 != value && 0xffff != value )
+                    prf( "%-30s : %d C (raw %u)\n", tagName, (int) value - 128, value );
+                else
+                    prf( "%-30s : %u (raw; unavailable)\n", tagName, value );
+            }
+            else
+                prf( "%-30s : %u (raw)\n", tagName, value );
+        }
+        else if ( 0 != value && 0xffff != value && 0x7fff != value )
+        {
+            Space( depth + 1 );
+            prf( "Undocumented tag %-12u %#x\n", tag, value );
+        }
+    }
+
+    return true;
+} //EnumerateCanonPackedShorts
+
+bool EnumerateCanonFileInfo( int depth, __int64 offset, __int64 headerBase, DWORD count, bool littleEndian )
+{
+    if ( g_FullInformation || count < 2 ||
+         GetWORD( offset + headerBase, littleEndian ) != (unsigned __int64) count * sizeof( WORD ) )
+        return false;
+
+    Space( depth );
+    prf( "  CanonFileInfo:\n" );
+    for ( DWORD tag = 1; tag < count; tag++ )
+    {
+        const char * tagName = CanonFileInfoTagName( tag );
+        if ( NULL == tagName )
+            continue;
+
+        WORD value = GetWORD( offset + headerBase + tag * sizeof( WORD ), littleEndian );
+        Space( depth + 1 );
+        prf( "%-30s : %u (raw)\n", tagName, value );
+    }
+
+    return true;
+} //EnumerateCanonFileInfo
+
+bool EnumerateCanonAFInfo2( int depth, __int64 offset, __int64 headerBase, DWORD wordCount, bool littleEndian )
+{
+    if ( g_FullInformation || wordCount < 8 ||
+         GetWORD( offset + headerBase, littleEndian ) != (unsigned __int64) wordCount * sizeof( WORD ) )
+        return false;
+
+    WORD numAFPoints = GetWORD( offset + headerBase + 2 * sizeof( WORD ), littleEndian );
+    unsigned __int64 bitmapWords = ( numAFPoints + 15 ) / 16;
+    unsigned __int64 requiredWords = 8 + 4 * (unsigned __int64) numAFPoints + 2 * bitmapWords;
+    if ( 0 == numAFPoints || requiredWords > wordCount )
+        return false;
+
+    Space( depth );
+    prf( "  AFInfo2:\n" );
+    static const char * names[] =
+    {
+        "AFAreaMode", "NumAFPoints", "ValidAFPoints", "CanonImageWidth",
+        "CanonImageHeight", "AFImageWidth", "AFImageHeight"
+    };
+    for ( DWORD field = 1; field < _countof( names ) + 1; field++ )
+    {
+        Space( depth + 1 );
+        prf( "%-30s : %u\n", names[ field - 1 ], GetWORD( offset + headerBase + field * sizeof( WORD ), littleEndian ) );
+    }
+
+    unsigned __int64 widthsStart = 8;
+    unsigned __int64 heightsStart = widthsStart + numAFPoints;
+    unsigned __int64 xPositionsStart = heightsStart + numAFPoints;
+    unsigned __int64 yPositionsStart = xPositionsStart + numAFPoints;
+    DWORD activeAreas = 0;
+    for ( DWORD point = 0; point < numAFPoints; point++ )
+    {
+        WORD width = GetWORD( offset + headerBase + ( widthsStart + point ) * sizeof( WORD ), littleEndian );
+        WORD height = GetWORD( offset + headerBase + ( heightsStart + point ) * sizeof( WORD ), littleEndian );
+        short x = (short) GetWORD( offset + headerBase + ( xPositionsStart + point ) * sizeof( WORD ), littleEndian );
+        short y = (short) GetWORD( offset + headerBase + ( yPositionsStart + point ) * sizeof( WORD ), littleEndian );
+
+        if ( 0 == width && 0 == height && 0 == x && 0 == y )
+            continue;
+
+        if ( 0 == activeAreas )
+        {
+            Space( depth + 1 );
+            prf( "AF areas (index, width, height, x, y):\n" );
+        }
+        Space( depth + 2 );
+        prf( "%u: %u, %u, %d, %d\n", point, width, height, x, y );
+        activeAreas++;
+    }
+
+    return true;
+} //EnumerateCanonAFInfo2
 
 void EnumerateCanonMakernotes( int depth, __int64 IFDOffset, __int64 headerBase, bool littleEndian )
 {
@@ -1711,8 +3110,22 @@ void EnumerateCanonMakernotes( int depth, __int64 IFDOffset, __int64 headerBase,
             if ( g_FullInformation )
             {
                 Space( depth );
-                prf( "  CanonMakernote tag %d ID %d, type %d, count %d, offset/value %d\n", i, head.id, head.type, head.count, head.offset );
+                prf( "  CanonMakernote tag %d ID %u, type %u, count %u, offset/value %u\n",
+                     i, (unsigned) head.id, (unsigned) head.type, (unsigned) head.count, (unsigned) head.offset );
             }
+
+            bool packedTagDecoded = false;
+            if ( 1 == head.id && 3 == head.type )
+                packedTagDecoded = EnumerateCanonPackedShorts( depth, "CameraSettings", head.offset, headerBase, head.count, littleEndian, false );
+            else if ( 4 == head.id && 3 == head.type )
+                packedTagDecoded = EnumerateCanonPackedShorts( depth, "ShotInfo", head.offset, headerBase, head.count, littleEndian, true );
+            else if ( 38 == head.id && 3 == head.type )
+                packedTagDecoded = EnumerateCanonAFInfo2( depth, head.offset, headerBase, head.count, littleEndian );
+            else if ( 147 == head.id && 3 == head.type )
+                packedTagDecoded = EnumerateCanonFileInfo( depth, head.offset, headerBase, head.count, littleEndian );
+
+            if ( packedTagDecoded )
+                continue;
 
             Space( depth );
 
@@ -1740,6 +3153,11 @@ void EnumerateCanonMakernotes( int depth, __int64 IFDOffset, __int64 headerBase,
                 GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
                 prf( "  InternalSerialNumber:           %s\n", acBuffer );
             }
+            else if ( 56 == head.id && 7 == head.type && head.count > 4 )
+            {
+                GetString( head.offset + headerBase + 4, acBuffer, _countof( acBuffer ), min( head.count - 4, (DWORD) _countof( acBuffer ) - 1 ) );
+                prf( "  BatteryType:                    %s\n", acBuffer );
+            }
             else if ( 151 == head.id && 7 == head.type )
             {
                 prf( "  DustRemovealData:\n" );
@@ -1748,11 +3166,23 @@ void EnumerateCanonMakernotes( int depth, __int64 IFDOffset, __int64 headerBase,
             else if ( 152 == head.id && 3 == head.type && 4 == head.count )
             {
                 prf( "  CropInfo:\n" );
-                DumpShortData( head.offset, headerBase, head.count, 4, IFDOffset - 4 );
+                static const char * cropNames[] = { "CropLeftMargin", "CropRightMargin", "CropTopMargin", "CropBottomMargin" };
+                for ( DWORD crop = 0; crop < _countof( cropNames ); crop++ )
+                {
+                    Space( depth + 1 );
+                    prf( "%s:                        %u\n", cropNames[ crop ], GetWORD( head.offset + headerBase + crop * sizeof( WORD ), littleEndian ) );
+                }
+            }
+            else if ( 16 == head.id && 4 == head.type && 1 == head.count )
+            {
+                prf( "  CanonModelID:                    0x%08X (%u)\n",
+                     (unsigned) head.offset, (unsigned) head.offset );
             }
             else
             {
-                prf( "  CanonMakernote tag %d ID %d==%#x, type %d, count %d, offset/value %d: ", i, head.id, head.id, head.type, head.count, head.offset );
+                prf( "  CanonMakernote tag %d ID %u==%#x, type %u, count %u, offset/value %u: ",
+                     i, (unsigned) head.id, (unsigned) head.id, (unsigned) head.type,
+                     (unsigned) head.count, (unsigned) head.offset );
 
                 if ( 2 == head.type )
                 {
@@ -1763,7 +3193,7 @@ void EnumerateCanonMakernotes( int depth, __int64 IFDOffset, __int64 headerBase,
                 else if ( 3 == head.type )
                 {
                     if ( 1 == head.count )
-                        prf( " %d\n", head.offset );
+                        prf( " %u\n", (unsigned) head.offset );
                     else
                     {
                         prf( "\n" );
@@ -1774,7 +3204,7 @@ void EnumerateCanonMakernotes( int depth, __int64 IFDOffset, __int64 headerBase,
                 else if ( 4 == head.type )
                 {
                     if ( 1 == head.count )
-                        prf( " %d\n", head.offset );
+                        prf( " %u\n", (unsigned) head.offset );
                     else
                     {
                         prf( "\n" );
@@ -1809,6 +3239,501 @@ void DetectGarbage( char * pc )
         pcIn++;
     }
 } //DetectGarbage
+
+const char * PanasonicMakerNoteTagName( WORD tag )
+{
+    struct TagName { WORD id; const char * name; };
+    static const TagName names[] = {
+        { 1, "ImageQuality" }, { 2, "FirmwareVersion" }, { 3, "WhiteBalance" },
+        { 7, "FocusMode" }, { 15, "AFAreaMode" }, { 26, "ImageStabilization" },
+        { 28, "MacroMode" }, { 31, "ShootingMode" }, { 32, "Audio" },
+        { 33, "DataDump" }, { 35, "WhiteBalanceBias" }, { 36, "FlashBias" },
+        { 37, "InternalSerialNumber" }, { 38, "PanasonicExifVersion" },
+        { 39, "VideoFrameRate" }, { 40, "ColorEffect" }, { 41, "TimeSincePowerOn" },
+        { 42, "BurstMode" }, { 43, "SequenceNumber" }, { 44, "ContrastMode" },
+        { 45, "NoiseReduction" }, { 46, "SelfTimer" }, { 48, "Rotation" },
+        { 49, "AFAssistLamp" }, { 50, "ColorMode" }, { 51, "BabyAge" },
+        { 52, "OpticalZoomMode" }, { 53, "ConversionLens" }, { 54, "TravelDay" },
+        { 56, "BatteryLevel" }, { 57, "Contrast" }, { 58, "WorldTimeLocation" },
+        { 59, "TextStamp" }, { 60, "ProgramISO" }, { 61, "AdvancedSceneType" },
+        { 62, "TextStamp" }, { 63, "FacesDetected" }, { 64, "Saturation" },
+        { 65, "Sharpness" }, { 66, "FilmMode" }, { 67, "JPEGQuality" },
+        { 68, "ColorTempKelvin" }, { 69, "BracketSettings" }, { 70, "WBShiftAB" },
+        { 71, "WBShiftGM" }, { 72, "FlashCurtain" }, { 73, "LongExposureNoiseReduction" },
+        { 75, "PanasonicImageWidth" }, { 76, "PanasonicImageHeight" },
+        { 77, "AFPointPosition" }, { 81, "LensType" }, { 82, "LensSerialNumber" },
+        { 83, "AccessoryType" }, { 84, "AccessorySerialNumber" }, { 89, "Transform" },
+        { 93, "IntelligentExposure" }, { 96, "LensFirmwareVersion" }, { 98, "FlashWarning" },
+        { 99, "RecognizedFaceFlags" }, { 101, "Title" }, { 102, "BabyName" },
+        { 103, "Location" }, { 105, "Country" }, { 107, "State" }, { 109, "City" },
+        { 111, "Landmark" }, { 112, "IntelligentResolution" }, { 118, "HDRShot" },
+        { 119, "BurstSpeed" }, { 121, "IntelligentD-Range" }, { 124, "ClearRetouch" },
+        { 128, "City2" }, { 134, "ManometerPressure" }, { 137, "PhotoStyle" },
+        { 138, "ShadingCompensation" }, { 139, "WBShiftIntelligentAuto" },
+        { 140, "AccelerometerZ" }, { 141, "AccelerometerX" }, { 142, "AccelerometerY" },
+        { 143, "CameraOrientation" }, { 144, "RollAngle" }, { 145, "PitchAngle" },
+        { 146, "WBShiftCreativeControl" }, { 147, "SweepPanoramaDirection" },
+        { 148, "SweepPanoramaFieldOfView" }, { 150, "TimerRecording" },
+        { 157, "InternalNDFilter" }, { 158, "HDR" }, { 159, "ShutterType" },
+        { 161, "FilterEffect" }, { 163, "ClearRetouchValue" }, { 167, "OutputLUT" },
+        { 171, "TouchAE" }, { 172, "MonochromeFilterEffect" }, { 173, "HighlightShadow" },
+        { 175, "TimeStamp" }, { 179, "VideoBurstResolution" }, { 180, "MultiExposure" },
+        { 185, "RedEyeRemoval" }, { 187, "VideoBurstMode" }, { 188, "DiffractionCorrection" },
+        { 189, "FocusBracket" }, { 190, "LongExposureNRUsed" }, { 191, "PostFocusMerging" },
+        { 193, "VideoPreburst" }, { 196, "LensTypeMake" }, { 197, "LensTypeModel" },
+        { 202, "SensorType" }, { 209, "ISO" }, { 210, "MonochromeGrainEffect" },
+        { 214, "NoiseReductionStrength" }, { 32768, "MakerNoteVersion" },
+        { 32769, "SceneMode" }, { 32770, "HighlightWarning" },
+        { 32771, "DarkFocusEnvironment" }, { 32772, "WBRedLevel" },
+        { 32773, "WBGreenLevel" }, { 32774, "WBBlueLevel" },
+        { 32776, "TextStamp" }, { 32777, "TextStamp" }, { 32784, "BabyAge" },
+        { 32786, "Transform" }
+    };
+
+    for ( size_t i = 0; i < _countof( names ); i++ )
+        if ( names[ i ].id == tag )
+            return names[ i ].name;
+    return NULL;
+}
+
+const char * PanasonicMakerNoteValueName( WORD tag, DWORD value )
+{
+    if ( 1 == tag )
+    {
+        if ( 1 == value ) return "TIFF";
+        if ( 2 == value ) return "High";
+        if ( 3 == value ) return "Normal";
+        if ( 6 == value ) return "Very High";
+        if ( 7 == value ) return "RAW";
+        if ( 9 == value ) return "Motion Picture";
+        if ( 11 == value ) return "Full HD Movie";
+        if ( 12 == value ) return "4K Movie";
+    }
+    else if ( 3 == tag )
+    {
+        if ( 1 == value ) return "Auto";
+        if ( 2 == value ) return "Daylight";
+        if ( 3 == value ) return "Cloudy";
+        if ( 4 == value ) return "Incandescent";
+        if ( 5 == value ) return "Manual";
+        if ( 8 == value ) return "Flash";
+        if ( 10 == value ) return "Black & White";
+        if ( 11 == value ) return "Manual 2";
+        if ( 12 == value ) return "Shade";
+        if ( 13 == value ) return "Kelvin";
+        if ( 14 == value ) return "Manual 3";
+        if ( 15 == value ) return "Manual 4";
+        if ( 19 == value ) return "Auto (cool)";
+    }
+    else if ( 7 == tag )
+    {
+        if ( 1 == value ) return "Auto";
+        if ( 2 == value ) return "Manual";
+        if ( 4 == value ) return "Auto, Focus button";
+        if ( 5 == value ) return "Auto, Continuous";
+        if ( 6 == value ) return "AF-S";
+        if ( 7 == value ) return "AF-C";
+        if ( 8 == value ) return "AF-F";
+    }
+    else if ( 44 == tag )
+    {
+        if ( 0 == value ) return "Normal";
+        if ( 1 == value ) return "Low";
+        if ( 2 == value ) return "High";
+        if ( 5 == value ) return "Normal 2";
+        if ( 6 == value ) return "Medium Low";
+        if ( 7 == value ) return "Medium High";
+        if ( 13 == value ) return "High Dynamic";
+        if ( 24 == value ) return "Dynamic Range (film-like)";
+        if ( 46 == value ) return "Match Filter Effects Toy";
+        if ( 55 == value ) return "Match Photo Style L. Monochrome";
+        if ( 256 == value ) return "Low";
+        if ( 272 == value ) return "Normal";
+        if ( 288 == value ) return "High";
+    }
+    else if ( 45 == tag )
+    {
+        if ( 0 == value ) return "Standard";
+        if ( 1 == value ) return "Low (-1)";
+        if ( 2 == value ) return "High (+1)";
+        if ( 3 == value ) return "Lowest (-2)";
+        if ( 4 == value ) return "Highest (+2)";
+        if ( 5 == value ) return "+5";
+        if ( 6 == value ) return "+6";
+        if ( 65531 == value ) return "-5";
+        if ( 65532 == value ) return "-4";
+        if ( 65533 == value ) return "-3";
+        if ( 65534 == value ) return "-2";
+        if ( 65535 == value ) return "-1";
+    }
+    else if ( 26 == tag )
+    {
+        if ( 2 == value ) return "On, Optical";
+        if ( 3 == value ) return "Off";
+        if ( 4 == value ) return "On, Mode 2";
+        if ( 5 == value ) return "On, Optical Panning";
+        if ( 6 == value ) return "On, Body-only";
+        if ( 7 == value ) return "On, Body-only Panning";
+        if ( 9 == value ) return "Dual IS";
+        if ( 10 == value ) return "Dual IS Panning";
+        if ( 11 == value ) return "Dual2 IS";
+        if ( 12 == value ) return "Dual2 IS Panning";
+    }
+    else if ( 28 == tag )
+    {
+        if ( 1 == value ) return "On";
+        if ( 2 == value ) return "Off";
+        if ( 257 == value ) return "Tele-Macro";
+        if ( 513 == value ) return "Macro Zoom";
+    }
+    else if ( 31 == tag )
+    {
+        if ( 1 == value ) return "Normal";
+        if ( 2 == value ) return "Portrait";
+        if ( 3 == value ) return "Scenery";
+        if ( 4 == value ) return "Sports";
+        if ( 5 == value ) return "Night Portrait";
+        if ( 6 == value ) return "Program";
+        if ( 7 == value ) return "Aperture Priority";
+        if ( 8 == value ) return "Shutter Priority";
+        if ( 9 == value ) return "Macro";
+        if ( 10 == value ) return "Spot";
+        if ( 11 == value ) return "Manual";
+        if ( 21 == value ) return "Night Scenery";
+        if ( 22 == value ) return "Food";
+        if ( 29 == value ) return "Underwater";
+        if ( 34 == value ) return "Intelligent ISO";
+        if ( 37 == value ) return "Intelligent Auto";
+        if ( 48 == value ) return "Movie";
+        if ( 51 == value ) return "HDR";
+        if ( 59 == value ) return "Creative Control";
+        if ( 60 == value ) return "Intelligent Auto Plus";
+        if ( 62 == value ) return "Panorama";
+    }
+    else if ( 32 == tag )
+    {
+        if ( 1 == value ) return "Yes";
+        if ( 2 == value ) return "No";
+        if ( 3 == value ) return "Stereo";
+    }
+    else if ( 39 == tag && 0 == value )
+        return "n/a";
+    else if ( 40 == tag )
+    {
+        if ( 1 == value ) return "Off";
+        if ( 2 == value ) return "Warm";
+        if ( 3 == value ) return "Cool";
+        if ( 4 == value ) return "Black & White";
+        if ( 5 == value ) return "Sepia";
+        if ( 6 == value ) return "Happy";
+        if ( 8 == value ) return "Vivid";
+    }
+    else if ( 42 == tag )
+    {
+        if ( 0 == value ) return "Off";
+        if ( 1 == value ) return "On";
+        if ( 2 == value ) return "Auto Exposure Bracketing (AEB)";
+        if ( 3 == value ) return "Focus Bracketing";
+        if ( 4 == value ) return "Unlimited";
+        if ( 8 == value ) return "White Balance Bracketing";
+    }
+    else if ( 46 == tag )
+    {
+        if ( 0 == value || 1 == value ) return "Off";
+        if ( 2 == value ) return "10 s";
+        if ( 3 == value ) return "2 s";
+        if ( 4 == value ) return "10 s / 3 pictures";
+    }
+    else if ( 48 == tag )
+    {
+        if ( 1 == value ) return "Horizontal (normal)";
+        if ( 3 == value ) return "Rotate 180";
+        if ( 6 == value ) return "Rotate 90 CW";
+        if ( 8 == value ) return "Rotate 270 CW";
+    }
+    else if ( 49 == tag )
+    {
+        if ( 1 == value ) return "Fired";
+        if ( 2 == value ) return "Enabled but Not Used";
+        if ( 3 == value ) return "Disabled but Required";
+        if ( 4 == value ) return "Disabled and Not Required";
+    }
+    else if ( 50 == tag )
+    {
+        if ( 0 == value ) return "Normal";
+        if ( 1 == value ) return "Natural";
+        if ( 2 == value ) return "Vivid";
+    }
+    else if ( 52 == tag )
+    {
+        if ( 1 == value ) return "Standard";
+        if ( 2 == value ) return "Extended";
+    }
+    else if ( 53 == tag )
+    {
+        if ( 1 == value ) return "Off";
+        if ( 2 == value ) return "Wide";
+        if ( 3 == value ) return "Telephoto";
+        if ( 4 == value ) return "Macro";
+    }
+    else if ( 54 == tag && 65535 == value )
+        return "n/a";
+    else if ( 56 == tag && 256 == value )
+        return "n/a";
+    else if ( 56 == tag )
+    {
+        if ( 1 == value ) return "Full";
+        if ( 2 == value ) return "Medium";
+        if ( 3 == value ) return "Low";
+        if ( 4 == value ) return "Near Empty";
+        if ( 7 == value ) return "Near Full";
+        if ( 8 == value ) return "Medium Low";
+    }
+    else if ( ( 57 == tag || 64 == tag || 65 == tag ) && 0 == value )
+        return "Normal";
+    else if ( 58 == tag )
+    {
+        if ( 1 == value ) return "Home";
+        if ( 2 == value ) return "Destination";
+    }
+    else if ( ( 59 == tag || 62 == tag || 73 == tag ||
+                118 == tag || 124 == tag || 138 == tag || 171 == tag ) )
+    {
+        if ( 0 == value || ( ( 59 == tag || 62 == tag || 73 == tag ) && 1 == value ) )
+            return "Off";
+        if ( 1 == value || ( ( 59 == tag || 62 == tag || 73 == tag ) && 2 == value ) )
+            return "On";
+    }
+    else if ( 60 == tag )
+    {
+        if ( 0xffff == value ) return "n/a";
+        if ( 0xfffe == value ) return "Intelligent ISO";
+    }
+    else if ( 67 == tag )
+    {
+        if ( 0 == value ) return "n/a (Movie)";
+        if ( 2 == value ) return "High";
+        if ( 3 == value ) return "Standard";
+        if ( 6 == value ) return "Very High";
+        if ( 255 == value ) return "n/a (RAW only)";
+    }
+    else if ( 72 == tag )
+    {
+        if ( 0 == value ) return "n/a";
+        if ( 1 == value ) return "1st";
+        if ( 2 == value ) return "2nd";
+    }
+    else if ( 93 == tag )
+    {
+        if ( 0 == value ) return "Off";
+        if ( 1 == value ) return "Low";
+        if ( 2 == value ) return "Standard";
+        if ( 3 == value ) return "High";
+    }
+    else if ( 98 == tag )
+    {
+        if ( 0 == value ) return "No";
+        if ( 1 == value ) return "Yes (flash required but disabled)";
+    }
+    else if ( 112 == tag )
+    {
+        if ( 0 == value ) return "Off";
+        if ( 1 == value ) return "Low";
+        if ( 2 == value ) return "Standard";
+        if ( 3 == value ) return "High";
+        if ( 4 == value ) return "Extended";
+    }
+    else if ( 121 == tag )
+    {
+        if ( 0 == value ) return "Off";
+        if ( 1 == value ) return "Low";
+        if ( 2 == value ) return "Standard";
+        if ( 3 == value ) return "High";
+    }
+    else if ( 137 == tag )
+    {
+        if ( 0 == value ) return "Auto";
+        if ( 1 == value ) return "Standard or Custom";
+        if ( 2 == value ) return "Vivid";
+        if ( 3 == value ) return "Natural";
+        if ( 4 == value ) return "Monochrome";
+        if ( 5 == value ) return "Scenery";
+        if ( 6 == value ) return "Portrait";
+        if ( 8 == value ) return "Cinelike D";
+        if ( 9 == value ) return "Cinelike V";
+        if ( 11 == value ) return "L. Monochrome";
+        if ( 15 == value ) return "L. Monochrome D";
+    }
+    else if ( 143 == tag )
+    {
+        if ( 0 == value ) return "Normal";
+        if ( 1 == value ) return "Rotate CW";
+        if ( 2 == value ) return "Rotate 180";
+        if ( 3 == value ) return "Rotate CCW";
+        if ( 4 == value ) return "Tilt Upwards";
+        if ( 5 == value ) return "Tilt Downwards";
+    }
+    else if ( 147 == tag )
+    {
+        if ( 0 == value ) return "Off";
+        if ( 1 == value ) return "Left to Right";
+        if ( 2 == value ) return "Right to Left";
+        if ( 3 == value ) return "Top to Bottom";
+        if ( 4 == value ) return "Bottom to Top";
+    }
+    else if ( 150 == tag )
+    {
+        if ( 0 == value ) return "Off";
+        if ( 1 == value ) return "Time Lapse";
+        if ( 2 == value ) return "Stop-motion Animation";
+        if ( 3 == value ) return "Focus Bracketing";
+    }
+    else if ( 158 == tag )
+    {
+        if ( 0 == value ) return "Off";
+        if ( 100 == value ) return "1 EV";
+        if ( 200 == value ) return "2 EV";
+        if ( 300 == value ) return "3 EV";
+        if ( 32868 == value ) return "1 EV (Auto)";
+        if ( 32968 == value ) return "2 EV (Auto)";
+        if ( 33068 == value ) return "3 EV (Auto)";
+    }
+    else if ( 159 == tag )
+    {
+        if ( 0 == value ) return "Mechanical";
+        if ( 1 == value ) return "Electronic";
+        if ( 2 == value ) return "Hybrid";
+    }
+
+    return NULL;
+}
+
+void PrintPanasonicMakerNoteTag( int depth, const IFDHeader & head,
+                                 __int64 inlineValueOffset, __int64 headerBase, bool littleEndian )
+{
+    const char * name = PanasonicMakerNoteTagName( head.id );
+    DWORD valueSize = ( 1 == head.type || 2 == head.type || 6 == head.type || 7 == head.type ) ? 1 :
+                      ( 3 == head.type || 8 == head.type ) ? 2 :
+                      ( 4 == head.type || 9 == head.type ) ? 4 :
+                      ( 5 == head.type || 10 == head.type ) ? 8 : 0;
+    unsigned __int64 byteCount = (unsigned __int64) head.count * valueSize;
+    __int64 valuesOffset = ( byteCount <= 4 )
+        ? inlineValueOffset + headerBase
+        : (__int64) head.offset + headerBase;
+
+    Space( depth );
+    if ( 0 == valueSize || 0 == head.count || byteCount > INT_MAX ||
+         !IsFileRangeValid( valuesOffset, (__int64) byteCount ) )
+    {
+        prf( "Panasonic %s: (invalid or unsupported data; type %u, count %u)\n",
+             name, head.type, head.count );
+        return;
+    }
+
+    if ( ( 2 == head.id || 96 == head.id ) && 7 == head.type && 4 == head.count )
+    {
+        BYTE version[ 4 ];
+        GetBytes( valuesOffset, version, sizeof version );
+        prf( "Panasonic %s: %u.%u.%u.%u\n", name,
+             version[ 0 ], version[ 1 ], version[ 2 ], version[ 3 ] );
+        return;
+    }
+
+    bool textTag = ( 37 == head.id || 38 == head.id || 51 == head.id ||
+                     ( head.id >= 81 && head.id <= 84 ) || 96 == head.id ||
+                     ( head.id >= 101 && head.id <= 111 ) || 128 == head.id ||
+                     175 == head.id || 32768 == head.id || 32784 == head.id );
+    if ( 2 == head.type || ( 7 == head.type && textTag ) )
+    {
+        vector<char> text( min( head.count, 1024u ) + 1, 0 );
+        DWORD textLength = min( head.count, (DWORD) text.size() - 1 );
+        GetBytes( valuesOffset, text.data(), (int) textLength );
+        for ( DWORD i = 0; i < textLength; i++ )
+        {
+            unsigned char ch = (unsigned char) text[ i ];
+            if ( 0 == ch )
+                break;
+            if ( ch < ' ' || ch > '~' )
+                text[ i ] = '?';
+        }
+        prf( "Panasonic %s: %s\n", name, text.data() );
+        return;
+    }
+
+    if ( 7 == head.type )
+    {
+        prf( "Panasonic %s: (binary data, %u bytes)\n", name, head.count );
+        return;
+    }
+
+    DWORD valuesToPrint = min( head.count, 16u );
+    prf( "Panasonic %s: ", name );
+    for ( DWORD i = 0; i < valuesToPrint; i++ )
+    {
+        if ( i )
+            prf( ", " );
+
+        __int64 valueOffset = valuesOffset + (__int64) i * valueSize;
+        DWORD value = 0;
+        if ( 1 == head.type )
+            value = GetBYTE( valueOffset );
+        else if ( 3 == head.type )
+            value = GetWORD( valueOffset, littleEndian );
+        else if ( 4 == head.type )
+            value = GetDWORD( valueOffset, littleEndian );
+
+        if ( 1 == head.count && ( 1 == head.type || 3 == head.type || 4 == head.type ) )
+        {
+            const char * valueName =
+                ( 44 == head.id && 2 == value && 0 == strcmp( g_acModel, "DMC-GF1" ) )
+                ? "Normal" : PanasonicMakerNoteValueName( head.id, value );
+            if ( NULL != valueName )
+            {
+                prf( "%s", valueName );
+                continue;
+            }
+        }
+
+        if ( 1 == head.type )
+            prf( "%u", value );
+        else if ( 6 == head.type )
+            prf( "%d", (signed char) GetBYTE( valueOffset ) );
+        else if ( 3 == head.type )
+            prf( "%u", value );
+        else if ( 8 == head.type )
+            prf( "%d", (short) GetWORD( valueOffset, littleEndian ) );
+        else if ( 4 == head.type )
+            prf( "%u", value );
+        else if ( 9 == head.type )
+            prf( "%ld", (LONG) GetDWORD( valueOffset, littleEndian ) );
+        else if ( 5 == head.type || 10 == head.type )
+        {
+            if ( 10 == head.type )
+            {
+                LONG numerator = (LONG) GetDWORD( valueOffset, littleEndian );
+                LONG denominator = (LONG) GetDWORD( valueOffset + 4, littleEndian );
+                if ( denominator )
+                    prf( "%ld/%ld=%.8g", numerator, denominator,
+                         (double) numerator / denominator );
+                else
+                    prf( "%ld/0", numerator );
+            }
+            else
+            {
+                DWORD numerator = GetDWORD( valueOffset, littleEndian );
+                DWORD denominator = GetDWORD( valueOffset + 4, littleEndian );
+                if ( denominator )
+                    prf( "%u/%u=%.8g", numerator, denominator,
+                         (double) numerator / denominator );
+                else
+                    prf( "%u/0", numerator );
+            }
+        }
+    }
+    if ( valuesToPrint < head.count )
+        prf( ", ..." );
+    prf( "\n" );
+}
 
 void EnumeratePanasonicMakernotes( int depth, __int64 IFDOffset, __int64 headerBase, bool littleEndian )
 {
@@ -1852,13 +3777,47 @@ void EnumeratePanasonicMakernotes( int depth, __int64 IFDOffset, __int64 headerB
 
             if ( 37 == head.id && 7 == head.type && 16 == head.count )
             {
-                // treat this as if it's a string even though it's a type 7 
-
-                Space( depth );
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
-                GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                DetectGarbage( acBuffer );
-                prf( "panasonic serial number:          %s\n", acBuffer );
+                if ( !IsFileRangeValid( (__int64) stringOffset + headerBase, 16 ) )
+                {
+                    Space( depth );
+                    prf( "Panasonic InternalSerialNumber:   (invalid data range)\n" );
+                }
+                else
+                {
+                    BYTE serial[ 16 ];
+                    GetBytes( stringOffset + headerBase, serial, sizeof serial );
+                    bool legacySerial = ( 0 == serial[ 13 ] &&
+                                          serial[ 0 ] >= 'A' && serial[ 0 ] <= 'Z' &&
+                                          serial[ 1 ] >= '0' && serial[ 1 ] <= '9' &&
+                                          serial[ 2 ] >= '0' && serial[ 2 ] <= '9' );
+                    for ( int j = 3; j < 13 && legacySerial; j++ )
+                    {
+                        if ( serial[ j ] < '0' || serial[ j ] > '9' )
+                            legacySerial = false;
+                    }
+                    Space( depth );
+                    if ( legacySerial )
+                    {
+                        prf( "Panasonic InternalSerialNumber:   (%c%c%c) 20%c%c:%c%c:%c%c no. %c%c%c%c\n",
+                             serial[ 0 ], serial[ 1 ], serial[ 2 ],
+                             serial[ 3 ], serial[ 4 ], serial[ 5 ], serial[ 6 ],
+                             serial[ 7 ], serial[ 8 ], serial[ 9 ], serial[ 10 ],
+                             serial[ 11 ], serial[ 12 ] );
+                    }
+                    else
+                    {
+                        int outputLength = 0;
+                        for ( int j = 0; j < _countof( serial ); j++ )
+                        {
+                            if ( 0 != serial[ j ] )
+                                acBuffer[ outputLength++ ] = (char) serial[ j ];
+                        }
+                        acBuffer[ outputLength ] = 0;
+                        DetectGarbage( acBuffer );
+                        prf( "Panasonic InternalSerialNumber:   %s\n", acBuffer );
+                    }
+                }
             }
             else if ( 81 == head.id && 2 == head.type )
             {
@@ -1878,20 +3837,26 @@ void EnumeratePanasonicMakernotes( int depth, __int64 IFDOffset, __int64 headerB
             }
             else
             {
-                Space( depth );
-                prf( "panasonic makernote tag %d ID %d==%#x, type %d, count %d, offset/value %d", i, head.id, head.id, head.type, head.count, head.offset );
-
-                if ( 2 == head.type )
+                const char * tagName = PanasonicMakerNoteTagName( head.id );
+                if ( NULL != tagName )
+                    PrintPanasonicMakerNoteTag( depth, head, IFDOffset - 4, headerBase, littleEndian );
+                else
                 {
-                    ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
-                    GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                    prf( " %s", acBuffer );
+                    Space( depth );
+                    prf( "panasonic makernote tag %d ID %d==%#x, type %d, count %d, offset/value %d", i, head.id, head.id, head.type, head.count, head.offset );
+
+                    if ( 2 == head.type )
+                    {
+                        ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
+                        GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
+                        prf( " %s", acBuffer );
+                    }
+
+                    prf( "\n" );
+
+                    if ( 7 == head.type )
+                        DumpBinaryData( head.offset, headerBase, head.count, 4, IFDOffset - 4 );
                 }
-
-                prf( "\n" );
-
-                if ( 7 == head.type )
-                    DumpBinaryData( head.offset, headerBase, head.count, 4, IFDOffset - 4 );
             }
         }
 
@@ -1899,34 +3864,408 @@ void EnumeratePanasonicMakernotes( int depth, __int64 IFDOffset, __int64 headerB
     }
 } //EnumeratePanasonicMakernotes
 
-void EnumerateOlympusCameraSettingsIFD( int depth, __int64 IFDOffset, __int64 headerBase, bool littleEndian )
+const char * OlympusIFDTagName( const char * directory, WORD tag )
 {
-    char acBuffer[ 100 ];
-    DWORD originalIFDOffset = IFDOffset;
+    struct TagName { WORD id; const char * name; };
+    static const TagName equipment[] = {
+        { 0, "EquipmentVersion" }, { 256, "CameraType2" }, { 257, "SerialNumber" },
+        { 258, "InternalSerialNumber" }, { 259, "FocalPlaneDiagonal" },
+        { 260, "BodyFirmwareVersion" }, { 513, "LensType" }, { 514, "LensSerialNumber" },
+        { 515, "LensModel" }, { 516, "LensFirmwareVersion" },
+        { 517, "MaxApertureAtMinFocal" }, { 518, "MaxApertureAtMaxFocal" },
+        { 519, "MinFocalLength" }, { 520, "MaxFocalLength" }, { 522, "MaxAperture" },
+        { 523, "LensProperties" }, { 769, "Extender" }, { 770, "ExtenderSerialNumber" },
+        { 771, "ExtenderModel" }, { 772, "ExtenderFirmwareVersion" },
+        { 1027, "ConversionLens" }, { 4096, "FlashType" }, { 4097, "FlashModel" },
+        { 4098, "FlashFirmwareVersion" }, { 4099, "FlashSerialNumber" }
+    };
+    static const TagName cameraSettings[] = {
+        { 0, "CameraSettingsVersion" }, { 256, "PreviewImageValid" },
+        { 257, "PreviewImageStart" }, { 258, "PreviewImageLength" },
+        { 512, "ExposureMode" }, { 513, "AELock" }, { 514, "MeteringMode" },
+        { 515, "ExposureShift" }, { 516, "NDFilter" }, { 768, "MacroMode" },
+        { 769, "FocusMode" }, { 770, "FocusProcess" }, { 771, "AFSearch" },
+        { 772, "AFAreas" }, { 773, "AFPointSelected" }, { 774, "AFFineTune" },
+        { 775, "AFFineTuneAdj" }, { 776, "FocusBracketStepSize" },
+        { 1024, "FlashMode" }, { 1025, "FlashExposureComp" },
+        { 1027, "FlashRemoteControl" }, { 1028, "FlashControlMode" },
+        { 1029, "FlashIntensity" }, { 1030, "ManualFlashStrength" },
+        { 1280, "WhiteBalance2" }, { 1281, "WhiteBalanceTemperature" },
+        { 1282, "WhiteBalanceBracket" }, { 1283, "CustomSaturation" },
+        { 1284, "ModifiedSaturation" }, { 1285, "ContrastSetting" },
+        { 1286, "SharpnessSetting" }, { 1287, "ColorSpace" }, { 1289, "SceneMode" },
+        { 1290, "NoiseReduction" }, { 1291, "DistortionCorrection" },
+        { 1292, "ShadingCompensation" }, { 1293, "CompressionFactor" },
+        { 1295, "Gradation" }, { 1312, "PictureMode" }, { 1313, "PictureModeSaturation" },
+        { 1314, "PictureModeHue" }, { 1315, "PictureModeContrast" },
+        { 1316, "PictureModeSharpness" }, { 1317, "PictureModeBWFilter" },
+        { 1318, "PictureModeTone" }, { 1319, "NoiseFilter" }, { 1321, "ArtFilter" },
+        { 1324, "MagicFilter" }, { 1325, "PictureModeEffect" }, { 1326, "ToneLevel" },
+        { 1327, "ArtFilterEffect" }, { 1330, "ColorCreatorEffect" },
+        { 1335, "MonochromeProfileSettings" }, { 1336, "FilmGrainEffect" },
+        { 1337, "ColorProfileSettings" }, { 1338, "MonochromeVignetting" },
+        { 1339, "MonochromeColor" }, { 1536, "DriveMode" }, { 1537, "PanoramaMode" },
+        { 1539, "ImageQuality2" }, { 1540, "ImageStabilization" },
+        { 2052, "StackedImage" }, { 2304, "ManometerPressure" },
+        { 2305, "ManometerReading" }, { 2306, "ExtendedWBDetect" },
+        { 2307, "RollAngle" }, { 2308, "PitchAngle" }, { 2312, "DateTimeUTC" }
+    };
+    static const TagName rawDevelopment[] = {
+        { 0, "RawDevVersion" }, { 256, "RawDevExposureBiasValue" },
+        { 257, "RawDevWhiteBalanceValue" }, { 258, "RawDevWBFineAdjustment" },
+        { 259, "RawDevGrayPoint" }, { 260, "RawDevSaturationEmphasis" },
+        { 261, "RawDevMemoryColorEmphasis" }, { 262, "RawDevContrastValue" },
+        { 263, "RawDevSharpnessValue" }, { 264, "RawDevColorSpace" },
+        { 265, "RawDevEngine" }, { 266, "RawDevNoiseReduction" },
+        { 267, "RawDevEditStatus" }, { 268, "RawDevSettings" }
+    };
+    static const TagName imageProcessing[] = {
+        { 0, "ImageProcessingVersion" }, { 256, "WB_RBLevels" },
+        { 258, "WB_RBLevels3000K" }, { 259, "WB_RBLevels3300K" },
+        { 260, "WB_RBLevels3600K" }, { 261, "WB_RBLevels3900K" },
+        { 262, "WB_RBLevels4000K" }, { 263, "WB_RBLevels4300K" },
+        { 264, "WB_RBLevels4500K" }, { 265, "WB_RBLevels4800K" },
+        { 266, "WB_RBLevels5300K" }, { 267, "WB_RBLevels6000K" },
+        { 268, "WB_RBLevels6600K" }, { 269, "WB_RBLevels7500K" },
+        { 270, "WB_RBLevelsCWB1" }, { 271, "WB_RBLevelsCWB2" },
+        { 272, "WB_RBLevelsCWB3" }, { 273, "WB_RBLevelsCWB4" },
+        { 275, "WB_GLevel3000K" }, { 276, "WB_GLevel3300K" },
+        { 277, "WB_GLevel3600K" }, { 278, "WB_GLevel3900K" },
+        { 279, "WB_GLevel4000K" }, { 280, "WB_GLevel4300K" },
+        { 281, "WB_GLevel4500K" }, { 282, "WB_GLevel4800K" },
+        { 283, "WB_GLevel5300K" }, { 284, "WB_GLevel6000K" },
+        { 285, "WB_GLevel6600K" }, { 286, "WB_GLevel7500K" },
+        { 287, "WB_GLevel" }, { 512, "ColorMatrix" }, { 768, "Enhancer" },
+        { 769, "EnhancerValues" }, { 784, "CoringFilter" }, { 785, "CoringValues" },
+        { 1536, "BlackLevel2" }, { 1552, "GainBase" }, { 1553, "ValidBits" },
+        { 1554, "CropLeft" }, { 1555, "CropTop" }, { 1556, "CropWidth" },
+        { 1557, "CropHeight" }, { 1589, "UnknownBlock1" }, { 1590, "UnknownBlock2" },
+        { 2053, "SensorCalibration" }, { 4112, "NoiseReduction2" },
+        { 4113, "DistortionCorrection2" }, { 4114, "ShadingCompensation2" },
+        { 4124, "MultipleExposureMode" }, { 4355, "UnknownBlock3" },
+        { 4356, "UnknownBlock4" }, { 4370, "AspectRatio" }, { 4371, "AspectFrame" },
+        { 4608, "FacesDetected" }, { 4609, "FaceDetectArea" }, { 4610, "MaxFaces" },
+        { 4611, "FaceDetectFrameSize" }, { 4615, "FaceDetectFrameCrop" },
+        { 4870, "CameraTemperature" }, { 6400, "KeystoneCompensation" },
+        { 6401, "KeystoneDirection" }, { 6406, "KeystoneValue" }
+    };
+    static const TagName focusInfo[] = {
+        { 0, "FocusInfoVersion" }, { 521, "AutoFocus" }, { 528, "SceneDetect" },
+        { 529, "SceneArea" }, { 530, "SceneDetectData" }, { 768, "ZoomStepCount" },
+        { 769, "FocusStepCount" }, { 771, "FocusStepInfinity" },
+        { 772, "FocusStepNear" }, { 773, "FocusDistance" }, { 776, "AFPoint" },
+        { 4609, "ExternalFlash" }, { 4611, "ExternalFlashGuideNumber" },
+        { 4612, "ExternalFlashBounce" }, { 4613, "ExternalFlashZoom" },
+        { 4616, "InternalFlash" }, { 4617, "ManualFlash" }, { 4618, "MacroLED" },
+        { 5376, "SensorTemperature" }, { 5632, "ImageStabilization" }
+    };
+    static const TagName main[] = {
+        { 0, "MakerNoteVersion" }, { 64, "CompressedImageSize" }, { 129, "PreviewImageData" },
+        { 136, "PreviewImageStart" }, { 137, "PreviewImageLength" },
+        { 256, "ThumbnailImage" }, { 260, "BodyFirmwareVersion" },
+        { 512, "SpecialMode" }, { 513, "Quality" }, { 514, "Macro" },
+        { 515, "BWMode" }, { 516, "DigitalZoom" }, { 517, "FocalPlaneDiagonal" },
+        { 518, "LensDistortionParams" }, { 519, "CameraType" }, { 521, "CameraID" },
+        { 640, "PreviewImage" }, { 768, "PreCaptureFrames" }, { 769, "WhiteBoard" },
+        { 770, "OneTouchWB" }, { 771, "WhiteBalanceBracket" }, { 772, "WhiteBalanceBias" },
+        { 1024, "SensorArea" }, { 1025, "BlackLevel" }, { 1027, "SceneMode" },
+        { 1028, "SerialNumber" }, { 1029, "Firmware" }, { 3840, "DataDump" },
+        { 3841, "DataDump2" }, { 4096, "ShutterSpeedValue" }, { 4097, "ISOValue" },
+        { 4098, "ApertureValue" }, { 4099, "BrightnessValue" },
+        { 4100, "FlashMode" }, { 4101, "FlashDevice" },
+        { 4102, "ExposureCompensation" }, { 4103, "SensorTemperature" },
+        { 4104, "LensTemperature" }, { 4105, "LightCondition" }, { 4106, "FocusRange" },
+        { 4107, "FocusMode" }, { 4108, "ManualFocusDistance" },
+        { 4109, "ZoomStepCount" }, { 4110, "FocusStepCount" }, { 4111, "Sharpness" },
+        { 4112, "FlashChargeLevel" }, { 4113, "ColorMatrix" }, { 4114, "BlackLevel" },
+        { 4115, "ColorTemperatureBG" }, { 4116, "ColorTemperatureRG" },
+        { 4117, "WBMode" }, { 4119, "RedBalance" }, { 4120, "BlueBalance" },
+        { 4121, "ColorMatrixNumber" }, { 4122, "SerialNumber" },
+        { 4131, "FlashExposureComp" }, { 4137, "Contrast" }, { 4138, "SharpnessFactor" },
+        { 4139, "ColorControl" }, { 4140, "ValidBits" }, { 4141, "CoringFilter" },
+        { 4142, "OlympusImageWidth" }, { 4143, "OlympusImageHeight" },
+        { 4144, "SceneDetect" }, { 4145, "SceneArea" }, { 4147, "SceneDetectData" },
+        { 4148, "CompressionRatio" }, { 4149, "PreviewImageValid" },
+        { 4150, "PreviewImageStart" }, { 4151, "PreviewImageLength" },
+        { 4152, "AFResult" }, { 4153, "CCDScanMode" }, { 4154, "NoiseReduction" },
+        { 4155, "FocusStepInfinity" }, { 4156, "FocusStepNear" },
+        { 4157, "LightValueCenter" }, { 4158, "LightValuePeriphery" },
+        { 4159, "FieldCount" }, { 8272, "CameraParameters" }
+    };
+
+    const TagName * names = NULL;
+    size_t count = 0;
+    if ( 0 == strcmp( directory, "Equipment" ) )
+    {
+        names = equipment;
+        count = _countof( equipment );
+    }
+    else if ( 0 == strcmp( directory, "CameraSettings" ) )
+    {
+        names = cameraSettings;
+        count = _countof( cameraSettings );
+    }
+    else if ( 0 == strcmp( directory, "RawDevelopment" ) )
+    {
+        names = rawDevelopment;
+        count = _countof( rawDevelopment );
+    }
+    else if ( 0 == strcmp( directory, "ImageProcessing" ) )
+    {
+        names = imageProcessing;
+        count = _countof( imageProcessing );
+    }
+    else if ( 0 == strcmp( directory, "FocusInfo" ) )
+    {
+        names = focusInfo;
+        count = _countof( focusInfo );
+    }
+    else if ( 0 == strcmp( directory, "Main" ) )
+    {
+        names = main;
+        count = _countof( main );
+    }
+
+    for ( size_t i = 0; i < count; i++ )
+        if ( names[ i ].id == tag )
+            return names[ i ].name;
+    return NULL;
+}
+
+const char * OlympusIFDValueName( const char * directory, WORD tag, DWORD value )
+{
+    if ( 0 == strcmp( directory, "CameraSettings" ) )
+    {
+        if ( 513 == tag || 774 == tag || 1027 == tag ||
+             1284 == tag || 1291 == tag || 1292 == tag || 1537 == tag ||
+             2306 == tag )
+            return value ? "On" : "Off";
+        if ( 256 == tag )
+            return value ? "Yes" : "No";
+        if ( 512 == tag )
+        {
+            if ( 0 == value ) return "Auto";
+            if ( 1 == value ) return "Manual";
+            if ( 2 == value ) return "Auto bracket";
+            if ( 3 == value ) return "Program";
+            if ( 4 == value ) return "Aperture priority";
+            if ( 5 == value ) return "Shutter priority";
+        }
+        if ( 514 == tag )
+        {
+            if ( 2 == value ) return "Center-weighted";
+            if ( 3 == value ) return "Spot";
+            if ( 5 == value ) return "ESP";
+        }
+        if ( 771 == tag )
+            return value ? "Ready" : "Not ready";
+        if ( 1281 == tag && 0 == value )
+            return "Auto";
+        if ( 1280 == tag && 0 == value )
+            return "Auto";
+        if ( 1287 == tag )
+        {
+            if ( 0 == value ) return "sRGB";
+            if ( 1 == value ) return "Adobe RGB";
+            if ( 2 == value ) return "Pro Photo RGB";
+        }
+        if ( 1289 == tag && 0 == value )
+            return "Standard";
+        if ( 1290 == tag )
+        {
+            if ( 0 == value ) return "(none)";
+            if ( 1 == value ) return "Noise Reduction";
+            if ( 2 == value ) return "Noise Filter";
+            if ( 4 == value ) return "Noise Filter (ISO Boost)";
+            if ( 8 == value ) return "Auto";
+        }
+        if ( 1536 == tag && 0 == value )
+            return "Single Shot";
+        if ( 1540 == tag )
+        {
+            if ( 1 == value ) return "On, Mode 1";
+            if ( 4 == value ) return "On, Mode 4";
+        }
+        if ( 2052 == tag )
+            return value ? "Yes" : "No";
+    }
+    else if ( 0 == strcmp( directory, "Equipment" ) )
+    {
+        if ( ( 769 == tag || 4096 == tag || 4097 == tag ) && 0 == value )
+            return "None";
+    }
+    else if ( 0 == strcmp( directory, "ImageProcessing" ) )
+    {
+        if ( 4113 == tag || 4114 == tag || 6400 == tag )
+            return value ? "On" : "Off";
+        if ( 4124 == tag && 0 == value )
+            return "Off";
+        if ( 4370 == tag )
+        {
+            if ( 0 == value ) return "4:3";
+            if ( 1 == value ) return "3:2";
+            if ( 2 == value ) return "16:9";
+            if ( 3 == value ) return "6:6";
+            if ( 4 == value ) return "5:4";
+        }
+    }
+    else if ( 0 == strcmp( directory, "RawDevelopment" ) && 264 == tag )
+    {
+        if ( 0 == value ) return "sRGB";
+        if ( 1 == value ) return "Adobe RGB";
+        if ( 2 == value ) return "Pro Photo RGB";
+    }
+    return NULL;
+}
+
+const char * OlympusCameraTypeName( const char * code )
+{
+    struct CameraType { const char * code; const char * name; };
+    static const CameraType names[] = {
+        { "D4401", "XZ-1" }, { "S0059", "E-M10MarkII" },
+        { "S0095", "OM-1" }, { "S0121", "OM-1MarkII" }
+    };
+    for ( size_t i = 0; i < _countof( names ); i++ )
+        if ( 0 == strcmp( code, names[ i ].code ) )
+            return names[ i ].name;
+    return NULL;
+}
+
+void PrintOlympusMainIFDTag( int depth, const IFDHeader & head,
+                             __int64 inlineValueOffset, __int64 noteBase,
+                             __int64 headerBase, bool littleEndian )
+{
+    const char * name = OlympusIFDTagName( "Main", head.id );
+    DWORD valueSize = ( 1 == head.type || 2 == head.type || 6 == head.type || 7 == head.type ) ? 1 :
+                      ( 3 == head.type || 8 == head.type ) ? 2 :
+                      ( 4 == head.type || 9 == head.type || 13 == head.type ) ? 4 :
+                      ( 5 == head.type || 10 == head.type ) ? 8 : 0;
+    unsigned __int64 byteCount = (unsigned __int64) head.count * valueSize;
+    __int64 valuesOffset = ( byteCount <= 4 )
+        ? inlineValueOffset + headerBase
+        : (__int64) head.offset + noteBase + headerBase;
+
+    Space( depth );
+    if ( NULL == name || 0 == valueSize || 0 == head.count ||
+         byteCount > INT_MAX || !IsFileRangeValid( valuesOffset, (__int64) byteCount ) )
+    {
+        prf( "Olympus main tag 0x%04x: invalid or unsupported data (type %u, count %u)\n",
+             head.id, head.type, head.count );
+        return;
+    }
+
+    if ( 512 == head.id && 4 == head.type && 3 == head.count )
+    {
+        DWORD mode = GetDWORD( valuesOffset, littleEndian );
+        DWORD sequence = GetDWORD( valuesOffset + 4, littleEndian );
+        DWORD panorama = GetDWORD( valuesOffset + 8, littleEndian );
+        const char * modeName = 0 == mode ? "Normal" : 2 == mode ? "Fast" :
+                                3 == mode ? "Panorama" : "Unknown";
+        const char * panoramaName = 0 == panorama ? "(none)" :
+                                    1 == panorama ? "Left to Right" :
+                                    2 == panorama ? "Right to Left" :
+                                    3 == panorama ? "Bottom to Top" :
+                                    4 == panorama ? "Top to Bottom" : "Unknown";
+        prf( "Olympus SpecialMode: %s, Sequence: %u, Panorama: %s\n",
+             modeName, sequence, panoramaName );
+        return;
+    }
+
+    prf( "Olympus %s: ", name );
+    if ( 0 == head.id && 7 == head.type && 4 == head.count )
+    {
+        BYTE version[ 4 ];
+        GetBytes( valuesOffset, version, sizeof version );
+        prf( "%c%c%c%c\n", version[ 0 ], version[ 1 ], version[ 2 ], version[ 3 ] );
+        return;
+    }
+    if ( 7 == head.type )
+    {
+        prf( "(binary data, %u bytes)\n", head.count );
+        return;
+    }
+    if ( 2 == head.type )
+    {
+        vector<char> text( min( head.count, 1024u ) + 1, 0 );
+        DWORD textLength = min( head.count, (DWORD) text.size() - 1 );
+        GetBytes( valuesOffset, text.data(), (int) textLength );
+        while ( textLength && ( 0 == text[ textLength - 1 ] || ' ' == text[ textLength - 1 ] ) )
+            text[ --textLength ] = 0;
+        prf( "%s\n", text.data() );
+        return;
+    }
+
+    DWORD valuesToPrint = min( head.count, 16u );
+    for ( DWORD i = 0; i < valuesToPrint; i++ )
+    {
+        if ( i )
+            prf( ", " );
+        __int64 valueOffset = valuesOffset + (__int64) i * valueSize;
+        if ( 1 == head.type )
+            prf( "%u", GetBYTE( valueOffset ) );
+        else if ( 3 == head.type )
+            prf( "%u", GetWORD( valueOffset, littleEndian ) );
+        else if ( 4 == head.type || 13 == head.type )
+            prf( "%u", GetDWORD( valueOffset, littleEndian ) );
+        else if ( 6 == head.type )
+            prf( "%d", (signed char) GetBYTE( valueOffset ) );
+        else if ( 8 == head.type )
+            prf( "%d", (short) GetWORD( valueOffset, littleEndian ) );
+        else if ( 9 == head.type )
+            prf( "%ld", (LONG) GetDWORD( valueOffset, littleEndian ) );
+        else if ( 5 == head.type || 10 == head.type )
+        {
+            LONG numerator = (LONG) GetDWORD( valueOffset, littleEndian );
+            LONG denominator = (LONG) GetDWORD( valueOffset + 4, littleEndian );
+            if ( denominator )
+                prf( "%ld/%ld=%.8g", numerator, denominator,
+                     (double) numerator / denominator );
+            else
+                prf( "%ld/0", numerator );
+        }
+    }
+    if ( valuesToPrint < head.count )
+        prf( ", ..." );
+    prf( "\n" );
+}
+
+void EnumerateOlympusIFD( int depth, __int64 IFDOffset, __int64 headerBase,
+                          bool littleEndian, const char * directory )
+{
+    DWORD originalIFDOffset = (DWORD) IFDOffset;
     bool previewIsValid = false;
-    vector<IFDHeader> aHeaders( MaxIFDHeaders );
+    const WORD maxOlympusIFDHeaders = 1024;
+    vector<IFDHeader> aHeaders( maxOlympusIFDHeaders );
 
     while ( 0 != IFDOffset ) 
     {
-        WORD NumTags = GetWORD( IFDOffset + headerBase, littleEndian );
-        Space( depth );
-        prf( "olympus camera settings IFDOffset %#llx==%lld, NumTags %d, headerBase %#llx==%lld\n", IFDOffset, IFDOffset, NumTags, headerBase, headerBase );
-        IFDOffset += 2;
-
-        if ( NumTags > MaxIFDHeaders )
+        if ( !IsFileRangeValid( IFDOffset + headerBase, 2 ) )
         {
             Space( depth );
-            prf( "numtags is > MaxIFDHeaders; it's likely not in EXIF format, so the data may be noise. skipping (%d)\n", NumTags );
+            prf( "Olympus %s IFD: invalid directory offset\n", directory );
+            break;
+        }
+
+        WORD NumTags = GetWORD( IFDOffset + headerBase, littleEndian );
+        if ( NumTags > maxOlympusIFDHeaders )
+        {
+            Space( depth );
+            prf( "Olympus %s IFD has too many tags; skipping (%u)\n", directory, NumTags );
             break;
         }
     
-        if ( !GetIFDHeaders( IFDOffset + headerBase, aHeaders.data(), NumTags, littleEndian ) )
+        if ( !IsFileRangeValid( IFDOffset + headerBase + 2,
+                                (__int64) NumTags * sizeof( IFDHeader ) + sizeof( DWORD ) ) ||
+             !GetIFDHeaders( IFDOffset + headerBase + 2, aHeaders.data(), NumTags, littleEndian ) )
         {
             Space( depth );
-            prf( "Olympus CameraSettingsIFD has a tag that's invalid. skipping\n" );
+            prf( "Olympus %s IFD has invalid tag data; skipping\n", directory );
             break;
         }
 
+        Space( depth );
+        prf( "Olympus %s IFD: %u tags\n", directory, NumTags );
+        IFDOffset += 2;
         for ( int i = 0; i < NumTags; i++ )
         {
             IFDHeader & head = aHeaders[ i ];
@@ -1935,44 +4274,245 @@ void EnumerateOlympusCameraSettingsIFD( int depth, __int64 IFDOffset, __int64 he
             if ( g_FullInformation )
             {
                 Space( depth );
-                prf( "olympus camera settings ifd tag %d ID %d, type %d, count %d, offset/value %d==%#x\n", i, head.id, head.type, head.count, head.offset, head.offset );
+                prf( "Olympus %s tag %u type %u count %u offset/value %u\n",
+                     directory, head.id, head.type, head.count, head.offset );
+            }
+
+            const char * name = OlympusIFDTagName( directory, head.id );
+            if ( NULL == name )
+            {
+                Space( depth );
+                prf( "Olympus %s tag 0x%04x (type %u, count %u): ",
+                     directory, head.id, head.type, head.count );
+                if ( 7 == head.type )
+                    prf( "(binary data, %u bytes)\n", head.count );
+                else
+                    prf( "unrecognized field\n" );
+                continue;
+            }
+
+            DWORD valueSize = ( 1 == head.type || 2 == head.type || 6 == head.type || 7 == head.type ) ? 1 :
+                              ( 3 == head.type || 8 == head.type ) ? 2 :
+                              ( 4 == head.type || 9 == head.type || 11 == head.type || 13 == head.type ) ? 4 :
+                              ( 5 == head.type || 10 == head.type || 12 == head.type ) ? 8 : 0;
+            unsigned __int64 byteCount = (unsigned __int64) head.count * valueSize;
+            __int64 valuesOffset = ( byteCount <= 4 )
+                ? IFDOffset - 4 + headerBase
+                : (__int64) head.offset + headerBase;
+            if ( 0 == valueSize || 0 == head.count || byteCount > INT_MAX ||
+                 !IsFileRangeValid( valuesOffset, (__int64) byteCount ) )
+            {
+                Space( depth );
+                prf( "Olympus %s.%s: (invalid or unsupported data; type %u, count %u)\n",
+                     directory, name, head.type, head.count );
+                continue;
             }
 
             Space( depth );
-
-            if ( 0 == head.id && 7 == head.type && 4 == head.count )
-                prf( "olympusCameraSettings.CameraSettingsVersion:    %d\n", head.offset );
-            else if ( 256 == head.id && 4 == head.type )
+            prf( "Olympus %s.%s: ", directory, name );
+            if ( ( 0 == strcmp( directory, "Equipment" ) ||
+                   0 == strcmp( directory, "CameraSettings" ) ||
+                   0 == strcmp( directory, "RawDevelopment" ) ||
+                   0 == strcmp( directory, "ImageProcessing" ) ||
+                   0 == strcmp( directory, "FocusInfo" ) ) &&
+                 0 == head.id && 7 == head.type && 4 == head.count )
             {
-                prf( "olympusCameraSettings.PreviewImageValid:        %d\n", head.offset );
-
-                previewIsValid = ( 0 != head.offset );
+                BYTE version[ 4 ];
+                GetBytes( valuesOffset, version, sizeof version );
+                prf( "%c%c%c%c\n", version[ 0 ], version[ 1 ], version[ 2 ], version[ 3 ] );
+                continue;
             }
-            else if ( 257 == head.id && 4 == head.type )
+            if ( 2 == head.type )
             {
-                if ( previewIsValid )
-                    g_Embedded_Image_Offset = head.offset + headerBase;
-
-                prf( "olympusCameraSettings.PreviewImageStart:        %d (effective is %lld)\n", head.offset, g_Embedded_Image_Offset );
+                vector<char> text( min( head.count, 1024u ) + 1, 0 );
+                DWORD textLength = min( head.count, (DWORD) text.size() - 1 );
+                GetBytes( valuesOffset, text.data(), (int) textLength );
+                while ( textLength &&
+                        ( 0 == text[ textLength - 1 ] || ' ' == text[ textLength - 1 ] ) )
+                    text[ --textLength ] = 0;
+                for ( DWORD j = 0; j < textLength; j++ )
+                {
+                    unsigned char ch = (unsigned char) text[ j ];
+                    if ( 0 == ch )
+                        break;
+                    if ( ch < ' ' || ch > '~' )
+                        text[ j ] = '?';
+                }
+                if ( "Equipment" == string( directory ) && 256 == head.id )
+                {
+                    const char * model = OlympusCameraTypeName( text.data() );
+                    if ( model )
+                        prf( "%s (%s)\n", model, text.data() );
+                    else
+                        prf( "%s\n", text.data() );
+                }
+                else
+                    prf( "%s\n", text.data() );
+                continue;
             }
-            else if ( 258 == head.id && 4 == head.type )
+
+            if ( 7 == head.type )
             {
+                prf( "(binary data, %u bytes)\n", head.count );
+                continue;
+            }
+
+            if ( "Equipment" == string( directory ) &&
+                 513 == head.id && 1 == head.type && 6 == head.count )
+            {
+                BYTE make = GetBYTE( valuesOffset );
+                BYTE model = GetBYTE( valuesOffset + 2 );
+                BYTE submodel = GetBYTE( valuesOffset + 3 );
+                if ( 0 == make && 7 == model && 0x10 == submodel )
+                    prf( "Olympus M.Zuiko Digital ED 12mm F2.0 (0 07 10)\n" );
+                else if ( 0 == make && 0x40 == model && 0x10 == submodel )
+                    prf( "OM System M.Zuiko Digital ED 150-600mm F5.0-6.3 (0 40 10)\n" );
+                else
+                    prf( "%u, %u, %u, %u, %u, %u\n",
+                         GetBYTE( valuesOffset ), GetBYTE( valuesOffset + 1 ),
+                         GetBYTE( valuesOffset + 2 ), GetBYTE( valuesOffset + 3 ),
+                         GetBYTE( valuesOffset + 4 ), GetBYTE( valuesOffset + 5 ) );
+                continue;
+            }
+
+            if ( "Equipment" == string( directory ) &&
+                 ( 260 == head.id || 516 == head.id || 772 == head.id || 4098 == head.id ) &&
+                 4 == head.type && 1 == head.count )
+            {
+                DWORD version = GetDWORD( valuesOffset, littleEndian );
+                char versionText[ 16 ];
+                sprintf_s( versionText, "%x", version );
+                size_t versionLength = strlen( versionText );
+                if ( versionLength > 3 )
+                {
+                    memmove( versionText + versionLength - 2,
+                             versionText + versionLength - 3, 4 );
+                    versionText[ versionLength - 3 ] = '.';
+                }
+                prf( "%s\n", versionText );
+                continue;
+            }
+
+            if ( "Equipment" == string( directory ) &&
+                 ( 517 == head.id || 518 == head.id || 522 == head.id ) &&
+                 3 == head.type && 1 == head.count )
+            {
+                WORD apex = GetWORD( valuesOffset, littleEndian );
+                prf( "%.1f\n", 0 == apex ? 0.0 : pow( 2.0, (double) apex / 512.0 ) );
+                continue;
+            }
+
+            if ( "CameraSettings" == string( directory ) &&
+                 257 == head.id && 4 == head.type && 1 == head.count )
+            {
+                DWORD previewOffset = GetDWORD( valuesOffset, littleEndian );
                 if ( previewIsValid )
+                {
+                    g_Embedded_Image_Offset = (__int64) previewOffset + headerBase;
+                    prf( "%lld\n", g_Embedded_Image_Offset );
+                }
+                else
+                    prf( "%u\n", previewOffset );
+                continue;
+            }
+
+            if ( "CameraSettings" == string( directory ) &&
+                 1312 == head.id && 3 == head.type && 2 == head.count )
+            {
+                WORD mode = GetWORD( valuesOffset, littleEndian );
+                WORD parameter = GetWORD( valuesOffset + 2, littleEndian );
+                const char * modeName = 1 == mode ? "Vivid" : 2 == mode ? "Natural" :
+                                        3 == mode ? "Muted" : 4 == mode ? "Portrait" :
+                                        5 == mode ? "i-Enhance" : NULL;
+                if ( modeName )
+                    prf( "%s; %u\n", modeName, parameter );
+                else
+                    prf( "%u, %u\n", mode, parameter );
+                continue;
+            }
+
+            if ( "ImageProcessing" == string( directory ) &&
+                 4124 == head.id && 3 == head.type && 2 == head.count )
+            {
+                WORD mode = GetWORD( valuesOffset, littleEndian );
+                WORD frames = GetWORD( valuesOffset + 2, littleEndian );
+                if ( 0 == mode )
+                    prf( "Off; %u\n", frames );
+                else if ( 2 == mode )
+                    prf( "On (%u frames); %u\n", mode, frames );
+                else
+                    prf( "%u, %u\n", mode, frames );
+                continue;
+            }
+
+            if ( 1 == head.count &&
+                 ( 1 == head.type || 3 == head.type || 4 == head.type ) )
+            {
+                DWORD value = 1 == head.type ? GetBYTE( valuesOffset ) :
+                              3 == head.type ? GetWORD( valuesOffset, littleEndian ) :
+                              GetDWORD( valuesOffset, littleEndian );
+                const char * valueName = OlympusIFDValueName( directory, head.id, value );
+                if ( NULL != valueName )
+                {
+                    prf( "%s\n", valueName );
+                    if ( 256 == head.id && 0 == strcmp( directory, "CameraSettings" ) )
+                        previewIsValid = ( 0 != value );
+                    continue;
+                }
+            }
+
+            DWORD valuesToPrint = min( head.count, 16u );
+            for ( DWORD j = 0; j < valuesToPrint; j++ )
+            {
+                if ( j )
+                    prf( ", " );
+                __int64 valueOffset = valuesOffset + (__int64) j * valueSize;
+                if ( 1 == head.type )
+                    prf( "%u", GetBYTE( valueOffset ) );
+                else if ( 6 == head.type )
+                    prf( "%d", (signed char) GetBYTE( valueOffset ) );
+                else if ( 3 == head.type )
+                {
+                    WORD value = GetWORD( valueOffset, littleEndian );
+                    if ( "ImageProcessing" == string( directory ) &&
+                         512 == head.id )
+                        prf( "%d", (short) value );
+                    else
+                        prf( "%u", value );
+                }
+                else if ( 8 == head.type )
+                    prf( "%d", (short) GetWORD( valueOffset, littleEndian ) );
+                else if ( 4 == head.type || 13 == head.type )
+                    prf( "%u", GetDWORD( valueOffset, littleEndian ) );
+                else if ( 9 == head.type )
+                    prf( "%ld", (LONG) GetDWORD( valueOffset, littleEndian ) );
+                else if ( 5 == head.type || 10 == head.type )
+                {
+                    LONG numerator = (LONG) GetDWORD( valueOffset, littleEndian );
+                    LONG denominator = (LONG) GetDWORD( valueOffset + 4, littleEndian );
+                    if ( denominator )
+                        prf( "%ld/%ld=%.8g", numerator, denominator,
+                             (double) numerator / denominator );
+                    else
+                        prf( "%ld/0", numerator );
+                }
+                else
+                    prf( "%02x", GetBYTE( valueOffset ) );
+            }
+            if ( valuesToPrint < head.count )
+                prf( ", ..." );
+            prf( "\n" );
+
+            if ( "CameraSettings" == string( directory ) )
+            {
+                if ( 258 == head.id && previewIsValid )
                     g_Embedded_Image_Length = head.offset;
-                prf( "olympusCameraSettings.PreviewImageLength:       %d\n", head.offset );
-            }
-            else
-            {
-                prf( "olympusCameraSettings.tag %d ID %d==%#x, type %d, count %d, offset/value %d==%#x\n", i, head.id, head.id, head.type, head.count, head.offset, head.offset );
-
-                if ( 7 == head.type )
-                    DumpBinaryData( head.offset, headerBase, head.count, 4, IFDOffset - 4 );
             }
         }
 
         IFDOffset = GetDWORD( IFDOffset + headerBase, littleEndian );
     }
-} //EnumerateOlympusCameraSettingsIFD
+} //EnumerateOlympusIFD
 
 void EnumerateMakernotes( int depth, __int64 IFDOffset, __int64 headerBase, bool littleEndian )
 {
@@ -2137,6 +4677,12 @@ void EnumerateMakernotes( int depth, __int64 IFDOffset, __int64 headerBase, bool
 
         IFDOffset += 6;
         isPentax = true;
+    }
+    else if ( !strcmp( g_acMake, "OM Digital Solutions" ) )
+    {
+        // OM System notes add a 16-byte signature/header before the TIFF IFD.
+        IFDOffset += 16;
+        isOlympus = true;
     }
     else if ( !strcmp( g_acMake, "OLYMPUS IMAGING CORP." ) )
     {
@@ -2328,14 +4874,23 @@ void EnumerateMakernotes( int depth, __int64 IFDOffset, __int64 headerBase, bool
                 GetString( stringOffset + headerBase, acInternalSerialNumber, _countof( acInternalSerialNumber ), head.count );
                 prf( "makernote InternalSerialNumber:      %s\n", acInternalSerialNumber );
             }
-            else if ( 8224 == head.id && 13 == head.type && isOlympus )
+            else if ( isOlympus && 13 == head.type &&
+                      ( 0x2010 == head.id || 0x2020 == head.id ||
+                        0x2030 == head.id || 0x2040 == head.id ||
+                        0x2050 == head.id ) )
             {
-                // Olympus camera settings IFD
-
-                prf( "makernote OlympusCameraSettingsIFD   %d, originalIFDOffset %lld\n", head.offset, originalIFDOffset );
-
-                EnumerateOlympusCameraSettingsIFD( depth + 1, head.offset, originalIFDOffset + headerBase, littleEndian );
+                const char * directory = 0x2010 == head.id ? "Equipment" :
+                                         0x2020 == head.id ? "CameraSettings" :
+                                         0x2030 == head.id ? "RawDevelopment" :
+                                         0x2040 == head.id ? "ImageProcessing" : "FocusInfo";
+                prf( "Olympus %s IFD offset: %u\n", directory, head.offset );
+                EnumerateOlympusIFD( depth + 1, head.offset,
+                                     originalIFDOffset + headerBase,
+                                     littleEndian, directory );
             }
+            else if ( isSony && NULL != SonyMakerNoteTagName( head.id ) )
+                PrintSonyMakerNoteTag( depth, SonyMakerNoteTagName( head.id ), head,
+                                       IFDOffset - 4, headerBase, littleEndian );
             else if ( 29184 == head.id && isSony )
                 prf( "makernote Sony Sr2SubIFDOffset       %#x\n", head.offset );
             else if ( 29185 == head.id && isSony )
@@ -2350,19 +4905,45 @@ void EnumerateMakernotes( int depth, __int64 IFDOffset, __int64 headerBase, bool
                 prf( "makernote Sony MRWInfo               %#x\n", head.offset );
             else
             {
-                prf( "makernote tag %d ID %d==%#x, type %d, count %d, offset/value %d", i, head.id, head.id, head.type, head.count, head.offset );
-
-                if ( 2 == head.type )
+                if ( isOlympus && 256 == head.id && 7 == head.type )
+                {
+                    prf( "Olympus ThumbnailImage: (binary data, %u bytes)\n", head.count );
+                }
+                else if ( isOlympus && 521 == head.id &&
+                          ( 2 == head.type || 7 == head.type ) )
                 {
                     ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
-                    GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                    prf( " %s", acBuffer );
+                    GetString( stringOffset + originalIFDOffset + headerBase,
+                               acBuffer, _countof( acBuffer ), head.count );
+                    DetectGarbage( acBuffer );
+                    prf( "Olympus CameraID: %s\n", acBuffer );
                 }
+                else if ( isOlympus && NULL != OlympusIFDTagName( "Main", head.id ) )
+                {
+                    PrintOlympusMainIFDTag( depth, head, IFDOffset - 4,
+                                            originalIFDOffset, headerBase, littleEndian );
+                }
+                else
+                {
+                    prf( "makernote tag %d ID %d==%#x, type %d, count %d, offset/value %d", i, head.id, head.id, head.type, head.count, head.offset );
 
-                prf( "\n" );
+                    if ( 2 == head.type )
+                    {
+                        ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
+                        GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
+                        prf( " %s", acBuffer );
+                    }
 
-                if ( 7 == head.type )
-                    DumpBinaryData( head.offset, headerBase, head.count, 4, IFDOffset - 4 );
+                    prf( "\n" );
+
+                    if ( 7 == head.type )
+                    {
+                        if ( isOlympus )
+                            prf( "(binary data, %u bytes)\n", head.count );
+                        else
+                            DumpBinaryData( head.offset, headerBase, head.count, 4, IFDOffset - 4 );
+                    }
+                }
 
                 /*
                     For ORF files at least, 13 doesn't point to an easily consumable IFD
@@ -2376,6 +4957,51 @@ void EnumerateMakernotes( int depth, __int64 IFDOffset, __int64 headerBase, bool
         IFDOffset = GetDWORD( IFDOffset + headerBase, littleEndian );
     }
 } //EnumerateMakernotes
+
+const char * PanasonicCameraTagValueName( WORD tag, DWORD value )
+{
+    if ( 4354 == tag || 4608 == tag || 5138 == tag )
+        return ( 0 == value ) ? "No" : ( 1 == value ) ? "Yes" : NULL;
+
+    if ( 13056 == tag || 13824 == tag )
+    {
+        switch ( value )
+        {
+            case 0: return "Auto";
+            case 1: return "Daylight";
+            case 2: return "Cloudy";
+            case 3: return "Tungsten";
+            case 4: return "n/a";
+            case 5: return "Flash";
+            case 6: return "n/a";
+            case 7: return "n/a";
+            case 8: return "Custom#1";
+            case 9: return "Custom#2";
+            case 10: return "Custom#3";
+            case 11: return "Custom#4";
+            case 12: return "Shade";
+            case 13: return "Kelvin";
+            case 16: return "AWBc";
+        }
+    }
+
+    if ( 13569 == tag )
+    {
+        switch ( value )
+        {
+            case 1: return "Horizontal (normal)";
+            case 2: return "Mirror horizontal";
+            case 3: return "Rotate 180";
+            case 4: return "Mirror vertical";
+            case 5: return "Mirror horizontal and rotate 270 CW";
+            case 6: return "Rotate 90 CW";
+            case 7: return "Mirror horizontal and rotate 90 CW";
+            case 8: return "Rotate 270 CW";
+        }
+    }
+
+    return "unknown";
+}
 
 void EnumeratePanasonicCameraTags( int depth, __int64 IFDOffset, __int64 headerBase, bool littleEndian )
 {
@@ -2430,11 +5056,13 @@ void EnumeratePanasonicCameraTags( int depth, __int64 IFDOffset, __int64 headerB
             else if ( 4353 == head.id && 3 == head.type )
                 prf( "panasonic FocusStepCount:           %d\n", head.offset );
             else if ( 4354 == head.id && 1 == head.type )
-                prf( "panasonic FlashFired:               %d\n", head.offset );
+                prf( "Panasonic FlashFired:               %s\n",
+                     PanasonicCameraTagValueName( head.id, head.offset ) );
             else if ( 4357 == head.id && 4 == head.type )
                 prf( "panasonic ZoomPosition:             %d\n", head.offset );
             else if ( 4608 == head.id && 1 == head.type )
-                prf( "panasonic LensAttached:             %d\n", head.offset );
+                prf( "Panasonic LensAttached:             %s\n",
+                     PanasonicCameraTagValueName( head.id, head.offset ) );
             else if ( 4609 == head.id && 3 == head.type )
                 prf( "panasonic LensTypeMake:             %d\n", head.offset );
             else if ( 4610 == head.id && 3 == head.type )
@@ -2442,15 +5070,30 @@ void EnumeratePanasonicCameraTags( int depth, __int64 IFDOffset, __int64 headerB
             else if ( 4611 == head.id && 3 == head.type )
                 prf( "panasonic FocalLengthIn35mmFormat:  %d\n", head.offset );
             else if ( 4865 == head.id && 8 == head.type )
-                prf( "panasonic ApertureValue:            %d\n", head.offset );
+            {
+                short value = (short) head.offset;
+                // Panasonic stores APEX aperture and shutter values in scaled fixed-point form.
+                prf( "Panasonic ApertureValue:            f/%.1lf (raw %d)\n",
+                     pow( 2.0, (double) value / 512.0 ), value );
+            }
             else if ( 4866 == head.id && 8 == head.type )
-                prf( "panasonic ShutterSpeedValue:        %d\n", head.offset );
+            {
+                short value = (short) head.offset;
+                if ( value < 0 )
+                    prf( "Panasonic ShutterSpeedValue:        %.3g s (raw %d)\n",
+                         pow( 2.0, -(double) value / 256.0 ), value );
+                else
+                    prf( "Panasonic ShutterSpeedValue:        1/%.0lf s (raw %d)\n",
+                         pow( 2.0, (double) value / 256.0 ), value );
+            }
             else if ( 4867 == head.id && 8 == head.type )
-                prf( "panasonic SensitivityValue:         %d\n", head.offset );
+                prf( "Panasonic SensitivityValue:         %g (raw %d)\n",
+                     (double) (short) head.offset / 256.0, (short) head.offset );
             else if ( 4869 == head.id && 3 == head.type )
                 prf( "panasonic HighISOMode:              %d\n", head.offset );
             else if ( 5138 == head.id && 1 == head.type )
-                prf( "panasonic FacesDetected:            %d\n", head.offset );
+                prf( "Panasonic FacesDetected:            %s\n",
+                     PanasonicCameraTagValueName( head.id, head.offset ) );
             else if ( 12800 == head.id && 3 == head.type )
                 prf( "panasonic WB_CFA0_LevelDaylight:    %d\n", head.offset );
             else if ( 12801 == head.id && 3 == head.type )
@@ -2460,15 +5103,18 @@ void EnumeratePanasonicCameraTags( int depth, __int64 IFDOffset, __int64 headerB
             else if ( 12803 == head.id && 3 == head.type )
                 prf( "panasonic WB_CFA3_LevelDaylight:    %d\n", head.offset );
             else if ( 13056 == head.id && 1 == head.type )
-                prf( "panasonic WhiteBalanceSet:          %d\n", head.offset );
+                prf( "Panasonic WhiteBalanceSet:          %s\n",
+                     PanasonicCameraTagValueName( head.id, head.offset ) );
             else if ( 13344 == head.id && 3 == head.type )
                 prf( "panasonic WB_RedLevelAuto:          %d\n", head.offset );
             else if ( 13345== head.id && 3 == head.type )
                 prf( "panasonic WB_BlueLevelAuto:         %d\n", head.offset );
             else if ( 13569== head.id && 1 == head.type )
-                prf( "panasonic Orientation:              %d\n", head.offset );
+                prf( "Panasonic Orientation:              %s\n",
+                     PanasonicCameraTagValueName( head.id, head.offset ) );
             else if ( 13824== head.id && 1 == head.type )
-                prf( "panasonic WhiteBalanceDetected:     %d\n", head.offset );
+                prf( "Panasonic WhiteBalanceDetected:     %s\n",
+                     PanasonicCameraTagValueName( head.id, head.offset ) );
             else
             {
                 prf( "panasonic tag %d ID %d==%#x, type %d, count %d, offset/value %d\n", i, head.id, head.id, head.type, head.count, head.offset );
@@ -2678,6 +5324,39 @@ const char * ExifExposureProgram( DWORD x )
 
     return "unknown";
 } //ExifExposureProgram
+
+const char * ExifMeteringMode( DWORD x )
+{
+    switch ( x )
+    {
+        case 0: return "unknown";
+        case 1: return "average";
+        case 2: return "center-weighted average";
+        case 3: return "spot";
+        case 4: return "multi-spot";
+        case 5: return "multi-segment";
+        case 6: return "partial";
+        case 255: return "other";
+    }
+
+    return "unknown";
+} //ExifMeteringMode
+
+const char * ExifComponentConfiguration( BYTE component )
+{
+    switch ( component )
+    {
+        case 0: return "-";
+        case 1: return "Y";
+        case 2: return "Cb";
+        case 3: return "Cr";
+        case 4: return "R";
+        case 5: return "G";
+        case 6: return "B";
+    }
+
+    return "unknown";
+} //ExifComponentConfiguration
 
 const char * ExifColorSpace( DWORD x )
 {
@@ -2906,7 +5585,10 @@ void EnumerateGPSTags( int depth, __int64 IFDOffset, __int64 headerBase, bool li
 
             if ( 0 == head.id && 1 == head.type && 4 == head.count )
             {
-                prf( "GPS VersionID:                      %#x\n", head.offset );
+                __int64 versionOffset = IFDOffset - 4 + headerBase;
+                prf( "GPS VersionID:                      %u.%u.%u.%u\n",
+                     GetBYTE( versionOffset ), GetBYTE( versionOffset + 1 ),
+                     GetBYTE( versionOffset + 2 ), GetBYTE( versionOffset + 3 ) );
             }
             else if ( 1 == head.id && 2 == head.type )
             {
@@ -2997,9 +5679,19 @@ void EnumerateGPSTags( int depth, __int64 IFDOffset, __int64 headerBase, bool li
             }
             else if ( 10 == head.id && 2 == head.type )
             {
-                ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
-                GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                prf( "GPS MeasureMode:                    %s-dimensional measurement\n", acBuffer );
+                if ( 0 == head.count )
+                    prf( "GPS MeasureMode:                    (empty)\n" );
+                else
+                {
+                    ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
+                    GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
+                    if ( 0 == acBuffer[ 0 ] )
+                        prf( "GPS MeasureMode:                    (empty)\n" );
+                    else if ( '2' == acBuffer[ 0 ] || '3' == acBuffer[ 0 ] )
+                        prf( "GPS MeasureMode:                    %s-dimensional measurement\n", acBuffer );
+                    else
+                        prf( "GPS MeasureMode:                    %s (unknown)\n", acBuffer );
+                }
             }
             else if ( 11 == head.id && 5 == head.type && 1 == head.count )
             {
@@ -3372,8 +6064,12 @@ void EnumerateExifTags( int depth, __int64 IFDOffset, __int64 headerBase, bool l
                 prf( "exif Standard Output Sensitivity:   %d\n", head.offset );
             else if ( 34866 == head.id )
                 prf( "exif Recommended Exposure Index     %d\n", head.offset );
-            else if ( 36864 == head.id )
-                prf( "exif ExifVersion                    %d\n", head.count );
+            else if ( 36864 == head.id && 7 == head.type )
+            {
+                ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
+                GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
+                prf( "exif ExifVersion                    %s\n", acBuffer );
+            }
             else if ( 36867 == head.id && 2 == head.type )
             {
                 char acDateTimeOriginal[ 100 ];
@@ -3408,8 +6104,15 @@ void EnumerateExifTags( int depth, __int64 IFDOffset, __int64 headerBase, bool l
             }
             else if ( 37121 == head.id && 7 == head.type )
             {
-                prf( "exif ComponentsConfiguration:       %d bytes\n", head.count );
-                DumpBinaryData( head.offset, headerBase, head.count, 4, IFDOffset - 4 );
+                __int64 componentOffset = ( head.count <= 4 ) ? IFDOffset - 4 : head.offset;
+                prf( "exif ComponentsConfiguration:       " );
+                for ( DWORD component = 0; component < head.count; component++ )
+                {
+                    if ( component != 0 )
+                        prf( ", " );
+                    prf( "%s", ExifComponentConfiguration( GetBYTE( componentOffset + headerBase + component ) ) );
+                }
+                prf( "\n" );
             }
             else if ( 37122 == head.id && 5 == head.type )
             {
@@ -3470,7 +6173,7 @@ void EnumerateExifTags( int depth, __int64 IFDOffset, __int64 headerBase, bool l
                 prf( "exif SubjectDistance (meters):      %d / %d = %lf\n", num, den, (double) num / (double) den );
             }
             else if ( 37383 == head.id )
-                prf( "exif MeteringMode:                  %d\n", head.offset );
+                prf( "exif MeteringMode:                  %s (%d)\n", ExifMeteringMode( head.offset ), head.offset );
             else if ( 37384 == head.id )
                 prf( "exif LightSource:                   %d\n", head.offset );
             else if ( 37385 == head.id )
@@ -3783,10 +6486,121 @@ void EnumerateExifTags( int depth, __int64 IFDOffset, __int64 headerBase, bool l
     }
 } //EnumerateExifTags
 
+const char * PanasonicWBTypeName( WORD type )
+{
+    switch ( type )
+    {
+        case 0: return "Unknown";
+        case 1: return "Daylight";
+        case 2: return "Fluorescent";
+        case 3: return "Tungsten (Incandescent)";
+        case 4: return "Flash";
+        case 9: return "Fine Weather";
+        case 10: return "Cloudy";
+        case 11: return "Shade";
+        case 12: return "Daylight Fluorescent";
+        case 13: return "Day White Fluorescent";
+        case 14: return "Cool White Fluorescent";
+        case 15: return "White Fluorescent";
+        case 16: return "Warm White Fluorescent";
+        case 17: return "Standard Light A";
+        case 18: return "Standard Light B";
+        case 19: return "Standard Light C";
+        case 20: return "D55";
+        case 21: return "D65";
+        case 22: return "D75";
+        case 23: return "D50";
+        case 24: return "ISO Studio Tungsten";
+        case 255: return "Other";
+        default: return NULL;
+    }
+}
+
+void PrintPanasonicWBInfo2( int depth, DWORD offset, DWORD count, __int64 headerBase, bool littleEndian )
+{
+    __int64 dataOffset = (__int64) offset + headerBase;
+    if ( count < 2 || !IsFileRangeValid( dataOffset, count ) )
+    {
+        prf( "Panasonic WBInfo2: (invalid data range, %u bytes)\n", count );
+        return;
+    }
+
+    WORD entries = GetWORD( dataOffset, littleEndian );
+    if ( entries > 7 || (unsigned __int64) 2 + (unsigned __int64) entries * 8 > count )
+    {
+        prf( "Panasonic WBInfo2: (invalid entry count %u in %u bytes)\n", entries, count );
+        return;
+    }
+
+    prf( "Panasonic WBInfo2: %u white-balance entries\n", entries );
+    for ( WORD i = 0; i < entries; i++ )
+    {
+        __int64 entryOffset = dataOffset + 2 + (__int64) i * 8;
+        WORD type = GetWORD( entryOffset, littleEndian );
+        const char * typeName = PanasonicWBTypeName( type );
+        Space( depth + 1 );
+        if ( typeName )
+            prf( "WBType%u: %s\n", i + 1, typeName );
+        else
+            prf( "WBType%u: %u\n", i + 1, type );
+
+        Space( depth + 1 );
+        prf( "WB_RGBLevels%u: %u, %u, %u\n", i + 1,
+             GetWORD( entryOffset + 2, littleEndian ),
+             GetWORD( entryOffset + 4, littleEndian ),
+             GetWORD( entryOffset + 6, littleEndian ) );
+    }
+}
+
+void PrintPanasonicDistortionInfo( DWORD offset, DWORD count, __int64 headerBase, bool littleEndian )
+{
+    __int64 dataOffset = (__int64) offset + headerBase;
+    if ( count < 26 || !IsFileRangeValid( dataOffset, count ) )
+    {
+        prf( "Panasonic DistortionInfo: (invalid data range, %u bytes)\n", count );
+        return;
+    }
+
+    static const struct { const char * name; WORD offset; } fields[] = {
+        { "DistortionParam02", 4 }, { "DistortionParam04", 8 },
+        { "DistortionScale", 10 }, { "DistortionCorrection", 14 },
+        { "DistortionParam08", 16 }, { "DistortionParam09", 18 },
+        { "DistortionParam11", 22 }, { "DistortionN", 24 }
+    };
+    for ( size_t i = 0; i < _countof( fields ); i++ )
+    {
+        short value = (short) GetWORD( dataOffset + fields[ i ].offset, littleEndian );
+        if ( 0 == i || 1 == i || 4 == i || 5 == i || 6 == i )
+            prf( "Panasonic %s: %.12g (raw %d)\n", fields[ i ].name,
+                 (double) value / 32768.0, value );
+        else if ( 2 == i )
+            prf( "Panasonic %s: %.12g (raw %d)\n", fields[ i ].name,
+                 1.0 / ( 1.0 + (double) value / 32768.0 ), value );
+        else if ( 3 == i )
+        {
+            short rawValue = value;
+            value &= 0x0f;
+            prf( "Panasonic %s: %s (raw %d)\n", fields[ i ].name,
+                 ( 0 == value ) ? "Off" : ( 1 == value ) ? "On" : "unknown", rawValue );
+        }
+        else
+            prf( "Panasonic %s: %d\n", fields[ i ].name, value );
+    }
+}
+
 void PrintPanasonicIFD0Tag( int depth, WORD id, WORD type, DWORD count, DWORD offset, __int64 headerBase, bool littleEndian, __int64 IFDOffset )
 {
     if ( 1 == id )
-        prf( "panasonicRawVersion:                  %#x\n", offset );
+    {
+        char version[ 5 ];
+        for ( int i = 0; i < 4; i++ )
+        {
+            int shift = littleEndian ? 8 * i : 8 * ( 3 - i );
+            version[ i ] = (char) ( ( offset >> shift ) & 0xff );
+        }
+        version[ 4 ] = 0;
+        prf( "PanasonicRawVersion:                 %s\n", version );
+    }
     else if ( 2 == id )
         prf( "panasonicSensorWidth:                 %d\n", offset );
     else if ( 3 == id )
@@ -3802,17 +6616,39 @@ void PrintPanasonicIFD0Tag( int depth, WORD id, WORD type, DWORD count, DWORD of
     else if ( 8 == id )
         prf( "panasonicSamplesPerPixel:             %d\n", offset );
     else if ( 9 == id )
-        prf( "panasonicCFAPattern:                  %d\n", offset );
+    {
+        const char * pattern = NULL;
+        if ( 1 == offset ) pattern = "[Red,Green][Green,Blue]";
+        else if ( 2 == offset ) pattern = "[Green,Red][Blue,Green]";
+        else if ( 3 == offset ) pattern = "[Green,Blue][Red,Green]";
+        else if ( 4 == offset ) pattern = "[Blue,Green][Green,Red]";
+        prf( "Panasonic CFAPattern:                 %s (raw %u)\n",
+             pattern ? pattern : "unknown", offset );
+    }
     else if ( 10 == id )
         prf( "panasonicBitsPerSample:               %d\n", offset );
     else if ( 11 == id )
-        prf( "panasonicCompression:                 %d\n", offset );
+    {
+        const char * compression = NULL;
+        if ( 34316 == offset ) compression = "Panasonic RAW 1";
+        else if ( 34826 == offset ) compression = "Panasonic RAW 2";
+        else if ( 34828 == offset ) compression = "Panasonic RAW 3";
+        else if ( 34830 == offset ) compression = "Panasonic RAW 4";
+        if ( compression )
+            prf( "Panasonic Compression:               %s (%u)\n", compression, offset );
+        else
+            prf( "Panasonic Compression:               unknown (%u)\n", offset );
+    }
     else if ( 14 == id )
         prf( "panasonicLinearityLimitRed:           %d\n", offset );
     else if ( 15 == id )
         prf( "panasonicLinearityLimitGreen:         %d\n", offset );
     else if ( 16 == id )
         prf( "panasonicLinearityLimitBlue:          %d\n", offset );
+    else if ( 17 == id )
+        prf( "Panasonic RedBalance:                 %d\n", offset );
+    else if ( 18 == id )
+        prf( "Panasonic BlueBalance:                %d\n", offset );
     else if ( 23 == id )
         prf( "panasonicISO:                         %d\n", offset );
     else if ( 24 == id )
@@ -3840,8 +6676,7 @@ void PrintPanasonicIFD0Tag( int depth, WORD id, WORD type, DWORD count, DWORD of
         prf( "panasonicWBBlueLevel:                 %d\n", offset );
     else if ( 39 == id )
     {
-        prf( "panasonicWBInfo2:                     %d bytes at %d\n", count, offset );
-        DumpBinaryData( offset, headerBase, count, 4, IFDOffset - 4 );
+        PrintPanasonicWBInfo2( depth, offset, count, headerBase, littleEndian );
     }
     else if ( 45 == id )
         prf( "panasonicRawFormat:                   %d\n", offset );
@@ -3864,12 +6699,15 @@ void PrintPanasonicIFD0Tag( int depth, WORD id, WORD type, DWORD count, DWORD of
     else if ( 280 == id )
         prf( "panasonicRawDataOffset                %d\n", offset );
     else if ( 281 == id )
-    {
-        prf( "panasonicDistortionInfo               %d bytes at %d\n", count, offset );
-        DumpBinaryData( offset, headerBase, count, 4, IFDOffset - 4 );
-    }
+        PrintPanasonicDistortionInfo( offset, count, headerBase, littleEndian );
     else if ( 284 == id )
-        prf( "panasonicGamma:                       %d\n", offset );
+    {
+        // Older Panasonic raws store gamma in 1/256 units; small values use hundredths.
+        double gamma = ( offset < 256 ) ? (double) offset / 100.0 :
+                       ( offset < 1024 ) ? (double) offset / 256.0 :
+                                           (double) offset / 1024.0;
+        prf( "Panasonic Gamma:                      %g (raw %u)\n", gamma, offset );
+    }
     else if ( 288 == id )
         EnumeratePanasonicCameraTags( depth + 1, offset, headerBase, littleEndian );
     else if ( 289 == id )
@@ -3878,26 +6716,32 @@ void PrintPanasonicIFD0Tag( int depth, WORD id, WORD type, DWORD count, DWORD of
         prf( "panasonicTag ID %d==%#x, type %d, count %d, offset/value %d\n", id, id, type, count, offset );
 } //PrintPanasonicIFD0Tag
 
-const char * JPGComponents( int x )
+const char * JPGComponents( int components, const BYTE * componentIDs, const BYTE * samplingFactors, int adobeColorTransform )
 {
-    if ( 1 == x )
+    if ( 1 == components )
         return "grey scale";
 
-    if ( 3 == x )
+    if ( 3 == components && 0 == adobeColorTransform )
+        return "RGB";
+
+    if ( 3 == components && 1 == adobeColorTransform )
         return "YCbCr";
 
-    if ( 4 == x )
+    if ( 3 == components && 1 == componentIDs[ 0 ] && 2 == componentIDs[ 1 ] && 3 == componentIDs[ 2 ] )
+        return "YCbCr";
+
+    if ( 3 == components && 0 == componentIDs[ 0 ] && 1 == componentIDs[ 1 ] && 2 == componentIDs[ 2 ] &&
+         ( samplingFactors[ 0 ] != samplingFactors[ 1 ] || samplingFactors[ 0 ] != samplingFactors[ 2 ] ) )
+        return "YCbCr";
+
+    if ( 4 == components && 2 == adobeColorTransform )
+        return "YCCK";
+
+    if ( 4 == components )
         return "CMYK";
 
     return "unknown";
 } //JPGComponents
-
-struct QuantizationTableSegment
-{
-    BYTE Pq;
-    BYTE Tq;
-    BYTE table[ 64 ];
-};
 
 struct ICC_PROFILE_Values
 {
@@ -4046,7 +6890,7 @@ double ConvertS15Fixed16Number( DWORD d )
 const char * GetJPGApp14ColorTransform( byte ct )
 {
     if ( 0 == ct )
-        return ( "unknown (rgb or cmyk)" );
+        return "none (RGB or CMYK from frame components)";
 
     if ( 1 == ct )
         return "YCbCr";
@@ -4124,233 +6968,338 @@ const char * GetICCStandardIlluminant( DWORD i )
     return "unknown";
 } //GetICCStandardIlluminant
 
-void PrintICCValue( ICC_TAG & t, DWORD offset )
+DWORD ICCReadDWORD( const vector<BYTE> & profile, size_t offset )
 {
-    char acTag[ 5 ];
-    acTag[ 4 ] = 0;
+    return ( (DWORD) profile[ offset ] << 24 ) |
+           ( (DWORD) profile[ offset + 1 ] << 16 ) |
+           ( (DWORD) profile[ offset + 2 ] << 8 ) |
+           (DWORD) profile[ offset + 3 ];
+}
+
+void DumpICCData( const vector<BYTE> & profile, size_t offset, size_t length )
+{
+    const size_t bytesPerRow = 32;
+
+    for ( size_t row = 0; row < length; row += bytesPerRow )
+    {
+        size_t count = min( bytesPerRow, length - row );
+        prf( "             %#10x  ", (DWORD) ( offset + row ) );
+        for ( size_t i = 0; i < count; i++ )
+            prf( "%02x ", profile[ offset + row + i ] );
+        for ( size_t i = count; i < bytesPerRow; i++ )
+            prf( "   " );
+        prf( " " );
+        for ( size_t i = 0; i < count; i++ )
+        {
+            BYTE ch = profile[ offset + row + i ];
+            prf( "%c", ( ch < ' ' || ch >= 127 ) ? '.' : ch );
+        }
+        prf( "\n" );
+    }
+}
+
+void PrintICCValue( const ICC_TAG & t, const vector<BYTE> & profile, size_t profileLength )
+{
+    char acTag[ 5 ] = { 0 };
     memcpy( acTag, t.sig, 4 );
 
-    char acType[ 5 ];
-    acType[ 4 ] = 0;
-    GetBytes( offset, acType, 4 );
+    size_t offset = t.dataOffset;
+    size_t length = t.dataSize;
+    if ( offset > profileLength || length > profileLength - offset || length < 8 )
+    {
+        prf( "  invalid ICC tag %s range\n", acTag );
+        return;
+    }
+
+    char acType[ 5 ] = { 0 };
+    memcpy( acType, profile.data() + offset, 4 );
 
     if ( g_FullInformation )
     {
         prf( "  tag %s, type %s\n", acTag, acType );
-        DumpBinaryData( offset, 0, t.dataSize, 8, offset );
+        DumpICCData( profile, offset, length );
     }
 
-    if ( !strcmp( acTag, "cprt" ) )
+    if ( !strcmp( acTag, "cprt" ) && length >= 8 )
     {
-        int len = t.dataSize - 8;
-        vector<char> value( len );
-        GetBytes( offset + 8, value.data(), len );
-        prf( "  Copyright:                          %s\n", value.data() );
+        string value( (const char *) profile.data() + offset + 8, length - 8 );
+        size_t terminator = value.find( '\0' );
+        if ( string::npos != terminator )
+            value.resize( terminator );
+        prf( "  Copyright:                          %s\n", value.c_str() );
     }
-    else if ( !strcmp( acTag, "desc" ) )
+    else if ( !strcmp( acTag, "desc" ) && length >= 12 )
     {
-        int len = t.dataSize - 12;
-        vector<char> value( len );
-        GetBytes( offset + 12, value.data(), len );
-        prf( "  ProfileDescription:                 %s\n", value.data() );
+        DWORD count = ICCReadDWORD( profile, offset + 8 );
+        size_t textLength = min( (size_t) count, length - 12 );
+        string value( (const char *) profile.data() + offset + 12, textLength );
+        size_t terminator = value.find( '\0' );
+        if ( string::npos != terminator )
+            value.resize( terminator );
+        prf( "  ProfileDescription:                 %s\n", value.c_str() );
     }
-    else if ( !strcmp( acTag, "wtpt" ) )
+    else if ( ( !strcmp( acTag, "wtpt" ) || !strcmp( acTag, "bkpt" ) ||
+                !strcmp( acTag, "rXYZ" ) || !strcmp( acTag, "gXYZ" ) ||
+                !strcmp( acTag, "bXYZ" ) || !strcmp( acTag, "lumi" ) ||
+                !strcmp( acTag, "view" ) ) && length >= 20 )
     {
-        DWORD x = GetDWORD( offset + 8, false );
-        DWORD y = GetDWORD( offset + 12, false );
-        DWORD z = GetDWORD( offset + 16, false );
-        prf( "  MediaWhitePoint:                    %lf %lf %lf\n", ConvertS15Fixed16Number( x ),
-                ConvertS15Fixed16Number( y ), ConvertS15Fixed16Number( z ) );
-    }
-    else if ( !strcmp( acTag, "bkpt" ) )
-    {
-        DWORD x = GetDWORD( offset + 8, false );
-        DWORD y = GetDWORD( offset + 12, false );
-        DWORD z = GetDWORD( offset + 16, false );
-        prf( "  MediaBlackPoint:                    %lf %lf %lf\n", ConvertS15Fixed16Number( x ),
-                ConvertS15Fixed16Number( y ), ConvertS15Fixed16Number( z ) );
-    }
-    else if ( !strcmp( acTag, "rXYZ" ) )
-    {
-        DWORD x = GetDWORD( offset + 8, false );
-        DWORD y = GetDWORD( offset + 12, false );
-        DWORD z = GetDWORD( offset + 16, false );
-        prf( "  RedMatrixColumn:                    %lf %lf %lf\n", ConvertS15Fixed16Number( x ),
-                ConvertS15Fixed16Number( y ), ConvertS15Fixed16Number( z ) );
-    }
-    else if ( !strcmp( acTag, "gXYZ" ) )
-    {
-        DWORD x = GetDWORD( offset + 8, false );
-        DWORD y = GetDWORD( offset + 12, false );
-        DWORD z = GetDWORD( offset + 16, false );
-        prf( "  GreenMatrixColumn:                  %lf %lf %lf\n", ConvertS15Fixed16Number( x ),
-                ConvertS15Fixed16Number( y ), ConvertS15Fixed16Number( z ) );
-    }
-    else if ( !strcmp( acTag, "bXYZ" ) )
-    {
-        DWORD x = GetDWORD( offset + 8, false );
-        DWORD y = GetDWORD( offset + 12, false );
-        DWORD z = GetDWORD( offset + 16, false );
-        prf( "  BlueMatrixColumn:                   %lf %lf %lf\n", ConvertS15Fixed16Number( x ),
+        DWORD x = ICCReadDWORD( profile, offset + 8 );
+        DWORD y = ICCReadDWORD( profile, offset + 12 );
+        DWORD z = ICCReadDWORD( profile, offset + 16 );
+        const char * label = !strcmp( acTag, "wtpt" ) ? "MediaWhitePoint" :
+                             !strcmp( acTag, "bkpt" ) ? "MediaBlackPoint" :
+                             !strcmp( acTag, "rXYZ" ) ? "RedMatrixColumn" :
+                             !strcmp( acTag, "gXYZ" ) ? "GreenMatrixColumn" :
+                             !strcmp( acTag, "bXYZ" ) ? "BlueMatrixColumn" :
+                             !strcmp( acTag, "lumi" ) ? "Luminance" : "ViewingConditions";
+        prf( "  %s:                    %lf %lf %lf\n", label, ConvertS15Fixed16Number( x ),
                 ConvertS15Fixed16Number( y ), ConvertS15Fixed16Number( z ) );
     }
     else if ( !strcmp( acTag, "dmnd" ) )
     {
-        int len = t.dataSize - 12;
-        vector<char> value( len );
-        GetBytes( offset + 12, value.data(), len );
-        prf( "  DeviceMfgDesc:                      %s\n", value.data() );
+        if ( length >= 12 )
+        {
+            size_t textLength = min( (size_t) ICCReadDWORD( profile, offset + 8 ), length - 12 );
+            string value( (const char *) profile.data() + offset + 12, textLength );
+            size_t terminator = value.find( '\0' );
+            if ( string::npos != terminator )
+                value.resize( terminator );
+            prf( "  DeviceMfgDesc:                      %s\n", value.c_str() );
+        }
     }
     else if ( !strcmp( acTag, "dmdd" ) )
     {
-        int len = t.dataSize - 12;
-        vector<char> value( len );
-        GetBytes( offset + 12, value.data(), len );
-        prf( "  DeviceModelDesc:                    %s\n", value.data() );
+        if ( length >= 12 )
+        {
+            size_t textLength = min( (size_t) ICCReadDWORD( profile, offset + 8 ), length - 12 );
+            string value( (const char *) profile.data() + offset + 12, textLength );
+            size_t terminator = value.find( '\0' );
+            if ( string::npos != terminator )
+                value.resize( terminator );
+            prf( "  DeviceModelDesc:                    %s\n", value.c_str() );
+        }
     }
     else if ( !strcmp( acTag, "vued" ) )
     {
-        int len = t.dataSize - 12;
-        vector<char> value( len );
-        GetBytes( offset + 12, value.data(), len );
-        prf( "  ViewingCondDesc:                    %s\n", value.data() );
-    }
-    else if ( !strcmp( acTag, "lumi" ) )
-    {
-        DWORD x = GetDWORD( offset + 8, false );
-        DWORD y = GetDWORD( offset + 12, false );
-        DWORD z = GetDWORD( offset + 16, false );
-        prf( "  Luminance:                          %lf %lf %lf\n", ConvertS15Fixed16Number( x ),
-                ConvertS15Fixed16Number( y ), ConvertS15Fixed16Number( z ) );
+        if ( length >= 12 )
+        {
+            size_t textLength = min( (size_t) ICCReadDWORD( profile, offset + 8 ), length - 12 );
+            string value( (const char *) profile.data() + offset + 12, textLength );
+            size_t terminator = value.find( '\0' );
+            if ( string::npos != terminator )
+                value.resize( terminator );
+            prf( "  ViewingCondDesc:                    %s\n", value.c_str() );
+        }
     }
     else if ( !strcmp( acTag, "meas" ) )
     {
-        struct MeasurementType
+        if ( length >= 36 )
         {
-            DWORD type;
-            DWORD reserved;
-            DWORD standardObserver;
-            DWORD xTriStimulus;
-            DWORD yTriStimulus;
-            DWORD zTriStimulus;
-            DWORD geometry;
-            DWORD flare;
-            DWORD standard;
-        };
-
-        MeasurementType mt;
-        GetBytes( offset, &mt, sizeof mt );
-        mt.standardObserver = _byteswap_ulong( mt.standardObserver );
-        mt.xTriStimulus = _byteswap_ulong( mt.xTriStimulus );
-        mt.yTriStimulus = _byteswap_ulong( mt.yTriStimulus );
-        mt.zTriStimulus = _byteswap_ulong( mt.zTriStimulus );
-        mt.geometry = _byteswap_ulong( mt.geometry );
-        mt.flare = _byteswap_ulong( mt.flare );
-        mt.standard = _byteswap_ulong( mt.standard );
-
-        prf( "  Measurement:\n" );
-        prf( "    standard observer:                %d\n", mt.standardObserver, GetICCStandardObserver( mt.standardObserver ) );
-        prf( "    x tristimulus backing:            %lf\n", ConvertS15Fixed16Number( mt.xTriStimulus ) );
-        prf( "    y tristimulus backing:            %lf\n", ConvertS15Fixed16Number( mt.yTriStimulus ) );
-        prf( "    z tristimulus backing:            %lf\n", ConvertS15Fixed16Number( mt.zTriStimulus ) );
-        prf( "    measurement geometry:             %d (%s)\n", mt.geometry, GetICCGeometry( mt.geometry ) );
-        prf( "    measurement flare:                %d (%s)\n", mt.flare, GetICCMeasurementFlare( mt.flare ) );
-        prf( "    standard illuminant:              %d (%s)\n", mt.standard, GetICCStandardIlluminant( mt.standard ) );
+            DWORD standardObserver = ICCReadDWORD( profile, offset + 8 );
+            DWORD xTriStimulus = ICCReadDWORD( profile, offset + 12 );
+            DWORD yTriStimulus = ICCReadDWORD( profile, offset + 16 );
+            DWORD zTriStimulus = ICCReadDWORD( profile, offset + 20 );
+            DWORD geometry = ICCReadDWORD( profile, offset + 24 );
+            DWORD flare = ICCReadDWORD( profile, offset + 28 );
+            DWORD standard = ICCReadDWORD( profile, offset + 32 );
+            prf( "  Measurement:\n" );
+            prf( "    standard observer:                %d (%s)\n", standardObserver, GetICCStandardObserver( standardObserver ) );
+            prf( "    x tristimulus backing:            %lf\n", ConvertS15Fixed16Number( xTriStimulus ) );
+            prf( "    y tristimulus backing:            %lf\n", ConvertS15Fixed16Number( yTriStimulus ) );
+            prf( "    z tristimulus backing:            %lf\n", ConvertS15Fixed16Number( zTriStimulus ) );
+            prf( "    measurement geometry:             %d (%s)\n", geometry, GetICCGeometry( geometry ) );
+            prf( "    measurement flare:                %d (%s)\n", flare, GetICCMeasurementFlare( flare ) );
+            prf( "    standard illuminant:              %d (%s)\n", standard, GetICCStandardIlluminant( standard ) );
+        }
     }
     else if ( !strcmp( acTag, "tech" ) )
     {
-        char acTech[ 5 ];
-        acTech[ 4 ] = 0;
-        GetBytes( offset + 8, acTech, 4 );
-        prf( "  technology:                         %s\n", acTech );
-    }
-    else if ( !strcmp( acTag, "view" ) )
-    {
-        DWORD x = GetDWORD( offset + 8, false );
-        DWORD y = GetDWORD( offset + 12, false );
-        DWORD z = GetDWORD( offset + 16, false );
-        prf( "  ViewingConditions:                  %lf %lf %lf\n", ConvertS15Fixed16Number( x ),
-                ConvertS15Fixed16Number( y ), ConvertS15Fixed16Number( z ) );
+        if ( length >= 12 )
+        {
+            char acTech[ 5 ] = { 0 };
+            memcpy( acTech, profile.data() + offset + 8, 4 );
+            prf( "  technology:                         %s\n", acTech );
+        }
     }
     else if ( !strcmp( acTag, "rTRC" ) )
     {
-        DWORD count = GetDWORD( offset + 8, false );
-        prf( "  Red tone reproduction curve #:      %d\n", count );
+        if ( length >= 12 )
+            prf( "  Red tone reproduction curve #:      %d\n", ICCReadDWORD( profile, offset + 8 ) );
     }
     else if ( !strcmp( acTag, "gTRC" ) )
     {
-        DWORD count = GetDWORD( offset + 8, false );
-        prf( "  Green tone reproduction curve #:    %d\n", count );
+        if ( length >= 12 )
+            prf( "  Green tone reproduction curve #:    %d\n", ICCReadDWORD( profile, offset + 8 ) );
     }
     else if ( !strcmp( acTag, "bTRC" ) )
     {
-        DWORD count = GetDWORD( offset + 8, false );
-        prf( "  Blue tone reproduction curve #:     %d\n", count );
+        if ( length >= 12 )
+            prf( "  Blue tone reproduction curve #:     %d\n", ICCReadDWORD( profile, offset + 8 ) );
     }
     else
     {
         if ( !g_FullInformation )
         {
             prf( "  tag %s, type %s\n", acTag, acType );
-            DumpBinaryData( offset, 0, t.dataSize, 8, offset );
+            DumpICCData( profile, offset, length );
         }
     }
 
 } //PrintICCValue
 
-void PrintXMPData( const char * pcIn )
+void PrintICCProfile( const vector<BYTE> & profile )
 {
-    // look for known xml tags rather than exhaustively parse the xml
-
-    const char * pcTag = "xmp:Rating>";
-    const char * pcRating = strstr( pcIn, pcTag );
-
-    if ( !pcRating )
+    static_assert( sizeof( ICC_PROFILE_Values ) == 128, "Unexpected ICC header layout" );
+    if ( profile.size() < sizeof( ICC_PROFILE_Values ) )
     {
-        // jpg and Sony RAW ARW files will have this form
-
-        pcTag = "xmp:Rating=\"";
-        pcRating = strstr( pcIn, pcTag );
+        prf( "  incomplete ICC profile header (%d bytes)\n", (int) profile.size() );
+        return;
     }
 
-    if ( !pcRating )
-    {
-        // Hasselblad RAW files have this form
+    ICC_PROFILE_Values icc;
+    memcpy( &icc, profile.data(), sizeof icc );
+    icc.ByteSwap( false );
 
-        pcTag = "xap:Rating>";
-        pcRating = strstr( pcIn, pcTag );
+    if ( icc.size < sizeof icc || icc.size > profile.size() )
+    {
+        prf( "  invalid ICC profile size %u (available %d bytes)\n", icc.size, (int) profile.size() );
+        return;
     }
 
-    if ( pcRating )
-    {
-        pcRating += strlen( pcTag );
-        int rating = *pcRating;
+    size_t profileLength = icc.size;
+    char fourcc[ 5 ] = { 0 };
+    prf( "  size:                           %5u\n", icc.size );
+    memcpy( fourcc, &icc.cmmType, 4 );
+    prf( "  cmm type:                           %s (%#x)\n", fourcc, icc.cmmType );
+    prf( "  version:                            %d.%d.%d\n", icc.version & 0xff, ( icc.version >> 12 ) & 0xf, ( icc.version >> 8 ) & 0xf );
+    prf( "  profile class:                      %s (%#x)\n", GetICCProfileClass( icc.profileClass ), icc.profileClass );
+    memcpy( fourcc, &icc.colorSpace, 4 );
+    prf( "  color space:                        %s (%#x)\n", fourcc, icc.colorSpace );
+    memcpy( fourcc, &icc.pcs, 4 );
+    prf( "  connection space:                   %s (%#x)\n", fourcc, icc.pcs );
+    prf( "  dd/mm/yyyy hh:mm:ss:                %02d/%02d/%04d %02d:%02d:%02d\n", icc.day, icc.month, icc.year, icc.hours, icc.minutes, icc.seconds );
+    memcpy( fourcc, &icc.signature, 4 );
+    prf( "  signature:                          %s (%#x)\n", fourcc, icc.signature );
+    memcpy( fourcc, &icc.platform, 4 );
+    prf( "  primary platform:                   %s (%#x)\n", fourcc, icc.platform );
+    prf( "  cmm flags:                          %s, %s\n", ( icc.options & 0x1 ) ? "embedded" : "not embedded", ( icc.options & 0x2 ) ? "not independent" : "independent" );
+    memcpy( fourcc, &icc.manufacturer, 4 );
+    prf( "  manufacturer:                       %s (%#x)\n", fourcc, icc.manufacturer );
+    memcpy( fourcc, &icc.model, 4 );
+    prf( "  model:                              %s (%#x)\n", fourcc, icc.model );
+    prf( "  attributes:                         %s, %s, %s, %s\n", ( icc.attributes & 0x1 ) ? "transparency" : "reflective",
+                                                                      ( icc.attributes & 0x2 ) ? "matte" : "glossy",
+                                                                      ( icc.attributes & 0x4 ) ? "polarity negative" : "polarity positive",
+                                                                      ( icc.attributes & 0x8 ) ? "black and white media" : "color media" );
+    prf( "  rendering intent:                   %s\n", GetICCRenderingIntent( icc.intent & 0xffff ) );
+    prf( "  illuminant:                         %lf, %lf, %lf\n", ConvertS15Fixed16Number( icc.illuminantX ),
+                                                                     ConvertS15Fixed16Number( icc.illuminantY ),
+                                                                     ConvertS15Fixed16Number( icc.illuminantZ ) );
+    memcpy( fourcc, &icc.creator, 4 );
+    prf( "  creator:                            %s (%#x)\n", fourcc, icc.creator );
+    prf( "  profile id:                         " );
+    for ( size_t i = 0; i < _countof( icc.id ); i++ )
+        prf( "%#x", icc.id[ i ] );
+    prf( "\n" );
 
-        if ( rating >= '0' && rating <= '5' )          // doesn't handle Adobe Bridge's -1
-            prf( "Rating:                               %c\n", rating );
-        else
-            prf( "XMP Rating value isn't 0-5: '%c' == %#x\n", rating, rating );
+    if ( profileLength < sizeof icc + sizeof( DWORD ) )
+        return;
+
+    DWORD tagCount = ICCReadDWORD( profile, sizeof icc );
+    size_t tagTableOffset = sizeof icc + sizeof( DWORD );
+    if ( tagCount > ( profileLength - tagTableOffset ) / sizeof( ICC_TAG ) )
+    {
+        prf( "  invalid ICC tag count %u\n", tagCount );
+        return;
     }
+
+    prf( "ICC tag table has %u entries\n", tagCount );
+    for ( DWORD i = 0; i < tagCount; i++ )
+    {
+        size_t entryOffset = tagTableOffset + (size_t) i * sizeof( ICC_TAG );
+        ICC_TAG tag;
+        memcpy( tag.sig, profile.data() + entryOffset, 4 );
+        tag.dataOffset = ICCReadDWORD( profile, entryOffset + 4 );
+        tag.dataSize = ICCReadDWORD( profile, entryOffset + 8 );
+        PrintICCValue( tag, profile, profileLength );
+    }
+}
+
+void PrintXMPField( const char * data, size_t length, const char * name, const char * label )
+{
+    string key = string( name ) + "=\"";
+    const char * field = strstr( data, key.c_str() );
+    char terminator = '"';
+
+    if ( !field )
+    {
+        key = string( "<" ) + name;
+        field = strstr( data, key.c_str() );
+        if ( field )
+        {
+            const char * tagEnd = (const char *) memchr( field, '>', length - min( length, (size_t) ( field - data ) ) );
+            if ( tagEnd )
+            {
+                field = tagEnd + 1;
+                const char * listItem = strstr( field, "<rdf:li" );
+                if ( listItem )
+                {
+                    const char * listItemEnd = strchr( listItem, '>' );
+                    if ( listItemEnd )
+                        field = listItemEnd + 1;
+                }
+                terminator = '<';
+            }
+            else
+                field = NULL;
+        }
+    }
+
+    if ( !field )
+        return;
+
+    if ( '"' == terminator )
+        field += key.size();
+    size_t available = length - min( length, (size_t) ( field - data ) );
+    size_t valueLength = 0;
+    while ( valueLength < available && field[ valueLength ] != terminator )
+        valueLength++;
+
+    if ( valueLength )
+        prf( "  %-22s: %.*s\n", label, (int) min( valueLength, (size_t) 200 ), field );
+}
+
+void PrintXMPData( const char * pcIn, size_t dataLength = 0 )
+{
+    if ( 0 == dataLength )
+        dataLength = strlen( pcIn );
+
+    prf( "XMP metadata:\n" );
+    PrintXMPField( pcIn, dataLength, "xmp:Rating", "Rating" );
+    PrintXMPField( pcIn, dataLength, "xap:Rating", "Rating" );
+    PrintXMPField( pcIn, dataLength, "xmp:Label", "Label" );
+    PrintXMPField( pcIn, dataLength, "xmp:CreatorTool", "CreatorTool" );
+    PrintXMPField( pcIn, dataLength, "photoshop:DateCreated", "DateCreated" );
+    PrintXMPField( pcIn, dataLength, "dc:title", "Title" );
+    PrintXMPField( pcIn, dataLength, "dc:description", "Description" );
+    PrintXMPField( pcIn, dataLength, "dc:creator", "Creator" );
+    PrintXMPField( pcIn, dataLength, "dc:rights", "Rights" );
 } //PrintXMPData
 
-int ParseOldJpg( DWORD startingOffset = 0 )
+int ParseOldJpg( DWORD startingOffset = 0, __int64 maxLength = 0 )
 {
     prf( "mimetype:                             image/jpeg\n" );
 
-    DWORD offset = 2 + startingOffset;
-    WORD width = 0;
-    WORD height = 0;
-    int DQTSegmentCount;
-    QuantizationTableSegment * pDQTSegs = NULL;
+    __int64 offset = 2 + (__int64) startingOffset;
+    __int64 fileLength = GetStreamLength();
+    if ( maxLength > 0 )
+        fileLength = min( fileLength, (__int64) startingOffset + maxLength );
     int exifOffset = 0;
+    int adobeColorTransform = -1;
+    vector<vector<BYTE>> iccChunks;
+    BYTE iccSegmentCount = 0;
+    bool invalidICC = false;
 
-    const BYTE MARKER_SOF0  = 0xc0;          // start of frame baseline
-    const BYTE MARKER_SOF2  = 0xc2;          // start of frame progressive
-    const BYTE MARKER_DHT   = 0xc4;          // Define Huffman table
-    const BYTE MARKER_JPG   = 0xc8;          // JPG extensions
-    const BYTE MARKER_DAC   = 0xcc;          // Define arithmetic coding conditioning(s)
-    const BYTE MARKER_SOF15 = 0xcf;          // last of the SOF? marker
-    const BYTE MARKER_SOI   = 0xd8;          // start of image
     const BYTE MARKER_EOI   = 0xd9;          // end of image
     const BYTE MARKER_SOS   = 0xda;          // start of scan
     const BYTE MARKER_DQT   = 0xdb;          // Quantization table
@@ -4362,11 +7311,17 @@ int ParseOldJpg( DWORD startingOffset = 0 )
     const BYTE MARKER_APP14 = 0xee;          // Adobe  JPEG::Adobe directory
     const BYTE MARKER_COM   = 0xfe;          // comment
 
-    do
+    while ( offset + 2 <= fileLength )
     {
         BYTE marker = GetBYTE( offset );
         if ( 0xff != marker )
+        {
+            prf( "invalid JPEG marker at offset %#llx\n", offset );
             return exifOffset;
+        }
+
+        while ( offset + 1 < fileLength && 0xff == GetBYTE( offset + 1 ) )
+            offset++;
 
         BYTE segment = GetBYTE( offset + 1 );
 
@@ -4374,99 +7329,135 @@ int ParseOldJpg( DWORD startingOffset = 0 )
             prf( "jpg offset %d, segment %#x\n", offset, segment );
 
         if ( MARKER_EOI == segment )
-        {
-            //printf( "found 0xd9 EOI segment\n" );
-            return exifOffset;
-        }
+            break;
 
-        if ( 0xff == segment )
+        if ( 0x01 == segment || ( segment >= 0xd0 && segment <= 0xd8 ) )
         {
             offset += 2;
             continue;
         }
 
+        if ( offset + 4 > fileLength )
+        {
+            prf( "truncated JPEG marker %#x at offset %#llx\n", segment, offset );
+            break;
+        }
+
         WORD length = GetWORD( offset + 2, false );
-        WORD data_length = length - 2;
+        if ( length < 2 || offset + 2 + length > fileLength )
+        {
+            prf( "invalid JPEG segment length %d for marker %#x at offset %#llx\n", length, segment, offset );
+            break;
+        }
+        size_t data_length = length - 2;
+        __int64 dataOffset = offset + 4;
 
         if ( g_FullInformation )
             prf( "  segment length %d\n", length );
 
         if ( MARKER_DQT == segment )
         {
-            if ( length < 67 )
-                return exifOffset;
-
-            if ( 0 != ( data_length % 65 ) )
-                return exifOffset;
-
-            DQTSegmentCount = data_length / 65;
-
-            if ( g_FullInformation )
-                prf( "  dqt segments: %d\n", DQTSegmentCount );
-
-            int o = offset + 4;
-            pDQTSegs = new QuantizationTableSegment[ DQTSegmentCount ];
-
-            for ( int i = 0; i < DQTSegmentCount; i++ )
+            if ( 0 == data_length )
             {
-                BYTE dqtInfo = GetBYTE( o++ );
-                pDQTSegs[ i ].Pq = dqtInfo & 0xf;
-                pDQTSegs[ i ].Tq = ( dqtInfo >> 4 ) & 0xf;
-
-                for ( int j = 0; j < 64; j++ )
-                    pDQTSegs[ i ].table[ j ] = GetBYTE( o++ );
+                prf( "empty JPEG quantization table segment\n" );
+                break;
             }
+            size_t pos = 0;
+            int tableCount = 0;
+            bool has16BitTables = false;
+            while ( pos < data_length )
+            {
+                BYTE tableInfo = GetBYTE( dataOffset + pos++ );
+                BYTE precision = tableInfo >> 4;
+                BYTE tableID = tableInfo & 0x0f;
+                size_t tableBytes = 64 * ( precision ? 2 : 1 );
+                if ( precision > 1 || tableID > 3 || tableBytes > data_length - pos )
+                {
+                    prf( "invalid JPEG quantization table in segment at offset %#llx\n", offset );
+                    break;
+                }
+                has16BitTables = has16BitTables || 1 == precision;
+                pos += tableBytes;
+                tableCount++;
+            }
+            if ( pos != data_length )
+                break;
+            prf( "quantization tables:                 %d (16-bit precision: %s)\n",
+                 tableCount, has16BitTables ? "yes" : "no" );
         }
         else if ( MARKER_COM == segment )
         {
-            unique_ptr<char> comment( new char[ data_length + 1 ] );
-
-            for ( int i = 0; i < data_length; i++ )
-                comment.get()[i] = GetBYTE( offset + 4 + i );
-
-            comment.get()[ data_length ] = 0;
-
-            prf( "comment:                           %s\n", comment.get() );
+            prf( "comment:                           " );
+            for ( size_t i = 0; i < data_length; i++ )
+            {
+                BYTE ch = GetBYTE( dataOffset + i );
+                if ( ch >= ' ' && ch < 127 && '\\' != ch )
+                    prf( "%c", ch );
+                else if ( '\\' == ch )
+                    prf( "\\\\" );
+                else
+                    prf( "\\x%02x", ch );
+            }
+            prf( "\n" );
         }
-        else if ( MARKER_DHT == segment || MARKER_JPG == segment || MARKER_DAC == segment )
+        else if ( 0xc4 == segment || 0xc8 == segment || 0xcc == segment )
         {
             // These 3 fall in the range of the valid SOF? segments, so watch for them and ignore
         }
-        else if ( segment >= MARKER_SOF0 && segment <= MARKER_SOF15 )
+        else if ( segment >= 0xc0 && segment <= 0xcf )
         {
+            if ( 0xc4 == segment || 0xc8 == segment || 0xcc == segment )
+            {
+                offset += length + 2;
+                continue;
+            }
+            if ( data_length < 6 )
+            {
+                prf( "invalid JPEG frame header length %d\n", length );
+                break;
+            }
+
             prf( "start of frame:                   %5d (%#x) (%s)\n", segment, segment, SOFMarker( segment ) );
 
-            byte precision = GetBYTE( offset + 4 );
-            height = GetWORD( offset + 5, false );
-            width = GetWORD( offset + 7, false );
-            byte components = GetBYTE( offset + 9 );
+            byte precision = GetBYTE( dataOffset );
+            WORD height = GetWORD( dataOffset + 1, false );
+            WORD width = GetWORD( dataOffset + 3, false );
+            byte components = GetBYTE( dataOffset + 5 );
+            if ( data_length < 6 + (size_t) components * 3 )
+            {
+                prf( "invalid JPEG frame component table\n" );
+                break;
+            }
 
             prf( "bits per sample:                  %5d\n", precision );
             prf( "image height:                     %5d\n", height );
             prf( "image width:                      %5d\n", width );
-            prf( "color components:                 %5d (%s)\n", components, JPGComponents( components ) );
+            BYTE componentIDs[ 256 ] = { 0 };
+            BYTE samplingFactors[ 256 ] = { 0 };
 
             for ( int component = 0; component < components; component++ )
             {
-                int componentID = GetBYTE( offset + 10 + ( component * 3 ) );
-                int samplingFactor = GetBYTE( offset + 11 + ( component * 3 ) );
-                int quantizationTable = GetBYTE( offset + 12 + ( component * 3 ) );
+                componentIDs[ component ] = GetBYTE( dataOffset + 6 + component * 3 );
+                samplingFactors[ component ] = GetBYTE( dataOffset + 7 + component * 3 );
+                int samplingFactor = samplingFactors[ component ];
+                int quantizationTable = GetBYTE( dataOffset + 8 + component * 3 );
 
                 if ( g_FullInformation )
                 {
-                    prf( "  component %d ID  %5d\n", component, componentID );
+                    prf( "  component %d ID  %5d\n", component, componentIDs[ component ] );
                     prf( "  component %d sampling factor  vertical %d, horizontal %d\n", component, samplingFactor & 0xf, samplingFactor >> 4 );
                     prf( "  component %d quantization table %d\n", component, quantizationTable );
                 }
             }
 
-            int componentID = GetBYTE( offset + 10 );
-            int samplingFactor = GetBYTE( offset + 11 );
-            int horizS = samplingFactor >> 4;
-            int vertS = samplingFactor & 0xf;
+            const char * colorSpace = JPGComponents( components, componentIDs, samplingFactors, adobeColorTransform );
+            prf( "color components:                 %5d (%s)\n", components, colorSpace );
 
-            if ( 3 == components )
+            if ( 3 == components && 0 == strcmp( colorSpace, "YCbCr" ) )
             {
+                int samplingFactor = GetBYTE( dataOffset + 7 );
+                int horizS = samplingFactor >> 4;
+                int vertS = samplingFactor & 0xf;
                 int sub2 = 0;
                 int sub3 = 0;
 
@@ -4492,177 +7483,174 @@ int ParseOldJpg( DWORD startingOffset = 0 )
         }
         else if ( MARKER_APP0 == segment )
         {
-            char acID[ 5 ];
-            for ( int i = 0; i < 5; i++ )
-                acID[ i ] = GetBYTE( offset + 4 + i );
-            acID[ 4 ] = 0;
+            char identifier[ 6 ] = { 0 };
+            size_t identifierLength = min( data_length, (size_t) 5 );
+            if ( identifierLength )
+                GetBytes( dataOffset, identifier, (int) identifierLength );
 
-            BYTE majorVersion = GetBYTE( offset + 9 );
-            BYTE minorVersion = GetBYTE( offset + 10 );
-            BYTE units = GetBYTE( offset + 11 );
-            WORD xDensity = GetWORD( offset + 12, false );
-            WORD yDensity = GetWORD( offset + 14, false );
-            BYTE thumbWidth = GetBYTE( offset + 16 );
-            BYTE thumbHeight = GetBYTE( offset + 17 );
+            if ( 5 == identifierLength && 0 == memcmp( identifier, "JFIF\0", 5 ) )
+            {
+                if ( data_length < 14 )
+                {
+                    prf( "invalid short JFIF APP0 segment\n" );
+                    break;
+                }
 
-            prf( "id marker:                            %s\n", acID );
-            prf( "major version:                    %5d\n", majorVersion );
-            prf( "minor version:                    %5d\n", minorVersion );
-            prf( "units:                                %s\n", ( 0 == units ) ? "none" : ( 1 == units ) ? "dots/inch" : ( 2 == units ) ? "dots/cm" : "unknown" );
-            prf( "x density:                        %5d\n", xDensity );
-            prf( "y density:                        %5d\n", yDensity );
+                BYTE majorVersion = GetBYTE( dataOffset + 5 );
+                BYTE minorVersion = GetBYTE( dataOffset + 6 );
+                BYTE units = GetBYTE( dataOffset + 7 );
+                WORD xDensity = GetWORD( dataOffset + 8, false );
+                WORD yDensity = GetWORD( dataOffset + 10, false );
+
+                prf( "id marker:                            JFIF\n" );
+                prf( "major version:                    %5d\n", majorVersion );
+                prf( "minor version:                    %5d\n", minorVersion );
+                prf( "units:                                %s\n", ( 0 == units ) ? "none" : ( 1 == units ) ? "dots/inch" : ( 2 == units ) ? "dots/cm" : "unknown" );
+                prf( "x density:                        %5d\n", xDensity );
+                prf( "y density:                        %5d\n", yDensity );
+            }
+            else
+            {
+                prf( "APP0 identifier:                     %s\n", identifier );
+            }
         }
         else if ( MARKER_APP2 == segment )
         {
-            //printf( "app2 offset %#x\n", offset );
-            // https://www.color.org/ICC1V42.pdf
-
-            char acHeader[ 13 ];
-            acHeader[ 12 ] = 0;
-            GetBytes( offset + 4, &acHeader, 12 );
+            char acHeader[ 13 ] = { 0 };
+            size_t headerLength = min( data_length, (size_t) 12 );
+            if ( headerLength )
+                GetBytes( dataOffset, acHeader, (int) headerLength );
             prf( "APP2 header %s\n", acHeader );
 
-            if ( !stricmp( acHeader, "FPXR" ) )
+            if ( 12 == headerLength && 0 == memcmp( acHeader, "ICC_PROFILE", 11 ) && 0 == acHeader[ 11 ] )
             {
-                // fujifilm-specific header
-            }
-            else if ( !stricmp( acHeader, "ICC_PROFILE" ) )
-            {
-                int icc_offset = offset + 4 + 14;
-                ICC_PROFILE_Values icc;
-                GetBytes( icc_offset, &icc, sizeof icc );
-                icc.ByteSwap( false );
-    
-                //printf( "data_length %d, sizeof icc %d\n", data_length, (int) sizeof icc );
-                prf( "  size:                           %5d\n", icc.size );
-    
-                memcpy( acHeader, &icc.cmmType, 4 );
-                acHeader[ 4 ] = 0;
-                prf( "  cmm type:                           %s (%#x)\n", acHeader, icc.cmmType );
-    
-                prf( "  version:                            %d.%d.%d\n", icc.version & 0xff, ( icc.version >> 12 ) & 0xf, ( icc.version >> 8 ) & 0xf );
-                prf( "  profile class:                      %s (%#x)\n", GetICCProfileClass( icc.profileClass ), icc.profileClass );
-    
-                memcpy( acHeader, &icc.colorSpace, 4 );
-                acHeader[ 4 ] = 0;
-                prf( "  color space:                        %s (%#x)\n", acHeader, icc.colorSpace );
-    
-                memcpy( acHeader, &icc.pcs, 4 );
-                acHeader[ 4 ] = 0;
-                prf( "  connection space:                   %s (%#x)\n", acHeader, icc.pcs );
-    
-                prf( "  dd/mm/yyyy hh:mm:ss:                %02d/%02d/%04d %02d:%02d:%02d\n", icc.day, icc.month, icc.year, icc.hours, icc.minutes, icc.seconds );
-    
-                memcpy( acHeader, &icc.signature, 4 );
-                acHeader[ 4 ] = 0;
-                prf( "  signature:                          %s (%#x)\n", acHeader, icc.signature );
-    
-                memcpy( acHeader, &icc.platform, 4 );
-                acHeader[ 4 ] = 0;
-                prf( "  primary platform:                   %s (%#x)\n", acHeader, icc.platform );
-    
-                prf( "  cmm flags:                          %s, %s\n", ( icc.options & 0x1 ) ? "embedded" : "not embedded", ( icc.options & 0x2 ) ? "not independent" : "independent" );
-    
-                memcpy( acHeader, &icc.manufacturer, 4 );
-                acHeader[ 4 ] = 0;
-                prf( "  manufacturer:                       %s (%#x)\n", acHeader, icc.manufacturer );
-    
-                memcpy( acHeader, &icc.model, 4 );
-                acHeader[ 4 ] = 0;
-                prf( "  model:                              %s (%#x)\n", acHeader, icc.model );
-    
-                prf( "  attributes:                         %s, %s, %s, %s\n", ( icc.attributes & 0x1 ) ? "transparency" : "reflective",
-                                                                                  ( icc.attributes & 0x2 ) ? "matte" : "glossy",
-                                                                                  ( icc.attributes & 0x4 ) ? "polarity negative" : "polarity positive",
-                                                                                  ( icc.attributes & 0x8 ) ? "black and white media" : "color media" );
-    
-                prf( "  rendering intent:                   %s\n", GetICCRenderingIntent( icc.intent & 0xffff ) );
-    
-                prf( "  illuminant:                         %lf, %lf, %lf\n", ConvertS15Fixed16Number( icc.illuminantX ),
-                                                                                 ConvertS15Fixed16Number( icc.illuminantY ),
-                                                                                 ConvertS15Fixed16Number( icc.illuminantZ ) );
-                memcpy( acHeader, &icc.creator, 4 );
-                acHeader[ 4 ] = 0;
-                prf( "  creator:                            %s (%#x)\n", acHeader, icc.creator );
-    
-                prf( "  profile id:                         " );
-                for ( size_t i = 0; i < _countof( icc.id ); i++ )
-                    prf( "%#x", icc.id[ i ] );
-                prf( "\n" );
-    
-                //printf( "data_length and sizeof icc: %d %d\n", data_length, (int) sizeof icc );
-    
-                if ( data_length > (int) sizeof icc )
+                if ( data_length < 14 )
                 {
-                    // A tag table follows
-    
-                    DWORD currentOffset = offset + 4 + 14 + sizeof icc;
-    
-                    DWORD tagCount = GetDWORD( currentOffset, false );
-                    currentOffset += 4;
-                    prf( "ICC tag table has %d entries\n", tagCount );
-    
-                    for ( DWORD tag = 0; tag < tagCount; tag++ )
+                    prf( "invalid short ICC_PROFILE APP2 segment\n" );
+                    invalidICC = true;
+                }
+                else
+                {
+                    BYTE sequence = GetBYTE( dataOffset + 12 );
+                    BYTE segmentCount = GetBYTE( dataOffset + 13 );
+                    if ( 0 == sequence || 0 == segmentCount || sequence > segmentCount ||
+                         ( 0 != iccSegmentCount && iccSegmentCount != segmentCount ) )
                     {
-                        ICC_TAG t;
-                        t.sig[0] = GetBYTE( currentOffset );
-                        t.sig[1] = GetBYTE( currentOffset + 1 );
-                        t.sig[2] = GetBYTE( currentOffset + 2 );
-                        t.sig[3] = GetBYTE( currentOffset + 3 );
-                        t.dataOffset = GetDWORD( currentOffset + 4, false );
-                        t.dataSize = GetDWORD( currentOffset + 8, false );
-    
-                        DWORD value_offset = icc_offset + t.dataOffset;
-                        PrintICCValue( t, value_offset );
-                        currentOffset += sizeof t;
+                        prf( "invalid ICC_PROFILE chunk sequence %d of %d\n", sequence, segmentCount );
+                        invalidICC = true;
+                    }
+                    else
+                    {
+                        if ( 0 == iccSegmentCount )
+                        {
+                            iccSegmentCount = segmentCount;
+                            iccChunks.resize( segmentCount );
+                        }
+
+                        vector<BYTE> & chunk = iccChunks[ sequence - 1 ];
+                        if ( !chunk.empty() )
+                        {
+                            prf( "duplicate ICC_PROFILE chunk %d\n", sequence );
+                            invalidICC = true;
+                        }
+                        else
+                        {
+                            size_t chunkLength = data_length - 14;
+                            if ( 0 == chunkLength )
+                            {
+                                prf( "empty ICC_PROFILE chunk %d\n", sequence );
+                                invalidICC = true;
+                            }
+                            else
+                            {
+                                chunk.resize( chunkLength );
+                                GetBytes( dataOffset + 14, chunk.data(), (int) chunkLength );
+                            }
+                        }
                     }
                 }
             }
         }
         else if ( MARKER_SOS == segment )
         {
-            DWORD o = offset + 4;
-
-            BYTE numberOfComponents = GetBYTE( o++ );
-            prf( "number of components:                 %d\n", numberOfComponents );
-
-            if ( numberOfComponents > 4 )
-                numberOfComponents = 4;
-
-            BYTE c_ID[ 4 ];
-            BYTE c_Huff[ 4 ];
-
-            for ( int i = 0; i < numberOfComponents; i++ )
+            if ( data_length < 1 )
             {
-                c_ID[ i ] = GetBYTE( o++ );
-                c_Huff[ i ] = GetBYTE( o++ );
+                prf( "invalid JPEG scan header\n" );
+                break;
             }
+            BYTE numberOfComponents = GetBYTE( dataOffset );
+            if ( data_length < 1 + (size_t) numberOfComponents * 2 + 3 )
+            {
+                prf( "invalid JPEG scan component table\n" );
+                break;
+            }
+            prf( "number of components:                 %d\n", numberOfComponents );
 
             for ( int i = 0; i < numberOfComponents; i++ )
             {
                 if ( g_FullInformation )
                 {
-                    BYTE c = c_ID[ i ];
+                    BYTE c = GetBYTE( dataOffset + 1 + i * 2 );
                     prf( "  Component ID [%d]: %s", i, ( 1 == c ) ? "Y" : ( 2 == c ) ? "Cb" : ( 3 == c ) ? "Cr" : ( 4 == c ) ? "I" : ( 5 == c ) ? "Q" : "unknown" );
-                    prf( " -- DC table: %d, AC table %d\n", c_Huff[ i ] & 0xf, c_Huff[ i ] >> 4 );
+                    BYTE tables = GetBYTE( dataOffset + 2 + i * 2 );
+                    prf( " -- DC table: %d, AC table %d\n", tables & 0xf, tables >> 4 );
                 }
             }
 
-            bool normal = ( ( 3 == numberOfComponents ) && ( 1 == c_ID[ 0 ] ) && ( 2 == c_ID[ 1 ] ) && ( 3 == c_ID[ 2 ] ) );
+            __int64 scanOffset = offset + length + 2;
+            const size_t scanBufferSize = 64 * 1024 + 1;
+            vector<BYTE> scanBuffer( scanBufferSize );
+            bool foundMarker = false;
+            while ( scanOffset + 1 < fileLength )
+            {
+                size_t available = (size_t) min( (__int64) scanBufferSize, fileLength - scanOffset );
+                GetBytes( scanOffset, scanBuffer.data(), (int) available );
+                for ( size_t i = 0; i + 1 < available; )
+                {
+                    if ( 0xff != scanBuffer[ i ] )
+                    {
+                        i++;
+                        continue;
+                    }
 
-            break;
+                    size_t markerByteOffset = i + 1;
+                    while ( markerByteOffset < available && 0xff == scanBuffer[ markerByteOffset ] )
+                        markerByteOffset++;
+                    if ( markerByteOffset == available )
+                        break;
+
+                    BYTE scanMarker = scanBuffer[ markerByteOffset ];
+                    if ( 0 == scanMarker || ( scanMarker >= 0xd0 && scanMarker <= 0xd7 ) )
+                    {
+                        i = markerByteOffset + 1;
+                        continue;
+                    }
+
+                    offset = scanOffset + markerByteOffset - 1;
+                    foundMarker = true;
+                    break;
+                }
+                if ( foundMarker )
+                    break;
+                if ( available <= 1 )
+                    break;
+                scanOffset += available - 1;
+            }
+            if ( !foundMarker )
+                break;
+            continue;
         }
         else if ( MARKER_PS3 == segment )
         {
             prf( "photoshop irb data:\n" );
 
-            DumpBinaryData( offset + 4, 0, data_length, 8, 0 );
+            DumpBinaryData( dataOffset, 0, (DWORD) data_length, 8, 0 );
         }
         else if ( MARKER_APP1 == segment )
         {
-            char app1Header[ 5 ];
-            GetBytes( (__int64) offset + 4, app1Header, 4 );
-            app1Header[4] = 0;
+            char app1Header[ 5 ] = { 0 };
+            if ( data_length >= 4 )
+                GetBytes( dataOffset, app1Header, 4 );
 
             if ( g_FullInformation )
                 prf( "app1 header: %s\n", app1Header );
@@ -4676,54 +7664,75 @@ int ParseOldJpg( DWORD startingOffset = 0 )
             }
             else if ( !stricmp( app1Header, "http" ) )
             {
-                // there will be a null-terminated header string then another string with xmp data
-
-                //DumpBinaryData( offset + 4, 0, data_length, 8, 0 );
-
-                unique_ptr<char> bytes( new char[ data_length + 1 ] );
-                GetBytes( (__int64) offset + 4, bytes.get(), data_length );
-                bytes.get()[ data_length ] = 0;
-                int headerlen = strlen( bytes.get() );
-
-                prf( "adobe header: %s\n", bytes.get() );
-                prf( "adobe data:   %s\n", bytes.get() + headerlen + 1 );
-                PrintXMPData( bytes.get() + headerlen + 1 );
+                unique_ptr<char[]> bytes( new char[ data_length + 1 ] );
+                GetBytes( dataOffset, bytes.get(), (int) data_length );
+                bytes[ data_length ] = 0;
+                const char xmpIdentifier[] = "http://ns.adobe.com/xap/1.0/";
+                size_t identifierLength = sizeof( xmpIdentifier ) - 1;
+                if ( data_length > identifierLength &&
+                     0 == memcmp( bytes.get(), xmpIdentifier, identifierLength ) &&
+                     0 == bytes[ identifierLength ] )
+                    PrintXMPData( bytes.get() + identifierLength + 1, data_length - identifierLength - 1 );
             }
         }
         else if ( MARKER_DRI == segment )
         {
-            WORD restart_interval = GetWORD( offset + 4, false );
-            prf( "define restart interval:   %12d\n", restart_interval );
+            if ( data_length >= 2 )
+                prf( "define restart interval:   %12d\n", GetWORD( dataOffset, false ) );
         }
         else if ( MARKER_APP14 == segment )
         {
-            DWORD app14_offset = offset + 4 + 5;
+            if ( data_length >= 12 )
+            {
+                char signature[ 5 ] = { 0 };
+                GetBytes( dataOffset, signature, 5 );
+                if ( 0 == memcmp( signature, "Adobe", 5 ) )
+                {
+                    WORD DCTEncodeVersion = GetWORD( dataOffset + 5, false );
+                    WORD App14Flags0 = GetWORD( dataOffset + 7, false );
+                    WORD App14Flags1 = GetWORD( dataOffset + 9, false );
+                    BYTE ColorTransform = GetBYTE( dataOffset + 11 );
+                    adobeColorTransform = ColorTransform;
 
-            WORD DCTEncodeVersion = GetWORD( app14_offset, false );
-            WORD App14Flags0 = GetWORD( app14_offset + 2, false );
-            WORD App14Flags1 = GetWORD( app14_offset + 4, false );
-            WORD ColorTransform = GetBYTE( app14_offset + 5 );
-
-            prf( "app14 Adobe data:\n" );
-            prf( "  DCT encode version:      %12d\n", DCTEncodeVersion );
-            prf( "  app14 flags0:            %12d\n", App14Flags0 );
-            prf( "  app14 flags1:            %12d\n", App14Flags1 );
-            prf( "  color transform:         %12d (%s)\n", ColorTransform, GetJPGApp14ColorTransform( ColorTransform ) );
+                    prf( "app14 Adobe data:\n" );
+                    prf( "  DCT encode version:      %12d\n", DCTEncodeVersion );
+                    prf( "  app14 flags0:            %12d\n", App14Flags0 );
+                    prf( "  app14 flags1:            %12d\n", App14Flags1 );
+                    prf( "  color transform:         %12d (%s)\n", ColorTransform, GetJPGApp14ColorTransform( ColorTransform ) );
+                }
+            }
         }
         else
         {
-            prf( "unparsed segment %#x data_length %d\n", segment, data_length );
-            DumpBinaryData( offset + 4, 0, data_length, 8, offset + 4 );
+            prf( "unparsed segment %#x data_length %u\n", segment, (unsigned int) data_length );
+            DumpBinaryData( dataOffset, 0, (DWORD) data_length, 8, (DWORD) dataOffset );
         }
 
-        if ( 0 == length )
-            break;
-
-        // note: this will not work for many segments, where additional math is required to find lengths.
-        // Luckily, the 0xc0 Start Of Frame 0 SOF0 segment generally comes early
-
         offset += ( length + 2 );
-    } while (true);
+    }
+
+    if ( !invalidICC && 0 != iccSegmentCount )
+    {
+        bool complete = true;
+        size_t profileLength = 0;
+        for ( const vector<BYTE> & chunk : iccChunks )
+        {
+            if ( chunk.empty() )
+                complete = false;
+            profileLength += chunk.size();
+        }
+
+        if ( complete )
+        {
+            vector<BYTE> profile;
+            profile.reserve( profileLength );
+            for ( const vector<BYTE> & chunk : iccChunks )
+                profile.insert( profile.end(), chunk.begin(), chunk.end() );
+            PrintICCProfile( profile );
+        }
+        else
+            prf( "incomplete ICC_PROFILE sequence: found fewer than %d chunks\n", iccSegmentCount );
+    }
 
     return exifOffset;
 } //ParseOldJpg
@@ -4790,30 +7799,40 @@ void EnumerateFlac()
 {
     prf( "mimetype:                             audio/flac\n" );
 
-    // Data is big-endian!
+    __int64 fileLength = g_pStream->Length();
+    __int64 offset = 4;
+    unsigned long long bestPictureArea = 0;
+    DWORD bestPictureLength = 0;
+    bool sawStreamInfo = false;
 
-    ULONG offset = 4;
-
-    do
+    while ( offset <= fileLength && fileLength - offset >= 4 )
     {
-        ULONG blockHeader = GetDWORD( offset, false );
+        DWORD blockHeader = GetDWORD( offset, false );
         offset += 4;
 
         bool lastBlock = ( 0 != ( 0x80000000 & blockHeader ) );
         BYTE blockType = ( ( blockHeader >> 24 ) & 0x7f );
-        ULONG length = blockHeader & 0xffffff;
+        DWORD length = blockHeader & 0xffffff;
+        __int64 blockEnd = offset + length;
 
         if ( g_FullInformation )
-            prf( "FLAC header %#x, last block %d, block type %d, length %d, offset %#x\n", blockHeader, lastBlock, blockType, length, offset );
+            prf( "FLAC header %#x, last block %d, block type %d, length %d, offset %#I64d\n",
+                 blockHeader, lastBlock, blockType, length, offset );
 
-        // protect against malformed files
-
-        if ( 0 == length )
-            break;
+        if ( length > (QWORD) ( fileLength - offset ) )
+        {
+            prf( "invalid FLAC metadata block length: %u\n", length );
+            return;
+        }
 
         if ( 0 == blockType )
         {
-            // streaminfo
+            if ( sawStreamInfo || 34 != length )
+            {
+                prf( "invalid FLAC STREAMINFO block length or position: %u\n", length );
+                return;
+            }
+            sawStreamInfo = true;
 
             WORD minBlockSize = GetWORD( offset, false );
             WORD maxBlockSize = GetWORD( offset + 2, false );
@@ -4826,22 +7845,25 @@ void EnumerateFlac()
             maxFrameSize &= 0x00ffffff;
 
             DWORD threeFields = GetDWORD( offset + 10, false );
-
             DWORD sampleRate = threeFields >> 12;
-            BYTE channelCount = 1 + ( threeFields >> 9 ) & 0x7;
-            BYTE bitsPerSample = 1 + ( ( threeFields >> 4 ) & 0x1f );
+            BYTE channelCount = (BYTE) ( 1 + ( ( threeFields >> 9 ) & 0x7 ) );
+            BYTE bitsPerSample = (BYTE) ( 1 + ( ( threeFields >> 4 ) & 0x1f ) );
 
             unsigned long long ullSamples = GetULONGLONG( offset + 13, false );
-
             ullSamples &= 0x0fffffffffffffff;
             ullSamples >>= 24;
 
-            DWORD lengthInSeconds = (DWORD) ( ullSamples / (unsigned long long) sampleRate );
-            DWORD lengthInMinutes = lengthInSeconds / 60;
-            DWORD remainderSeconds = lengthInSeconds % 60;
+            if ( 0 == sampleRate )
+            {
+                prf( "invalid FLAC sample rate: 0\n" );
+                return;
+            }
+
+            unsigned long long lengthInSeconds = ullSamples / sampleRate;
+            unsigned long long lengthInMinutes = lengthInSeconds / 60;
+            unsigned long long remainderSeconds = lengthInSeconds % 60;
 
             prf( "Stream Info:\n" );
-
             prf( "  Minimum block size      %13d\n", minBlockSize );
             prf( "  Maximum block size      %13d\n", maxBlockSize );
             prf( "  Minimum frame size      %13d\n", minFrameSize );
@@ -4849,172 +7871,235 @@ void EnumerateFlac()
             prf( "  Sample rate per sec     %13d\n", sampleRate );
             prf( "  Channel count           %13d\n", channelCount );
             prf( "  Bits per sample         %13d\n", bitsPerSample );
-            prf( "  Samples                 %13I64d\n", ullSamples );
-            prf( "  Length in min:sec       %10d:%02d\n", lengthInMinutes, remainderSeconds );
+            prf( "  Samples                 %13I64u\n", ullSamples );
+            prf( "  Length in min:sec       %10I64u:%02I64u\n", lengthInMinutes, remainderSeconds );
             prf( "  MD5 signature                       " );
 
-            DWORD o = offset + 4 + 6 + 8;
-
-            for ( int i = 0; i < ( 16 / 4 ); i++ )
+            for ( int i = 0; i < 4; i++ )
             {
-                DWORD x = GetDWORD( o, false );
-                o += 4;
+                DWORD x = GetDWORD( offset + 18 + i * 4, false );
                 prf( "%08x", x );
             }
             prf( "\n" );
         }
         else if ( 4 == blockType )
         {
-            // Vorbis_comment. This data is little-endian, unlike the rest of FLAC files
-
             prf( "Comments:\n" );
-
-            DWORD o = offset;
-            DWORD vendorLength = GetDWORD( o, true );
-            o += 4;
-            unique_ptr<WCHAR> vendor( GetUTF8( o, vendorLength ) );
-            o += vendorLength;
-
-            wprf( L"  Vendor                              %ws\n", vendor.get() );
-
-            DWORD items = GetDWORD( o, true );
-            o += 4;
-
-            for ( DWORD i = 0; i < items; i++ )
+            if ( length < sizeof( DWORD ) )
             {
-                DWORD itemLen = GetDWORD( o, true );
-                o += 4;
-
-                unique_ptr<WCHAR> item( GetUTF8( o, itemLen ) );
-                o += itemLen;
-
-                WCHAR field[ 100 ];
-                WCHAR * equal = wcschr( item.get(), L'=' );
-                int len = ( 1 + equal - item.get() );
-                if ( ( 0 != equal ) && ( len < _countof( field ) ) )
+                prf( "invalid FLAC Vorbis comment block: missing vendor length\n" );
+            }
+            else
+            {
+                __int64 o = offset;
+                DWORD vendorLength = GetDWORD( o, true );
+                o += sizeof DWORD;
+                if ( vendorLength > (QWORD) ( blockEnd - o ) )
                 {
-                    CopyMemory( field, item.get(), 2 * len );
-                    field[ len ] = 0;
-
-                    const WCHAR * pwcName = LookupFlacField( field );
-
-                    if ( NULL == pwcName )
-                        wprf( L"  %ws\n", item.get() );
+                    prf( "invalid FLAC Vorbis vendor length: %u\n", vendorLength );
+                }
+                else
+                {
+                    unique_ptr<WCHAR[]> vendor = GetUTF8( o, vendorLength );
+                    o += vendorLength;
+                    if ( !vendor )
+                    {
+                        prf( "could not decode FLAC Vorbis vendor string\n" );
+                    }
                     else
                     {
-                        const WCHAR * value = equal + 1;
-
-                        if ( !wcscmp( pwcName, L"Lyrics" ) )// && ( !wcschr( value, L'\r' ) || !wcschr( value, L'\n' ) ) )
-                            wprf( L"  %-15ws\n%ws\n", pwcName, value );
+                        wprf( L"  Vendor                              %ls\n", vendor.get() );
+                        if ( blockEnd - o < sizeof DWORD )
+                        {
+                            prf( "invalid FLAC Vorbis comment block: missing item count\n" );
+                        }
                         else
-                            wprf( L"  %-15ws                     %ws\n", pwcName, value );
+                        {
+                            DWORD items = GetDWORD( o, true );
+                            o += sizeof DWORD;
+                            for ( DWORD i = 0; i < items; i++ )
+                            {
+                                if ( blockEnd - o < sizeof DWORD )
+                                {
+                                    prf( "truncated FLAC Vorbis comment length\n" );
+                                    break;
+                                }
+
+                                DWORD itemLength = GetDWORD( o, true );
+                                o += sizeof DWORD;
+                                if ( itemLength > (QWORD) ( blockEnd - o ) )
+                                {
+                                    prf( "invalid FLAC Vorbis comment length: %u\n", itemLength );
+                                    break;
+                                }
+
+                                unique_ptr<WCHAR[]> item = GetUTF8( o, itemLength );
+                                o += itemLength;
+                                if ( !item )
+                                {
+                                    prf( "could not decode FLAC Vorbis comment\n" );
+                                    continue;
+                                }
+
+                                WCHAR * equal = wcschr( item.get(), L'=' );
+                                if ( NULL == equal )
+                                {
+                                    wprf( L"  %ls\n", item.get() );
+                                    continue;
+                                }
+
+                                size_t fieldLength = (size_t) ( equal - item.get() ) + 1;
+                                const WCHAR * fieldName = item.get();
+                                const WCHAR * value = equal + 1;
+                                WCHAR field[ 100 ];
+                                if ( fieldLength >= _countof( field ) )
+                                {
+                                    wprf( L"  %ls\n", item.get() );
+                                    continue;
+                                }
+
+                                CopyMemory( field, fieldName, fieldLength * sizeof( WCHAR ) );
+                                field[ fieldLength ] = 0;
+                                const WCHAR * displayName = LookupFlacField( field );
+                                if ( NULL == displayName )
+                                    wprf( L"  %ls\n", item.get() );
+                                else if ( !wcscmp( displayName, L"Lyrics" ) )
+                                    wprf( L"  %-15ls\n%ls\n", displayName, value );
+                                else
+                                    wprf( L"  %-15ls                     %ls\n", displayName, value );
+                            }
+                        }
                     }
                 }
             }
         }
         else if ( 6 == blockType )
         {
-            // Picture
-
             prf( "Picture:\n" );
-
-            DWORD o = offset;
-
-            DWORD pictureType = GetDWORD( o, false );
-            prf( "  Picture type            %13d ", pictureType );
-
-            if ( 0 == pictureType ) prf( "Other" );
-            else if ( 1 == pictureType ) prf( "32x32 pixels 'file icon' (PNG only)" );
-            else if ( 2 == pictureType ) prf( "Other file icon" );
-            else if ( 3 == pictureType ) prf( "Cover (front)" );
-            else if ( 4 == pictureType ) prf( "Cover (back)" );
-            else if ( 5 == pictureType ) prf( "Leaflet page" );
-            else if ( 6 == pictureType ) prf( "Media (e.g. label side of CD)" );
-            else if ( 7 == pictureType ) prf( "Lead artist/lead performer/soloist" );
-            else if ( 8 == pictureType ) prf( "Artist/performer" );
-            else if ( 9 == pictureType ) prf( "Conductor" );
-            else if ( 10 == pictureType ) prf( "Band/Orchestra" );
-            else if ( 11 == pictureType ) prf( "Composer" );
-            else if ( 12 == pictureType ) prf( "Lyricist/text writer" );
-            else if ( 13 == pictureType ) prf( "Recording Location" );
-            else if ( 14 == pictureType ) prf( "During recording" );
-            else if ( 15 == pictureType ) prf( "During performance" );
-            else if ( 16 == pictureType ) prf( "Movie/video screen capture" );
-            else if ( 17 == pictureType ) prf( "A bright coloured fish" );
-            else if ( 18 == pictureType ) prf( "Illustration" );
-            else if ( 19 == pictureType ) prf( "Band/artist logotype" );
-            else if ( 20 == pictureType ) prf( "Publisher/Studio logotype" );
-            else prf( "(Unknown pictureType)" );
-
-            prf( "\n" );
-            o += 4;
-
-            DWORD mimeTypeBytes = GetDWORD( o, false );
-            if ( mimeTypeBytes > 1000 )
+            if ( length < 32 )
             {
-                prf( "malformed mime type bytes? %#x\n", mimeTypeBytes );
-                return;
+                prf( "invalid FLAC picture block: too short\n" );
             }
-
-            o += 4;
-
-            unique_ptr<char> mimeType( new char [ mimeTypeBytes + 1 ] );
-            mimeType.get()[ mimeTypeBytes ] = 0;
-            g_pStream->Seek( o );
-            g_pStream->Read( mimeType.get(), mimeTypeBytes );
-            prf( "  mime type                           %s\n", mimeType.get() );
-
-            o += mimeTypeBytes;
-
-            DWORD descriptionBytes = GetDWORD( o, false );
-            if ( descriptionBytes > 1000 )
+            else
             {
-                prf( "malformed description bytes? %#x\n", descriptionBytes );
-                return;
-            }
+                __int64 o = offset;
+                DWORD pictureType = GetDWORD( o, false );
+                prf( "  Picture type            %13u ", pictureType );
+                if ( 0 == pictureType ) prf( "Other" );
+                else if ( 1 == pictureType ) prf( "32x32 pixels 'file icon' (PNG only)" );
+                else if ( 2 == pictureType ) prf( "Other file icon" );
+                else if ( 3 == pictureType ) prf( "Cover (front)" );
+                else if ( 4 == pictureType ) prf( "Cover (back)" );
+                else if ( 5 == pictureType ) prf( "Leaflet page" );
+                else if ( 6 == pictureType ) prf( "Media (e.g. label side of CD)" );
+                else if ( 7 == pictureType ) prf( "Lead artist/lead performer/soloist" );
+                else if ( 8 == pictureType ) prf( "Artist/performer" );
+                else if ( 9 == pictureType ) prf( "Conductor" );
+                else if ( 10 == pictureType ) prf( "Band/Orchestra" );
+                else if ( 11 == pictureType ) prf( "Composer" );
+                else if ( 12 == pictureType ) prf( "Lyricist/text writer" );
+                else if ( 13 == pictureType ) prf( "Recording Location" );
+                else if ( 14 == pictureType ) prf( "During recording" );
+                else if ( 15 == pictureType ) prf( "During performance" );
+                else if ( 16 == pictureType ) prf( "Movie/video screen capture" );
+                else if ( 17 == pictureType ) prf( "A bright coloured fish" );
+                else if ( 18 == pictureType ) prf( "Illustration" );
+                else if ( 19 == pictureType ) prf( "Band/artist logotype" );
+                else if ( 20 == pictureType ) prf( "Publisher/Studio logotype" );
+                else prf( "(Unknown pictureType)" );
+                prf( "\n" );
+                o += 4;
 
-            o += 4;
+                DWORD mimeTypeLength = GetDWORD( o, false );
+                o += 4;
+                if ( mimeTypeLength > (QWORD) ( blockEnd - o ) )
+                {
+                    prf( "invalid FLAC picture MIME type length: %u\n", mimeTypeLength );
+                }
+                else
+                {
+                    unique_ptr<char[]> mimeType( new char[ (size_t) mimeTypeLength + 1 ] );
+                    if ( mimeTypeLength &&
+                         ( !g_pStream->Seek( o ) ||
+                           g_pStream->Read( mimeType.get(), mimeTypeLength ) != mimeTypeLength ) )
+                    {
+                        prf( "could not read FLAC picture MIME type\n" );
+                    }
+                    else
+                    {
+                        mimeType[ mimeTypeLength ] = 0;
+                        prf( "  mime type                           %s\n", mimeType.get() );
+                        o += mimeTypeLength;
 
-            unique_ptr<char> description( new char [ descriptionBytes + 1 ] );
-            description.get()[ descriptionBytes ] = 0;
-            g_pStream->Seek( o );
-            g_pStream->Read( description.get(), descriptionBytes );
-            prf( "  Description             %s\n", description.get() );
+                        if ( blockEnd - o < sizeof DWORD )
+                        {
+                            prf( "invalid FLAC picture description length\n" );
+                        }
+                        else
+                        {
+                            DWORD descriptionLength = GetDWORD( o, false );
+                            o += sizeof DWORD;
+                            if ( descriptionLength > (QWORD) ( blockEnd - o ) )
+                            {
+                                prf( "invalid FLAC picture description length: %u\n", descriptionLength );
+                            }
+                            else
+                            {
+                                unique_ptr<WCHAR[]> description = GetUTF8( o, descriptionLength );
+                                o += descriptionLength;
+                                if ( description )
+                                    wprf( L"  Description             %ls\n", description.get() );
+                                else
+                                    prf( "could not decode FLAC picture description\n" );
 
-            o += descriptionBytes;
+                                if ( blockEnd - o < 20 )
+                                {
+                                    prf( "invalid FLAC picture dimensions or image length\n" );
+                                }
+                                else
+                                {
+                                    DWORD width = GetDWORD( o, false ); o += 4;
+                                    DWORD height = GetDWORD( o, false ); o += 4;
+                                    DWORD bpp = GetDWORD( o, false ); o += 4;
+                                    DWORD indexedColors = GetDWORD( o, false ); o += 4;
+                                    DWORD imageLength = GetDWORD( o, false ); o += 4;
+                                    prf( "  Width                   %13u\n", width );
+                                    prf( "  Height                  %13u\n", height );
+                                    prf( "  Bits per pixel          %13u\n", bpp );
+                                    prf( "  Indexed colors          %13u\n", indexedColors );
+                                    prf( "  Image size              %13u\n", imageLength );
 
-            DWORD width = GetDWORD( o, false );
-            prf( "  Width                   %13d\n", width );
-            o += 4;
-
-            DWORD height = GetDWORD( o, false );
-            prf( "  Height                  %13d\n", height );
-            o += 4;
-
-            DWORD bpp = GetDWORD( o, false );
-            prf( "  Bits per pixel          %13d\n", bpp );
-            o += 4;
-
-            DWORD indexedColors = GetDWORD( o, false );
-            prf( "  Indexed colors          %13d\n", indexedColors );
-            o += 4;
-
-            DWORD imageLength = GetDWORD( o, false );
-            prf( "  Image size              %13d\n", imageLength );
-            o += 4;
-
-            if ( ( imageLength > 2 ) && IsPerhapsAnImage( o, 0 ) )
-            {
-                g_Embedded_Image_Offset = o;
-                g_Embedded_Image_Length = imageLength;
+                                    if ( imageLength > (QWORD) ( blockEnd - o ) )
+                                    {
+                                        prf( "invalid FLAC picture image length: %u\n", imageLength );
+                                    }
+                                    else if ( imageLength > 2 && IsPerhapsAnImage( o, 0 ) )
+                                    {
+                                        unsigned long long pictureArea = (unsigned long long) width * height;
+                                        if ( pictureArea > bestPictureArea ||
+                                             ( pictureArea == bestPictureArea && imageLength > bestPictureLength ) )
+                                        {
+                                            bestPictureArea = pictureArea;
+                                            bestPictureLength = imageLength;
+                                            g_Embedded_Image_Offset = o;
+                                            g_Embedded_Image_Length = imageLength;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
 
-        offset += length;
-
+        offset = blockEnd;
         if ( lastBlock )
             break;
-    } while ( true );
+    }
+
+    if ( !sawStreamInfo )
+        prf( "missing FLAC STREAMINFO block\n" );
 } //EnumerateFlac
 
 class HeifStream
@@ -5023,6 +8108,7 @@ class HeifStream
         __int64 offset;
         __int64 length;
         CStream * pStream;
+        bool valid;
 
     public:
         HeifStream( CStream *ps, __int64 o, __int64 l )
@@ -5030,72 +8116,282 @@ class HeifStream
             offset = o;
             length = l;
             pStream = ps;
+            valid = ( NULL != ps && o >= 0 && l >= 0 );
         }
 
         __int64 Length() { return length; }
         __int64 Offset() { return offset; }
         CStream * Stream() { return pStream; }
+        bool Valid() const { return valid; }
+        __int64 SetLengthLimit( __int64 limit )
+        {
+            __int64 previousLength = length;
+            if ( limit >= 0 && limit <= length )
+                length = limit;
+            else
+                valid = false;
+            return previousLength;
+        }
+        void RestoreLength( __int64 previousLength ) { length = previousLength; }
+
+        bool CanRead( __int64 streamOffset, __int64 byteCount ) const
+        {
+            return valid && streamOffset >= 0 && byteCount >= 0 &&
+                   streamOffset <= length && byteCount <= length - streamOffset;
+        }
+
+        ULONGLONG GetVariable( __int64 & streamOffset, int byteCount )
+        {
+            if ( byteCount < 0 || byteCount > 8 || !CanRead( streamOffset, byteCount ) ||
+                 offset > LLONG_MAX - streamOffset )
+            {
+                valid = false;
+                return 0;
+            }
+
+            BYTE bytes[ 8 ] = {};
+            if ( byteCount &&
+                 ( !pStream->Seek( offset + streamOffset ) ||
+                   pStream->Read( bytes, byteCount ) != (ULONG) byteCount ) )
+            {
+                valid = false;
+                return 0;
+            }
+
+            ULONGLONG value = 0;
+            for ( int i = 0; i < byteCount; i++ )
+                value = ( value << 8 ) | bytes[ i ];
+            streamOffset += byteCount;
+            return value;
+        }
 
         DWORD GetDWORD( __int64 & streamOffset, bool littleEndian )
         {
-            DWORD dw = 0;
-
-            if ( pStream->Seek( offset + streamOffset ) )
-            {
-                pStream->Read( &dw, sizeof dw );
-
-                if ( !littleEndian )
-                    dw = _byteswap_ulong( dw );
-
-                streamOffset += sizeof dw;
-            }
-
-            return dw;
+            DWORD value = (DWORD) GetVariable( streamOffset, sizeof value );
+            return littleEndian ? _byteswap_ulong( value ) : value;
         } //GetDWORD
 
         WORD GetWORD( __int64 & streamOffset, bool littleEndian )
         {
-            WORD w = 0;
-
-            if ( pStream->Seek( offset + streamOffset ) )
-            {
-                pStream->Read( &w, sizeof w );
-        
-                if ( !littleEndian )
-                    w = _byteswap_ushort( w );
-   
-                streamOffset += sizeof w;
-            }
-        
-            return w;
+            WORD value = (WORD) GetVariable( streamOffset, sizeof value );
+            return littleEndian ? _byteswap_ushort( value ) : value;
         } //GetWORD
 
         byte GetBYTE( __int64 & streamOffset )
         {
-            byte b = 0;
-
-            if ( pStream->Seek( offset + streamOffset ) )
-            {
-                pStream->Read( &b, sizeof b );
-
-                streamOffset += sizeof b;
-            }
-
-            return b;
+            return (BYTE) GetVariable( streamOffset, sizeof( BYTE ) );
         } //GetBYTE
 
         void GetBytes( __int64 & streamOffset, void * pData, int byteCount )
         {
-            memset( pData, 0, byteCount );
+            if ( byteCount < 0 || !CanRead( streamOffset, byteCount ) ||
+                 offset > LLONG_MAX - streamOffset )
+            {
+                valid = false;
+                return;
+            }
 
-            if ( pStream->Seek( offset + streamOffset ) )
-                pStream->Read( pData, byteCount );
+            memset( pData, 0, byteCount );
+            if ( byteCount &&
+                 ( !pStream->Seek( offset + streamOffset ) ||
+                   pStream->Read( pData, byteCount ) != (ULONG) byteCount ) )
+                valid = false;
         }
 }; //HeifStream
 
+struct M4AParseState
+{
+    DWORD movieTimeScale = 0;
+    ULONGLONG movieDuration = 0;
+    ULONGLONG mediaDataBytes = 0;
+    DWORD sampleRate = 0;
+    WORD channels = 0;
+    WORD bitsPerSample = 0;
+    bool audioTrack = false;
+    string audioFormat;
+    bool metadataHeaderPrinted = false;
+};
+
+const char * M4AMetadataName( const char * tag )
+{
+    if ( (BYTE) tag[ 0 ] == 0xa9 )
+    {
+        if ( 0 == strcmp( tag + 1, "nam" ) ) return "Title";
+        if ( 0 == strcmp( tag + 1, "ART" ) ) return "Artist";
+        if ( 0 == strcmp( tag + 1, "alb" ) ) return "Album";
+        if ( 0 == strcmp( tag + 1, "cmt" ) ) return "Comment";
+        if ( 0 == strcmp( tag + 1, "day" ) ) return "Year";
+        if ( 0 == strcmp( tag + 1, "gen" ) ) return "Genre";
+        if ( 0 == strcmp( tag + 1, "wrt" ) ) return "Composer";
+        if ( 0 == strcmp( tag + 1, "too" ) ) return "Encoder";
+        if ( 0 == strcmp( tag + 1, "grp" ) ) return "Grouping";
+        if ( 0 == strcmp( tag + 1, "lyr" ) ) return "Lyrics";
+    }
+    else
+    {
+        if ( 0 == strcmp( tag, "aART" ) ) return "Album Artist";
+        if ( 0 == strcmp( tag, "cprt" ) ) return "Copyright";
+        if ( 0 == strcmp( tag, "trkn" ) ) return "Track";
+        if ( 0 == strcmp( tag, "disk" ) ) return "Disc";
+        if ( 0 == strcmp( tag, "covr" ) ) return "Cover Art";
+        if ( 0 == strcmp( tag, "tmpo" ) ) return "BPM";
+        if ( 0 == strcmp( tag, "cpil" ) ) return "Compilation";
+        if ( 0 == strcmp( tag, "pgap" ) ) return "Gapless Playback";
+    }
+
+    return NULL;
+}
+
+void ParseM4AData( HeifStream & hs, __int64 & offset, ULONGLONG boxLength,
+                   M4AParseState & state, const char * itemTag )
+{
+    ULONGLONG payloadLength = boxLength - 8;
+    if ( payloadLength < 8 )
+    {
+        prf( "invalid M4A metadata data box for %s\n", itemTag );
+        return;
+    }
+
+    DWORD dataType = hs.GetDWORD( offset, false ) & 0xff;
+    hs.GetDWORD( offset, false );
+    payloadLength -= 8;
+
+    const char * name = M4AMetadataName( itemTag );
+    if ( NULL == name )
+        return;
+
+    if ( !state.metadataHeaderPrinted )
+    {
+        prf( "M4A metadata:\n" );
+        state.metadataHeaderPrinted = true;
+    }
+
+    if ( 0 == strcmp( itemTag, "covr" ) )
+    {
+        prf( "  %-22s: %I64u bytes (%s)\n", name, payloadLength,
+             13 == dataType ? "JPEG" : 14 == dataType ? "PNG" : "image data" );
+    }
+    else if ( 0 == strcmp( itemTag, "trkn" ) || 0 == strcmp( itemTag, "disk" ) )
+    {
+        if ( payloadLength < 6 )
+        {
+            prf( "  %-22s: invalid track/disc data (%I64u bytes)\n", name, payloadLength );
+            return;
+        }
+        hs.GetWORD( offset, false );
+        WORD number = hs.GetWORD( offset, false );
+        WORD total = hs.GetWORD( offset, false );
+        prf( "  %-22s: %u", name, number );
+        if ( total )
+            prf( " of %u", total );
+        prf( "\n" );
+    }
+    else if ( 1 == dataType || 2 == dataType )
+    {
+        if ( payloadLength > 16 * 1024 * 1024 || payloadLength > MAXDWORD )
+        {
+            prf( "  %-22s: text too large to decode (%I64u bytes)\n", name, payloadLength );
+            return;
+        }
+
+        DWORD textLength = (DWORD) payloadLength;
+        unique_ptr<char[]> bytes( new char[ (size_t) textLength + 2 ] );
+        hs.GetBytes( offset, bytes.get(), (int) textLength );
+        if ( !hs.Valid() )
+        {
+            prf( "  %-22s: truncated text data\n", name );
+            return;
+        }
+
+        unique_ptr<WCHAR[]> text;
+        if ( 1 == dataType )
+            text = GetUTF8( hs.Offset() + offset, textLength );
+        else
+        {
+            if ( textLength & 1 )
+            {
+                prf( "  %-22s: invalid UTF-16 text length %u\n", name, textLength );
+                return;
+            }
+            text.reset( new WCHAR[ textLength / 2 + 1 ] );
+            for ( DWORD i = 0; i < textLength / 2; i++ )
+                text[ i ] = (WCHAR) ( (BYTE) bytes[ i * 2 ] << 8 | (BYTE) bytes[ i * 2 + 1 ] );
+            text[ textLength / 2 ] = 0;
+        }
+
+        if ( text )
+            wprf( L"  %-22S: %ls\n", name, text.get() );
+        else
+            prf( "  %-22s: could not decode text\n", name );
+    }
+    else if ( payloadLength <= 4 && payloadLength > 0 )
+    {
+        ULONGLONG value = hs.GetVariable( offset, (int) payloadLength );
+        prf( "  %-22s: %I64u\n", name, value );
+    }
+}
+
+void PrintHeifPrimaryProperties()
+{
+    if ( 0xffffffff == g_Heif_Primary_ItemID || g_Heif_Primary_Properties.empty() )
+        return;
+
+    bool printedDimensions = false;
+    bool printedBitDepth = false;
+    bool printedColorProfile = false;
+    bool printedRotation = false;
+    bool printedMirror = false;
+
+    for ( DWORD propertyID : g_Heif_Primary_Properties )
+    {
+        if ( 0 == propertyID || propertyID > g_Heif_Properties.size() )
+            continue;
+
+        const HeifProperty & property = g_Heif_Properties[ propertyID - 1 ];
+
+        if ( !printedDimensions && property.width && property.height )
+        {
+            prf( "HEIF primary image dimensions: %u x %u\n", property.width, property.height );
+            printedDimensions = true;
+        }
+
+        if ( !printedBitDepth && property.bitsPerChannel )
+        {
+            prf( "HEIF image bit depth: %u bits per channel\n", property.bitsPerChannel );
+            printedBitDepth = true;
+        }
+        else if ( !printedBitDepth && property.lumaBitDepth && property.chromaBitDepth )
+        {
+            prf( "HEIF image bit depth: %u-bit luma, %u-bit chroma\n",
+                 property.lumaBitDepth, property.chromaBitDepth );
+            printedBitDepth = true;
+        }
+
+        if ( property.hasRotation && !printedRotation && property.rotation )
+        {
+            prf( "HEIF image rotation: %u degrees counterclockwise\n", property.rotation * 90 );
+            printedRotation = true;
+        }
+
+        if ( property.hasMirror && !printedMirror )
+        {
+            prf( "HEIF image mirror axis: %s\n", property.mirrorAxis ? "vertical" : "horizontal" );
+            printedMirror = true;
+        }
+
+        if ( !printedColorProfile && !property.iccProfile.empty() )
+        {
+            prf( "HEIF ICC profile:\n" );
+            PrintICCProfile( property.iccProfile );
+            printedColorProfile = true;
+        }
+    }
+} //PrintHeifPrimaryProperties
+
 // Heif and CR3 use ISO Base Media File Format ISO/IEC 14496-12. This function walks those files and pulls out data including Exif offsets
 
-void EnumerateBoxes( HeifStream & hs, DWORD depth )
+void EnumerateBoxes( HeifStream & hs, DWORD depth, M4AParseState * m4a = NULL,
+                     bool insideIlst = false, const char * itemTag = NULL )
 {
     __int64 offset = 0;
     DWORD box = 0;
@@ -5109,12 +8405,14 @@ void EnumerateBoxes( HeifStream & hs, DWORD depth )
         if ( ( 0 == hs.Length() ) || ( offset >= hs.Length() ) )
             break;
 
+        if ( !hs.CanRead( offset, 8 ) )
+        {
+            prf( "%*struncated box header at offset %I64d\n", indent, "", offset );
+            break;
+        }
+
         __int64 boxOffset = offset;
         ULONGLONG boxLen = hs.GetDWORD( offset, false );
-
-        if ( 0 == boxLen )
-            break;
-
         DWORD dwTag = hs.GetDWORD( offset, false );
         char tag[ 5 ];
         tag[ 3 ] = dwTag & 0xff;
@@ -5123,17 +8421,34 @@ void EnumerateBoxes( HeifStream & hs, DWORD depth )
         tag[ 0 ] = ( dwTag >> 24 ) & 0xff;
         tag[ 4 ] = 0;
 
+        ULONGLONG headerLength = 8;
         if ( 1 == boxLen )
         {
+            if ( !hs.CanRead( offset, 8 ) )
+            {
+                prf( "%*struncated extended box header at offset %I64d\n", indent, "", boxOffset );
+                break;
+            }
+
             ULONGLONG high = hs.GetDWORD( offset, false );
             ULONGLONG low = hs.GetDWORD( offset, false );
-
             boxLen = ( high << 32 ) | low;
+            headerLength = 16;
         }
 
-        if ( boxLen > hs.Length() )
+        if ( !hs.Valid() )
         {
-            prf( "box length %lld is greater than the substream length %lld\n", boxLen, hs.Length() );
+            prf( "%*sinvalid box header at offset %I64d\n", indent, "", boxOffset );
+            break;
+        }
+
+        if ( 0 == boxLen )
+            boxLen = (ULONGLONG) ( hs.Length() - boxOffset );
+
+        if ( boxLen < headerLength || boxLen > (ULONGLONG) ( hs.Length() - boxOffset ) )
+        {
+            prf( "%*sinvalid %s box length %I64u at offset %I64d (remaining %I64d)\n",
+                 indent, "", tag, boxLen, boxOffset, hs.Length() - boxOffset );
             break;
         }
 
@@ -5148,10 +8463,142 @@ void EnumerateBoxes( HeifStream & hs, DWORD depth )
             DumpBinaryData( bytes.get(), toshow, 8 );
         }
 
-        if ( 0 == boxLen )
-            break;
+        size_t propertyIndex = 0;
+        bool isProperty = g_Heif_ReadingProperties;
+        if ( isProperty )
+        {
+            HeifProperty property;
+            property.type = tag;
+            propertyIndex = g_Heif_Properties.size();
+            g_Heif_Properties.push_back( property );
+        }
 
-        if ( !strcmp( tag, "ftyp" ) )
+        __int64 enclosingLength = hs.SetLengthLimit( boxOffset + (__int64) boxLen );
+
+        if ( m4a && insideIlst )
+        {
+            if ( !strcmp( tag, "data" ) && itemTag )
+                ParseM4AData( hs, offset, boxLen, *m4a, itemTag );
+            else if ( strcmp( tag, "mean" ) && strcmp( tag, "name" ) )
+            {
+                HeifStream hsChild( hs.Stream(), hs.Offset() + offset, boxLen - ( offset - boxOffset ) );
+                EnumerateBoxes( hsChild, depth + 1, m4a, true, tag );
+            }
+        }
+        else if ( m4a && !strcmp( tag, "ftyp" ) )
+        {
+            if ( boxLen - headerLength < 8 )
+                prf( "incomplete M4A file type box\n" );
+            else
+            {
+                char majorBrand[ 5 ] = {};
+                for ( int i = 0; i < 4; i++ )
+                    majorBrand[ i ] = (char) hs.GetBYTE( offset );
+                for ( int i = 3; i >= 0 && ' ' == majorBrand[ i ]; i-- )
+                    majorBrand[ i ] = 0;
+                DWORD minorVersion = hs.GetDWORD( offset, false );
+                prf( "M4A major brand: %s (minor version %u.%u.%u)\n", majorBrand,
+                     ( minorVersion >> 16 ) & 0xff, ( minorVersion >> 8 ) & 0xff, minorVersion & 0xff );
+
+                ULONGLONG compatibleLength = boxLen - headerLength - 8;
+                if ( compatibleLength >= 4 && compatibleLength <= 1024 )
+                {
+                    prf( "M4A compatible brands:" );
+                    while ( compatibleLength >= 4 )
+                    {
+                        char compatibleBrand[ 5 ] = {};
+                        for ( int i = 0; i < 4; i++ )
+                            compatibleBrand[ i ] = (char) hs.GetBYTE( offset );
+                        for ( int i = 3; i >= 0 && ' ' == compatibleBrand[ i ]; i-- )
+                            compatibleBrand[ i ] = 0;
+                        if ( compatibleBrand[ 0 ] )
+                            prf( " %s", compatibleBrand );
+                        compatibleLength -= 4;
+                    }
+                    prf( "\n" );
+                }
+            }
+        }
+        else if ( m4a && !strcmp( tag, "mvhd" ) )
+        {
+            if ( boxLen - headerLength < 20 )
+                prf( "incomplete M4A movie header\n" );
+            else
+            {
+                BYTE version = hs.GetBYTE( offset );
+                hs.GetBYTE( offset ); hs.GetBYTE( offset ); hs.GetBYTE( offset );
+                if ( 0 == version && boxLen - ( offset - boxOffset ) >= 16 )
+                {
+                    hs.GetDWORD( offset, false );
+                    hs.GetDWORD( offset, false );
+                    m4a->movieTimeScale = hs.GetDWORD( offset, false );
+                    m4a->movieDuration = hs.GetDWORD( offset, false );
+                }
+                else if ( 1 == version && boxLen - ( offset - boxOffset ) >= 28 )
+                {
+                    hs.GetVariable( offset, 8 );
+                    hs.GetVariable( offset, 8 );
+                    m4a->movieTimeScale = hs.GetDWORD( offset, false );
+                    m4a->movieDuration = hs.GetVariable( offset, 8 );
+                }
+                else
+                    prf( "unsupported M4A movie header version %u\n", version );
+            }
+        }
+        else if ( m4a && !strcmp( tag, "mdat" ) )
+        {
+            m4a->mediaDataBytes += boxLen - headerLength;
+        }
+        else if ( m4a && m4a->audioTrack && !strcmp( tag, "stsd" ) )
+        {
+            ULONGLONG contentLength = boxLen - headerLength;
+            if ( contentLength < 8 )
+                prf( "incomplete M4A sample description box\n" );
+            else
+            {
+                hs.GetDWORD( offset, false );
+                DWORD entryCount = hs.GetDWORD( offset, false );
+                if ( entryCount && contentLength >= 16 )
+                {
+                    ULONGLONG entryOffset = offset;
+                    DWORD entryLength = hs.GetDWORD( offset, false );
+                    char format[ 5 ] = {};
+                    for ( int i = 0; i < 4; i++ )
+                        format[ i ] = (char) hs.GetBYTE( offset );
+
+                    if ( entryLength < 36 || entryLength > contentLength - 8 )
+                        prf( "invalid M4A audio sample entry length %u\n", entryLength );
+                    else
+                    {
+                        hs.GetWORD( offset, false );
+                        hs.GetWORD( offset, false );
+                        hs.GetWORD( offset, false );
+                        hs.GetWORD( offset, false );
+                        hs.GetWORD( offset, false );
+                        hs.GetWORD( offset, false );
+                        hs.GetDWORD( offset, false );
+                        m4a->channels = hs.GetWORD( offset, false );
+                        m4a->bitsPerSample = hs.GetWORD( offset, false );
+                        hs.GetWORD( offset, false );
+                        hs.GetWORD( offset, false );
+                        m4a->sampleRate = hs.GetDWORD( offset, false ) >> 16;
+                        m4a->audioFormat = format;
+
+                        prf( "M4A audio format: %s\n", format );
+                        prf( "M4A audio channels: %u\n", m4a->channels );
+                        prf( "M4A audio bits per sample: %u\n", m4a->bitsPerSample );
+                        prf( "M4A audio sample rate: %u Hz\n", m4a->sampleRate );
+                    }
+                    offset = entryOffset + entryLength;
+                }
+            }
+        }
+        else if ( m4a && !strcmp( tag, "ilst" ) )
+        {
+            HeifStream hsChild( hs.Stream(), hs.Offset() + offset, boxLen - ( offset - boxOffset ) );
+            EnumerateBoxes( hsChild, depth + 1, m4a, true );
+        }
+        else if ( !strcmp( tag, "ftyp" ) )
         {
             char brand[ 5 ];
             for ( int i = 0; i < 4; i++ )
@@ -5162,6 +8609,17 @@ void EnumerateBoxes( HeifStream & hs, DWORD depth )
 
             //printf( "%*s major brand: %s, minor version: %#x\n", indent, "", brand, version );
         }
+        else if ( !strcmp( tag, "pitm" ) )
+        {
+            DWORD data = hs.GetDWORD( offset, false );
+            BYTE version = (BYTE) ( data >> 24 );
+            if ( version > 1 )
+                hs.GetDWORD( offset, false );
+            else if ( 0 == version )
+                g_Heif_Primary_ItemID = hs.GetWORD( offset, false );
+            else
+                g_Heif_Primary_ItemID = hs.GetDWORD( offset, false );
+        }
         else if ( !strcmp( tag, "meta" ) )
         {
             DWORD data = hs.GetDWORD( offset, true );
@@ -5170,7 +8628,21 @@ void EnumerateBoxes( HeifStream & hs, DWORD depth )
 
             HeifStream hsChild( hs.Stream(), hs.Offset() + offset, boxLen - ( offset - boxOffset ) );
 
-            EnumerateBoxes( hsChild, depth + 1 );
+            EnumerateBoxes( hsChild, depth + 1, m4a );
+        }
+        else if ( m4a && !strcmp( tag, "hdlr" ) )
+        {
+            if ( boxLen - headerLength < 12 )
+                prf( "incomplete M4A handler box\n" );
+            else
+            {
+                hs.GetDWORD( offset, false );
+                hs.GetDWORD( offset, false );
+                char handler[ 5 ] = {};
+                for ( int i = 0; i < 4; i++ )
+                    handler[ i ] = (char) hs.GetBYTE( offset );
+                m4a->audioTrack = 0 == strcmp( handler, "soun" );
+            }
         }
         else if ( !strcmp( tag, "iinf" ) )
         {
@@ -5192,7 +8664,30 @@ void EnumerateBoxes( HeifStream & hs, DWORD depth )
             {
                 HeifStream hsChild( hs.Stream(), hs.Offset() + offset, boxLen - ( offset - boxOffset ) );
 
-                EnumerateBoxes( hsChild, depth + 1 );
+                EnumerateBoxes( hsChild, depth + 1, m4a );
+            }
+        }
+        else if ( !strcmp( tag, "ipma" ) )
+        {
+            DWORD data = hs.GetDWORD( offset, false );
+            BYTE version = (BYTE) ( data >> 24 );
+            DWORD flags = data & 0x00ffffff;
+            DWORD entryCount = hs.GetDWORD( offset, false );
+            bool wideAssociations = 0 != ( flags & 1 );
+
+            for ( DWORD entry = 0; entry < entryCount && hs.Valid(); entry++ )
+            {
+                DWORD itemID = version ? hs.GetDWORD( offset, false ) : hs.GetWORD( offset, false );
+                BYTE associationCount = hs.GetBYTE( offset );
+
+                for ( BYTE association = 0; association < associationCount && hs.Valid(); association++ )
+                {
+                    WORD value = wideAssociations ? hs.GetWORD( offset, false ) : hs.GetBYTE( offset );
+                    DWORD propertyID = wideAssociations ? ( value & 0x7fff ) : ( value & 0x7f );
+
+                    if ( itemID == g_Heif_Primary_ItemID && propertyID )
+                        g_Heif_Primary_Properties.push_back( propertyID );
+                }
             }
         }
         else if ( !strcmp( tag, "infe" ) )
@@ -5237,166 +8732,213 @@ void EnumerateBoxes( HeifStream & hs, DWORD depth )
         {
             DWORD data = hs.GetDWORD( offset, false );
             BYTE version = (BYTE) ( ( data >> 24 ) & 0xff );
-            DWORD flags = data & 0x00ffffff;
-
-            //printf( "%*s data (version and flags) %#x, version %d, flags %#x\n", indent, "", data, version, flags );
-
             WORD values4 = hs.GetWORD( offset, false );
             int offsetSize = ( values4 >> 12 ) & 0xf;
             int lengthSize = ( values4 >> 8 ) & 0xf;
             int baseOffsetSize = ( values4 >> 4 ) & 0xf;
-            int indexSize = 0;
+            int indexSize = version >= 1 ? ( values4 & 0xf ) : 0;
+            DWORD itemCount = version >= 2 ? hs.GetDWORD( offset, false ) : hs.GetWORD( offset, false );
 
-            if ( version > 1 )
-                indexSize = ( values4 & 0xf );
-
-            int itemCount = 0;
-
-            if ( version < 2 )
-                itemCount = hs.GetWORD( offset, false );
-            else
-                itemCount = hs.GetDWORD( offset, false );
-
-            //printf( "%*s iloc offsetSize %d, lengthSize %d, baseOffsetSize %d, indexSize %d, itemCount %d\n",
-            //        indent, "", offsetSize, lengthSize, baseOffsetSize, indexSize, itemCount );
-
-            for ( int i = 0; i < itemCount; i++ )
+            if ( version > 2 || offsetSize > 8 || lengthSize > 8 || baseOffsetSize > 8 || indexSize > 8 )
             {
-                int itemID = 0;
-
-                if ( version < 2 )
-                    itemID = hs.GetWORD( offset, false );
-                else
-                    itemID = hs.GetWORD( offset, false );
-
-                BYTE constructionMethod = 0;
-
-                if ( version >= 1 )
+                prf( "%*sunsupported iloc version or field size\n", indent, "" );
+            }
+            else
+            {
+                for ( DWORD i = 0; i < itemCount && hs.Valid(); i++ )
                 {
-                    values4 = hs.GetWORD( offset, false );
-
-                    constructionMethod = ( values4 & 0xf );
-                }
-
-                WORD dataReferenceIndex = hs.GetWORD( offset, false );
-
-                __int64 baseOffset = 0;
-
-                if ( 4 == baseOffsetSize )
-                {
-                    baseOffset = hs.GetDWORD( offset, false );
-                }
-                else if ( 8 == baseOffsetSize )
-                {
-                    __int64 high = hs.GetDWORD( offset, false );
-                    __int64 low = hs.GetDWORD( offset, false );
-
-                    baseOffset = ( high << 32 ) | low;
-                }
-
-                WORD extentCount = hs.GetWORD( offset, false );
-
-                //printf( "%*s   item %d, itemID %d, constructionMethod %d, dataReferenceIndex %d, baseOffset %I64d, extentCount %d\n",
-                //        indent, "", i, itemID, constructionMethod, dataReferenceIndex, baseOffset, extentCount );
-
-                for ( int e = 0; e < extentCount; e++ )
-                {
-                    __int64 extentIndex = 0;
-                    __int64 extentOffset = 0;
-                    __int64 extentLength = 0;
-
-                    if ( version > 1 && indexSize > 0 )
+                    ULONGLONG itemID = version >= 2 ? hs.GetDWORD( offset, false ) : hs.GetWORD( offset, false );
+                    BYTE constructionMethod = 0;
+                    if ( version >= 1 )
                     {
-                        if ( 4 == indexSize )
-                        {
-                            extentIndex = hs.GetDWORD( offset, false );
-                        }
-                        else if ( 8 == indexSize )
-                        {
-                            __int64 high = hs.GetDWORD( offset, false );
-                            __int64 low = hs.GetDWORD( offset, false );
+                        values4 = hs.GetWORD( offset, false );
+                        constructionMethod = (BYTE) ( values4 & 0xf );
+                    }
 
-                            extentIndex = ( high << 32 ) | low;
+                    WORD dataReferenceIndex = hs.GetWORD( offset, false );
+                    ULONGLONG baseOffset = hs.GetVariable( offset, baseOffsetSize );
+                    WORD extentCount = hs.GetWORD( offset, false );
+                    ULONGLONG extentOffset = 0;
+                    ULONGLONG extentLength = 0;
+
+                    for ( WORD e = 0; e < extentCount && hs.Valid(); e++ )
+                    {
+                        if ( indexSize )
+                            hs.GetVariable( offset, indexSize );
+
+                        ULONGLONG currentExtentOffset = hs.GetVariable( offset, offsetSize );
+                        ULONGLONG currentExtentLength = hs.GetVariable( offset, lengthSize );
+
+                        if ( 0 == e )
+                        {
+                            extentOffset = currentExtentOffset;
+                            extentLength = currentExtentLength;
                         }
                     }
-
-                    if ( 4 == offsetSize )
-                    {
-                        extentOffset = hs.GetDWORD( offset, false );
-                    }
-                    else if ( 8 == offsetSize )
-                    {
-                        __int64 high = hs.GetDWORD( offset, false );
-                        __int64 low = hs.GetDWORD( offset, false );
-
-                        extentOffset = ( high << 32 ) | low;
-                    }
-
-                    if ( 4 == lengthSize )
-                    {
-                        extentLength = hs.GetDWORD( offset, false );
-                    }
-                    else if ( 8 == lengthSize )
-                    {
-                        __int64 high = hs.GetDWORD( offset, false );
-                        __int64 low = hs.GetDWORD( offset, false );
-
-                        extentLength = ( high << 32 ) | low;
-                    }
-
-                    //printf( "%*s     extent %d, extentIndex %I64d, extentOffset %I64d, extentLength %I64d\n",
-                    //        indent, "", e, extentIndex, extentOffset, extentLength );
 
                     if ( itemID == g_Heif_Exif_ItemID )
                     {
-                        g_Heif_Exif_Offset = extentOffset;
-                        g_Heif_Exif_Length = extentLength;
+                        if ( extentCount != 1 || dataReferenceIndex != 0 ||
+                             ( constructionMethod != 0 && constructionMethod != 1 ) ||
+                             extentLength < 4 ||
+                             baseOffset > ULLONG_MAX - extentOffset )
+                        {
+                            prf( "%*sunsupported or invalid Exif item location\n", indent, "" );
+                            continue;
+                        }
+
+                        ULONGLONG absoluteOffset = baseOffset + extentOffset;
+                        if ( constructionMethod == 1 )
+                        {
+                            if ( g_Heif_Idat_Offset <= 0 ||
+                                 absoluteOffset > ULLONG_MAX - (ULONGLONG) g_Heif_Idat_Offset )
+                            {
+                                prf( "%*sinvalid idat-relative Exif item location\n", indent, "" );
+                                continue;
+                            }
+                            absoluteOffset += (ULONGLONG) g_Heif_Idat_Offset;
+                        }
+
+                        if ( absoluteOffset > (ULONGLONG) LLONG_MAX ||
+                             absoluteOffset > (ULONGLONG) hs.Stream()->Length() ||
+                             extentLength > (ULONGLONG) hs.Stream()->Length() - absoluteOffset )
+                        {
+                            prf( "%*sExif item extent is outside the file\n", indent, "" );
+                            continue;
+                        }
+
+                        g_Heif_Exif_Offset = (__int64) absoluteOffset;
+                        g_Heif_Exif_Length = (__int64) extentLength;
                     }
                 }
             }
         }
         else if ( !strcmp( tag, "hvcC" ) )
         {
-            BYTE version = hs.GetBYTE( offset );
-            BYTE byteInfo = hs.GetBYTE( offset );
-            BYTE profileSpace = ( byteInfo >> 6 ) & 3;
-            bool tierFlag = 0 != ( ( byteInfo >> 4 ) & 0x1 );
-            BYTE  profileIDC = byteInfo & 0x1f;
+            if ( boxLen - headerLength >= 21 )
+            {
+                hs.GetBYTE( offset );
+                hs.GetBYTE( offset );
+                hs.GetDWORD( offset, false );
 
-            DWORD profileCompatibilityFlags = hs.GetDWORD( offset, false );
+                for ( int i = 0; i < 6; i++ )
+                    hs.GetBYTE( offset );
 
-            for ( int i = 0; i < 6; i++ )
-                BYTE b = hs.GetBYTE( offset );
+                hs.GetBYTE( offset );
+                hs.GetWORD( offset, false );
+                hs.GetBYTE( offset );
+                hs.GetBYTE( offset );
+                BYTE bitDepthLuma = ( hs.GetBYTE( offset ) & 0x7 ) + 8;
+                BYTE bitDepthChroma = ( hs.GetBYTE( offset ) & 0x7 ) + 8;
 
-            BYTE generalLevelIDC = hs.GetBYTE( offset );
-            WORD minSpacialSegmentationIDC = hs.GetWORD( offset, false ) & 0xfff;
-            BYTE parallelismType = hs.GetBYTE( offset ) & 0x3;
-            BYTE chromaFormat = hs.GetBYTE( offset ) & 0x3;
-            BYTE bitDepthLuma = ( hs.GetBYTE( offset ) & 0x7 ) + 8;
-            BYTE bitDepthChroma = ( hs.GetBYTE( offset ) & 0x7 ) + 8;
-            WORD avgFrameRate = hs.GetWORD( offset, false );
-
-            prf( "Heif hvvC metadata (non-Exif):\n" );
-            prf( "  Luma Bit Depth:      %d\n", bitDepthLuma );
-            prf( "  Chroma Bit Depth:    %d\n", bitDepthChroma );
+                if ( isProperty )
+                {
+                    g_Heif_Properties[ propertyIndex ].lumaBitDepth = bitDepthLuma;
+                    g_Heif_Properties[ propertyIndex ].chromaBitDepth = bitDepthChroma;
+                }
+            }
+            else
+                prf( "%*sincomplete hvcC property\n", indent, "" );
+        }
+        else if ( !strcmp( tag, "ispe" ) )
+        {
+            if ( boxLen - headerLength >= 12 )
+            {
+                hs.GetDWORD( offset, false );
+                DWORD width = hs.GetDWORD( offset, false );
+                DWORD height = hs.GetDWORD( offset, false );
+                if ( isProperty )
+                {
+                    g_Heif_Properties[ propertyIndex ].width = width;
+                    g_Heif_Properties[ propertyIndex ].height = height;
+                }
+            }
+        }
+        else if ( !strcmp( tag, "pixi" ) )
+        {
+            if ( boxLen - headerLength >= 5 )
+            {
+                hs.GetDWORD( offset, false );
+                BYTE channelCount = hs.GetBYTE( offset );
+                BYTE bitsPerChannel = 0;
+                for ( BYTE channel = 0; channel < channelCount && hs.Valid(); channel++ )
+                {
+                    BYTE channelBits = hs.GetBYTE( offset );
+                    if ( channelBits > bitsPerChannel )
+                        bitsPerChannel = channelBits;
+                }
+                if ( isProperty )
+                    g_Heif_Properties[ propertyIndex ].bitsPerChannel = bitsPerChannel;
+            }
+        }
+        else if ( !strcmp( tag, "irot" ) )
+        {
+            BYTE value = hs.GetBYTE( offset );
+            if ( isProperty )
+            {
+                g_Heif_Properties[ propertyIndex ].rotation = value & 0x3;
+                g_Heif_Properties[ propertyIndex ].hasRotation = true;
+            }
+        }
+        else if ( !strcmp( tag, "imir" ) )
+        {
+            BYTE value = hs.GetBYTE( offset );
+            if ( isProperty )
+            {
+                g_Heif_Properties[ propertyIndex ].mirrorAxis = value & 0x1;
+                g_Heif_Properties[ propertyIndex ].hasMirror = true;
+            }
+        }
+        else if ( !strcmp( tag, "colr" ) )
+        {
+            if ( boxLen - headerLength >= 4 )
+            {
+                char colorType[ 5 ] = {};
+                for ( int i = 0; i < 4; i++ )
+                    colorType[ i ] = (char) hs.GetBYTE( offset );
+                ULONGLONG profileLength = boxLen - ( offset - boxOffset );
+                if ( isProperty && ( 0 == strcmp( colorType, "prof" ) ||
+                                     0 == strcmp( colorType, "rICC" ) ) )
+                {
+                    if ( profileLength <= 16 * 1024 * 1024 && profileLength <= INT_MAX )
+                    {
+                        HeifProperty & property = g_Heif_Properties[ propertyIndex ];
+                        property.iccProfile.resize( (size_t) profileLength );
+                        hs.GetBytes( offset, property.iccProfile.data(), (int) profileLength );
+                    }
+                    else
+                        prf( "%*sICC profile is too large to parse (%I64u bytes)\n", indent, "", profileLength );
+                }
+            }
         }
         else if ( !strcmp( tag, "iprp" ) )
         {
             HeifStream hsChild( hs.Stream(), hs.Offset() + offset, boxLen - ( offset - boxOffset ) );
 
-            EnumerateBoxes( hsChild, depth + 1 );
+            EnumerateBoxes( hsChild, depth + 1, m4a );
         }
         else if ( !strcmp( tag, "ipco" ) )
         {
             HeifStream hsChild( hs.Stream(), hs.Offset() + offset, boxLen - ( offset - boxOffset ) );
-
-            EnumerateBoxes( hsChild, depth + 1 );
+            bool wasReadingProperties = g_Heif_ReadingProperties;
+            g_Heif_ReadingProperties = true;
+            EnumerateBoxes( hsChild, depth + 1, m4a );
+            g_Heif_ReadingProperties = wasReadingProperties;
+        }
+        else if ( !strcmp( tag, "idat" ) )
+        {
+            g_Heif_Idat_Offset = hs.Offset() + offset;
+        }
+        else if ( m4a && !strcmp( tag, "udta" ) )
+        {
+            HeifStream hsChild( hs.Stream(), hs.Offset() + offset, boxLen - ( offset - boxOffset ) );
+            EnumerateBoxes( hsChild, depth + 1, m4a );
         }
         else if ( !strcmp( tag, "moov" ) ) // Canon CR3 format
         {
             HeifStream hsChild( hs.Stream(), hs.Offset() + offset, boxLen - ( offset - boxOffset ) );
 
-            EnumerateBoxes( hsChild, depth + 1 );
+            EnumerateBoxes( hsChild, depth + 1, m4a );
         }
         else if ( !strcmp( tag, "uuid" ) )
         {
@@ -5418,7 +8960,7 @@ void EnumerateBoxes( HeifStream & hs, DWORD depth )
 
                 HeifStream hsChild( hs.Stream(), hs.Offset() + offset, boxLen - ( offset - boxOffset ) );
 
-                EnumerateBoxes( hsChild, depth + 1 );
+                EnumerateBoxes( hsChild, depth + 1, m4a );
             }
 
             if ( !strcmp( "eaf42b5e1c984b88b9fbb7dc406e4d16", acGUID ) )
@@ -5427,7 +8969,7 @@ void EnumerateBoxes( HeifStream & hs, DWORD depth )
 
                 HeifStream hsChild( hs.Stream(), hs.Offset() + offset, boxLen - ( offset - boxOffset ) );
 
-                EnumerateBoxes( hsChild, depth + 1 );
+                EnumerateBoxes( hsChild, depth + 1, m4a );
             }
 
             if ( !strcmp( "be7acfcb97a942e89c71999491e3afac", acGUID ) )
@@ -5497,22 +9039,27 @@ void EnumerateBoxes( HeifStream & hs, DWORD depth )
         else if ( !strcmp( tag, "trak" ) ) // Canon .CR3 metadata
         {
             HeifStream hsChild( hs.Stream(), hs.Offset() + offset, boxLen - ( offset - boxOffset ) );
-            EnumerateBoxes( hsChild, depth + 1 );
+            bool wasAudioTrack = m4a ? m4a->audioTrack : false;
+            if ( m4a )
+                m4a->audioTrack = false;
+            EnumerateBoxes( hsChild, depth + 1, m4a );
+            if ( m4a )
+                m4a->audioTrack = wasAudioTrack;
         }
         else if ( !strcmp( tag, "mdia" ) ) // Canon .CR3 metadata
         {
             HeifStream hsChild( hs.Stream(), hs.Offset() + offset, boxLen - ( offset - boxOffset ) );
-            EnumerateBoxes( hsChild, depth + 1 );
+            EnumerateBoxes( hsChild, depth + 1, m4a );
         }
         else if ( !strcmp( tag, "minf" ) ) // Canon .CR3 metadata
         {
             HeifStream hsChild( hs.Stream(), hs.Offset() + offset, boxLen - ( offset - boxOffset ) );
-            EnumerateBoxes( hsChild, depth + 1 );
+            EnumerateBoxes( hsChild, depth + 1, m4a );
         }
         else if ( !strcmp( tag, "stbl" ) ) // Canon .CR3 metadata
         {
             HeifStream hsChild( hs.Stream(), hs.Offset() + offset, boxLen - ( offset - boxOffset ) );
-            EnumerateBoxes( hsChild, depth + 1 );
+            EnumerateBoxes( hsChild, depth + 1, m4a );
         }
         else if ( !strcmp( tag, "stsz" ) ) // Canon .CR3 metadata
         {
@@ -5520,14 +9067,26 @@ void EnumerateBoxes( HeifStream & hs, DWORD depth )
             // the stsz tag has the full-resolution embedded JPG length at i==3 in this
             // loop. I mean, it worked for one file.
 
-            for ( int i = 0; i < 5; i++ )
+            if ( boxLen - headerLength >= 16 )
             {
-                DWORD len = hs.GetDWORD( offset, false );
-                //printf( "stsz tag; %d DWORD: %d\n", i, len );
+                for ( int i = 0; i < 4; i++ )
+                {
+                    DWORD len = hs.GetDWORD( offset, false );
+                    //printf( "stsz tag; %d DWORD: %d\n", i, len );
 
-                if ( ( 3 == i ) && ( 0 == g_Canon_CR3_Embedded_JPG_Length ) )
-                    g_Canon_CR3_Embedded_JPG_Length = len;
+                    if ( ( 3 == i ) && ( 0 == g_Canon_CR3_Embedded_JPG_Length ) )
+                        g_Canon_CR3_Embedded_JPG_Length = len;
+                }
             }
+        }
+
+        bool validBoxData = hs.Valid();
+        hs.RestoreLength( enclosingLength );
+        if ( !validBoxData )
+        {
+            prf( "%*struncated or invalid data in %s box at offset %I64d\n",
+                 indent, "", tag, boxOffset );
+            break;
         }
 
         box++;
@@ -5537,14 +9096,54 @@ void EnumerateBoxes( HeifStream & hs, DWORD depth )
 
 void EnumerateHeif( CStream * pStream )
 {
+    g_Heif_Exif_ItemID = 0xffffffff;
+    g_Heif_Exif_Offset = 0;
+    g_Heif_Exif_Length = 0;
+    g_Heif_Primary_ItemID = 0xffffffff;
+    g_Heif_Properties.clear();
+    g_Heif_Primary_Properties.clear();
+    g_Heif_ReadingProperties = false;
+    g_Heif_Idat_Offset = 0;
+
     __int64 length = pStream->Length();
     HeifStream hs( pStream, 0, length );
 
     EnumerateBoxes( hs, 0 );
+    PrintHeifPrimaryProperties();
 
     if ( g_FullInformation )
         prf( "Heif EXIF info: id %d, offset %I64d, length %I64d\n", g_Heif_Exif_ItemID, g_Heif_Exif_Offset, g_Heif_Exif_Length );
 } //EnumerateHeif
+
+void EnumerateM4A( CStream * pStream )
+{
+    prf( "mimetype:                             audio/mp4\n" );
+
+    M4AParseState state;
+    HeifStream hs( pStream, 0, pStream->Length() );
+    EnumerateBoxes( hs, 0, &state );
+
+    if ( state.movieTimeScale && state.movieDuration )
+    {
+        ULONGLONG seconds = state.movieDuration / state.movieTimeScale;
+        ULONGLONG remainder = state.movieDuration % state.movieTimeScale;
+        if ( remainder >= state.movieTimeScale / 2 + state.movieTimeScale % 2 )
+            seconds++;
+        prf( "M4A duration: %I64u:%02I64u:%02I64u\n",
+             seconds / 3600, ( seconds / 60 ) % 60, seconds % 60 );
+        if ( state.mediaDataBytes > 0 )
+        {
+            double averageBitrate = (double) state.mediaDataBytes * 8.0 /
+                                    ( (double) state.movieDuration / state.movieTimeScale ) / 1000.0;
+            prf( "M4A average audio bitrate: %.1lf kbps\n", averageBitrate );
+        }
+    }
+    else
+        prf( "M4A movie duration is unavailable\n" );
+
+    if ( state.mediaDataBytes )
+        prf( "M4A media data size: %I64u bytes\n", state.mediaDataBytes );
+} //EnumerateM4A
 
 const char * GetOrientation( int o )
 {
@@ -6164,7 +9763,7 @@ void EnumerateIFD0( int depth, __int64 IFDOffset, __int64 headerBase, bool littl
                 prf( "OffsetTimeDigitized:                  %s\n", acBuffer );
             }
             else if ( 37383 == head.id && 3 == head.type )
-                prf( "MeteringMode:                         %d\n", head.offset );
+                prf( "MeteringMode:                         %s (%d)\n", ExifMeteringMode( head.offset ), head.offset );
             else if ( 37384 == head.id && 3 == head.type)
                 prf( "LightSource:                          %d\n", head.offset );
             else if ( 37385 == head.id && 3 == head.type )
@@ -6347,22 +9946,8 @@ void EnumerateIFD0( int depth, __int64 IFDOffset, __int64 headerBase, bool littl
             }
             else if ( 42080 == head.id && 3 == head.type && 1 == head.count )
                 prf( "Composite Image:                      %s\n", ExifComposite( head.offset ) );
-            else if ( 50727 == head.id && 5 == head.type && 3 == head.count )
-            {
-                LONG num1 = GetDWORD( head.offset +      headerBase, littleEndian );
-                LONG den1 = GetDWORD( head.offset +  4 + headerBase, littleEndian );
-                double d1 = (double) num1 / (double) den1;
-
-                LONG num2 = GetDWORD( head.offset +  8 + headerBase, littleEndian );
-                LONG den2 = GetDWORD( head.offset + 12 + headerBase, littleEndian );
-                double d2 = (double) num2 / (double) den2;
-
-                LONG num3 = GetDWORD( head.offset + 16 + headerBase, littleEndian );
-                LONG den3 = GetDWORD( head.offset + 20 + headerBase, littleEndian );
-                double d3 = (double) num3 / (double) den3;
-
-                prf( "AnalogBalance:                        %lf, %lf, %lf\n", d1, d2, d3 );
-            }
+            else if ( 50727 == head.id )
+                PrintDngRationalArray( "AnalogBalance:", head, headerBase, littleEndian );
             else if ( 50341 == head.id && 7 == head.type )
             {
                 prf( "PrintImageMatching:                   %d bytes\n", head.count );
@@ -6374,10 +9959,21 @@ void EnumerateIFD0( int depth, __int64 IFDOffset, __int64 headerBase, bool littl
                 prf( "Canon-Specific(50649):                %d\n", head.offset );
             else if ( 50656 == head.id )
                 prf( "Canon-Specific(50656):                %d\n", head.offset );
-            else if ( 50706 == head.id && IsIntType( head.type ) )
-                prf( "DNGVersion:                           %#x\n", head.offset );
-            else if ( 50707 == head.id && IsIntType( head.type ) )
-                prf( "DNGBackwardVersion:                   %#x\n", head.offset );
+            else if ( 50706 == head.id || 50707 == head.id )
+            {
+                const char * name = ( 50706 == head.id ) ? "DNGVersion:" : "DNGBackwardVersion:";
+                if ( 1 == head.type && 4 == head.count &&
+                     IsFileRangeValid( IFDOffset - 4 + headerBase, 4 ) )
+                {
+                    BYTE version[ 4 ] = {};
+                    GetBytes( IFDOffset - 4 + headerBase, version, sizeof version );
+                    prf( "%-37s %u.%u.%u.%u\n", name,
+                         version[ 0 ], version[ 1 ], version[ 2 ], version[ 3 ] );
+                }
+                else
+                    prf( "%-37s (invalid version data; type %u, count %u)\n",
+                         name, head.type, head.count );
+            }
             else if ( 50708 == head.id && 2 == head.type )
             {
                 char acUniqueCameraModel[ 100 ];
@@ -6401,30 +9997,12 @@ void EnumerateIFD0( int depth, __int64 IFDOffset, __int64 headerBase, bool littl
                 GetString( stringOffset + headerBase, acLocalizedCameraModel, _countof( acLocalizedCameraModel ), head.count );
                 prf( "LocalizedCameraModel:                 %s\n", acLocalizedCameraModel );
             }
-            else if ( 50721 == head.id && 10 == head.type )
-            {
-                int num = (int) GetDWORD( head.offset + headerBase, littleEndian );
-                int den = (int) GetDWORD( head.offset + headerBase + 4, littleEndian );
-                prf( "ColorMatrix1:                         %d / %d = %lf\n", num, den, (double) num / (double) den );
-            }
-            else if ( 50722 == head.id && 10 == head.type )
-            {
-                int num = (int) GetDWORD( head.offset + headerBase, littleEndian );
-                int den = (int) GetDWORD( head.offset + headerBase + 4, littleEndian );
-                prf( "ColorMatrix2:                         %d / %d = %lf\n", num, den, (double) num / (double) den );
-            }
-            else if ( 50727 == head.id && 5 == head.type )
-            {
-                DWORD num = GetDWORD( head.offset + headerBase, littleEndian );
-                DWORD den = GetDWORD( head.offset + headerBase + 4, littleEndian );
-                prf( "AnalogBalance:                        %d / %d = %lf\n", num, den, (double) num / (double) den );
-            }
-            else if ( 50728 == head.id && 5 == head.type )
-            {
-                DWORD num = GetDWORD( head.offset + headerBase, littleEndian );
-                DWORD den = GetDWORD( head.offset + headerBase + 4, littleEndian );
-                prf( "AsShotNeutral:                        %d / %d = %lf\n", num, den, (double) num / (double) den );
-            }
+            else if ( 50721 == head.id )
+                PrintDngRationalArray( "ColorMatrix1:", head, headerBase, littleEndian );
+            else if ( 50722 == head.id )
+                PrintDngRationalArray( "ColorMatrix2:", head, headerBase, littleEndian );
+            else if ( 50728 == head.id )
+                PrintDngRationalArray( "AsShotNeutral:", head, headerBase, littleEndian );
             else if ( 50730 == head.id && 10 == head.type )
             {
                 int num = (int) GetDWORD( head.offset + headerBase, littleEndian );
@@ -6484,16 +10062,25 @@ void EnumerateIFD0( int depth, __int64 IFDOffset, __int64 headerBase, bool littl
                 DWORD den = GetDWORD( head.offset + headerBase + 4, littleEndian );
                 prf( "ShadowScale:                          %d / %d = %lf\n", num, den, (double) num / (double) den );
             }
-            else if ( 50740 == head.id && IsIntType( head.type ) )
+            else if ( 50740 == head.id )
             {
-                prf( "current offset %#llx, head.type: %d, head.count: %d, head.id %d==%#x, head.offset %#x\n",
-                        IFDOffset, head.type, head.count, head.id, head.id, head.offset );
+                __int64 privateDataOffset = ( head.count <= 4 )
+                    ? IFDOffset - 4 + headerBase
+                    : (__int64) head.offset + headerBase;
 
-                prf( "DNGPrivateData:                       %#x for make %s\n", head.offset, g_acMake );
-
-                // Sony and Ricoh Makernotes (in addition to makernotes stored in Exif IFD)
-
-                EnumerateMakernotes( depth + 1,  head.offset, headerBase, littleEndian );
+                if ( 1 == head.type && 4 == head.count &&
+                     ( 0 == strcmp( g_acMake, "SONY" ) || 0 == strcmp( g_acMake, "Sony" ) ) &&
+                     IsFileRangeValid( (__int64) head.offset + headerBase, 2 ) )
+                {
+                    prf( "DNGPrivateData:                       Sony MakerNote pointer %#x\n", head.offset );
+                    EnumerateMakernotes( depth + 1, head.offset, headerBase, littleEndian );
+                }
+                else if ( 1 == head.type && IsFileRangeValid( privateDataOffset, head.count ) )
+                    prf( "DNGPrivateData:                       %u bytes at offset %#llx for make %s (not decoded)\n",
+                         head.count, privateDataOffset, g_acMake );
+                else
+                    prf( "DNGPrivateData:                       (unsupported or invalid data; type %u, count %u, offset %#x)\n",
+                         head.type, head.count, head.offset );
             }
             else if ( 50741 == head.id && IsIntType( head.type ) )
                 prf( "MakerNoteSafety:                      %#x\n", head.offset );
@@ -6591,7 +10178,7 @@ const char * GetPNGColorType( byte ct )
         return "palette index";
 
     if ( 4 == ct )
-        return "greyscale and alpha";
+        return "grayscale and alpha";
 
     if ( 6 == ct )
         return "RGBA";
@@ -6657,263 +10244,512 @@ const char * GetPNGInterlaceMethod( byte im )
     return "unknown";
 } //GetPNGInterlaceMethod
 
-// https://en.wikipedia.org/wiki/Portable_Network_Graphics
-// http://www.libpng.org/pub/png/spec/1.2/PNG-Chunks.html
-// PNG files are big-endian. 8-byte header then records of:
-//    4: length
-//    4: type
-//    length: data
-//    4: crc
-
-void ParsePNG()
+bool PNGReadBytes( __int64 offset, void * data, ULONG length )
 {
-    DWORD dwHeader0 = GetDWORD( 0, false );
-    DWORD dwHeader4 = GetDWORD( 4, false );
-    if ( 0x89504e47 != dwHeader0 || 0xd0a1a0a != dwHeader4 )
+    return offset >= 0 && offset <= g_pStream->Length() &&
+           length <= (QWORD) ( g_pStream->Length() - offset ) &&
+           g_pStream->Seek( offset ) && g_pStream->Read( data, length ) == length;
+}
+
+bool PNGCheckCRC( __int64 offset, DWORD length, DWORD expectedCRC )
+{
+    BYTE buffer[ 8192 ];
+    ULONGLONG bytesRemaining = (ULONGLONG) length + 4; // chunk type and chunk data
+    DWORD crc = 0xffffffff;
+
+    while ( bytesRemaining )
     {
-        prf( "Invalid PNG header: first 4 bytes: %#x, next 4 bytes: %#x\n", dwHeader0, dwHeader4 );
-        prf( "expected 0x89504e47 then 0xd0a1a0a\n" );
-        return;
+        ULONG bytesToRead = (ULONG) min( bytesRemaining, (ULONGLONG) sizeof buffer );
+        if ( !PNGReadBytes( offset, buffer, bytesToRead ) )
+            return false;
+
+        for ( ULONG i = 0; i < bytesToRead; i++ )
+        {
+            crc ^= buffer[ i ];
+            for ( int bit = 0; bit < 8; bit++ )
+                crc = ( crc >> 1 ) ^ ( ( crc & 1 ) ? 0xedb88320 : 0 );
+        }
+
+        offset += bytesToRead;
+        bytesRemaining -= bytesToRead;
     }
 
-    DWORD offset = 8;
-    DWORD width, height;
-    byte bitDepth, colorType, compressionMethod, filterMethod, interlaceMethod;
+    return ( ~crc ) == expectedCRC;
+}
+
+string PNGPrintableText( const BYTE * bytes, size_t length )
+{
+    string text;
+    size_t limit = min( length, (size_t) 512 );
+    text.reserve( limit );
+    for ( size_t i = 0; i < limit; i++ )
+    {
+        BYTE ch = bytes[ i ];
+        text += ( ch < 0x20 || 0x7f == ch ) ? ' ' : (char) ch;
+    }
+    if ( length > limit )
+        text += "...";
+    return text;
+}
+
+bool PNGReadTextChunk( __int64 offset, DWORD length, vector<BYTE> & data )
+{
+    const DWORD maxTextChunkToRead = 1024 * 1024;
+    if ( length > maxTextChunkToRead )
+        return false;
+    data.resize( length );
+    return 0 == length || PNGReadBytes( offset, data.data(), length );
+}
+
+// PNG files contain big-endian length/type/data/CRC chunks following their 8-byte signature.
+__int64 ParsePNG()
+{
+    static const BYTE signature[ 8 ] = { 0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a };
+    BYTE actualSignature[ sizeof signature ];
+    if ( !PNGReadBytes( 0, actualSignature, sizeof actualSignature ) ||
+         0 != memcmp( signature, actualSignature, sizeof signature ) )
+    {
+        prf( "Invalid PNG signature\n" );
+        return 0;
+    }
+
+    __int64 offset = sizeof signature;
+    __int64 fileLength = g_pStream->Length();
+    __int64 exifOffset = 0;
+    ULONGLONG idatSize = 0;
     DWORD idatSegments = 0;
-    DWORD idatSize = 0;
+    DWORD paletteEntries = 0;
+    DWORD width = 0, height = 0;
+    BYTE bitDepth = 0, colorType = 0;
+    bool sawIHDR = false, sawPLTE = false, sawIDAT = false;
+    bool idatEnded = false, sawIEND = false;
 
     prf( "mimetype:                             image/png\n" );
 
-    do
+    while ( offset < fileLength )
     {
-        bool seekOK = g_pStream->Seek( offset );
-
-        if ( !seekOK || g_pStream->AtEOF() )
-            return;
-
-        DWORD len = GetDWORD( offset, false );
-
-        if ( len > ( 128 * 1024 * 1024 ) )
+        if ( fileLength - offset < 12 )
         {
-            prf( "aparently invalid length: %d\n", len );
-            return;
+            prf( "truncated PNG chunk header at offset %I64d\n", offset );
+            return 0;
         }
 
-        DWORD type = GetDWORD( offset + 4, false );
+        DWORD length = GetDWORD( offset, false );
+        char type[ 5 ] = {};
+        if ( !PNGReadBytes( offset + 4, type, 4 ) )
+        {
+            prf( "can't read PNG chunk type at offset %I64d\n", offset );
+            return 0;
+        }
 
-        // malformed file
+        for ( int i = 0; i < 4; i++ )
+        {
+            if ( ! ( ( type[ i ] >= 'A' && type[ i ] <= 'Z' ) ||
+                     ( type[ i ] >= 'a' && type[ i ] <= 'z' ) ) )
+            {
+                prf( "invalid PNG chunk type at offset %I64d\n", offset );
+                return 0;
+            }
+        }
+        if ( type[ 2 ] >= 'a' && type[ 2 ] <= 'z' )
+        {
+            prf( "invalid lowercase reserved bit in PNG chunk type %.4s\n", type );
+            return 0;
+        }
 
-        if ( 0 == type )
-            break;
+        if ( (ULONGLONG) length > (ULONGLONG) ( fileLength - offset - 12 ) )
+        {
+            prf( "PNG chunk %.4s length %u exceeds remaining file data\n", type, length );
+            return 0;
+        }
 
-        char acChunkType[ 5 ];
-        memcpy( acChunkType, &type, 4 );
-        acChunkType[ 4 ] = 0;
+        __int64 dataOffset = offset + 8;
+        __int64 crcOffset = dataOffset + length;
+        DWORD expectedCRC = GetDWORD( crcOffset, false );
+        if ( !PNGCheckCRC( offset + 4, length, expectedCRC ) )
+        {
+            prf( "PNG chunk %.4s has an invalid CRC\n", type );
+            return 0;
+        }
 
         if ( g_FullInformation )
-            prf( "png chunk type: %s %#x, len %d\n", acChunkType, type, len );
+            prf( "png chunk type: %.4s, len %u\n", type, length );
 
-        if ( 0x49454e44 == type ) // IEND  end of chunks
+        if ( 0 == memcmp( type, "IHDR", 4 ) )
         {
-            if ( g_FullInformation )
-                prf( "offset of IEND chunk: %d\n", offset );
+            if ( sawIHDR || offset != 8 || length != 13 )
+            {
+                prf( "invalid PNG IHDR chunk placement or length %u\n", length );
+                return 0;
+            }
 
-            break;
+            width = GetDWORD( dataOffset, false );
+            height = GetDWORD( dataOffset + 4, false );
+            bitDepth = GetBYTE( dataOffset + 8 );
+            colorType = GetBYTE( dataOffset + 9 );
+            BYTE compressionMethod = GetBYTE( dataOffset + 10 );
+            BYTE filterMethod = GetBYTE( dataOffset + 11 );
+            BYTE interlaceMethod = GetBYTE( dataOffset + 12 );
+
+            bool validDepth = false;
+            switch ( colorType )
+            {
+                case 0: validDepth = bitDepth == 1 || bitDepth == 2 || bitDepth == 4 || bitDepth == 8 || bitDepth == 16; break;
+                case 2: validDepth = bitDepth == 8 || bitDepth == 16; break;
+                case 3: validDepth = bitDepth == 1 || bitDepth == 2 || bitDepth == 4 || bitDepth == 8; break;
+                case 4:
+                case 6: validDepth = bitDepth == 8 || bitDepth == 16; break;
+            }
+
+            if ( 0 == width || 0 == height || width > 0x7fffffff || height > 0x7fffffff || !validDepth ||
+                 compressionMethod != 0 || filterMethod != 0 || interlaceMethod > 1 )
+            {
+                prf( "invalid PNG IHDR values (dimensions %u x %u, bit depth %u, color type %u)\n",
+                     width, height, bitDepth, colorType );
+                return 0;
+            }
+
+            prf( "image width:           %16u\n", width );
+            prf( "image height:          %16u\n", height );
+            prf( "bit depth:             %16u\n", bitDepth );
+            prf( "color type:            %16u (%s)\n", colorType, GetPNGColorType( colorType ) );
+            prf( "compression method:    %16u (%s)\n", compressionMethod, 0 == compressionMethod ? "deflate" : "unknown" );
+            prf( "filter method:         %16u (%s)\n", filterMethod, GetPNGFilterMethod( filterMethod ) );
+            prf( "interlace method:      %16u (%s)\n", interlaceMethod, GetPNGInterlaceMethod( interlaceMethod ) );
+            sawIHDR = true;
         }
-        else if ( 0x49484452 == type ) // IHDR   header
+        else if ( !sawIHDR )
         {
-            width = GetDWORD( offset + 8, false );
-            height = GetDWORD( offset + 12, false );
-            bitDepth = GetBYTE( offset + 16 );
-            colorType = GetBYTE( offset + 17 );
-            compressionMethod = GetBYTE( offset + 18 );
-            filterMethod = GetBYTE( offset + 19 );
-            interlaceMethod = GetBYTE( offset + 20 );
-
-            prf( "image width:           %16d\n", width );
-            prf( "image height:          %16d\n", height );
-            prf( "bit depth:             %16d\n", bitDepth );
-            prf( "color type:            %16d (%s)\n", colorType, GetPNGColorType( colorType) );
-            prf( "compression method:    %16d\n", compressionMethod );
-            prf( "filter method:         %16d (%s)\n", filterMethod, GetPNGFilterMethod( filterMethod ) );
-            prf( "interlace method:      %16d (%s)\n", interlaceMethod, GetPNGInterlaceMethod( interlaceMethod ) );
+            prf( "PNG IHDR must be the first chunk\n" );
+            return 0;
         }
-        else if ( 0x73524742 == type ) // sRGB
+        else if ( 0 == memcmp( type, "IEND", 4 ) )
         {
-            BYTE renderingIntent = GetBYTE( offset + 8 );
-
-            prf( "sRGB rendering intent: %16d (%s)\n", renderingIntent, GetPNGRenderingIntent( renderingIntent ) );
+            if ( length != 0 || !sawIDAT )
+            {
+                prf( "invalid PNG IEND chunk\n" );
+                return 0;
+            }
+            sawIEND = true;
         }
-        else if ( 0x67414d41 == type ) // gAMA
+        else if ( 0 == memcmp( type, "IDAT", 4 ) )
         {
-            DWORD gamma = GetDWORD( offset + 8, false );
-
-            prf( "gamma:               %18d\n", gamma );
-        }
-        else if ( 0x70485973 == type ) // pHYs
-        {
-            DWORD pixelsPerUnitX = GetDWORD( offset + 8, false );
-            DWORD pixelsPerUnitY = GetDWORD( offset + 12, false );
-            BYTE unitSpecifier = GetBYTE( offset + 16 );
-
-            prf( "pixels per unit X:     %16d\n", pixelsPerUnitX );
-            prf( "pixels per unit Y:     %16d\n", pixelsPerUnitY );
-            prf( "unit specifier:        %16d (%s)\n", unitSpecifier, GetPNGUnitSpecifier( unitSpecifier ) );
-        }
-        else if ( 0x49444154 == type ) // IDAT
-        {
-            // image data; ignore for now
-
-            if ( g_FullInformation )
-                prf( "flac image data length:     %16d\n", len );
-
+            if ( idatEnded || ( colorType == 3 && !sawPLTE ) )
+            {
+                prf( "invalid PNG IDAT chunk order\n" );
+                return 0;
+            }
+            sawIDAT = true;
             idatSegments++;
-            idatSize += len;
+            idatSize += length;
+            if ( g_FullInformation )
+                prf( "image data length:     %16u\n", length );
         }
-        else if ( 0x6348524d == type ) // cHRM
-        {
-            // chromacity coordinates of the display primaries and white point
-            prf( "chromacity:\n" );
-            prf( "       white point x %18u\n", GetDWORD( offset + 8, false ) );
-            prf( "       white point y %18u\n", GetDWORD( offset + 12, false ) );
-            prf( "       red x         %18u\n", GetDWORD( offset + 16, false ) );
-            prf( "       red y         %18u\n", GetDWORD( offset + 20, false ) );
-            prf( "       green x       %18u\n", GetDWORD( offset + 24, false ) );
-            prf( "       green y       %18u\n", GetDWORD( offset + 28, false ) );
-            prf( "       blue x        %18u\n", GetDWORD( offset + 32, false ) );
-            prf( "       blue y        %18u\n", GetDWORD( offset + 36, false ) );
-        }
-        else if ( 0x74455874 == type ) // tEXt
-        {
-            char acTextKey[ 80 ];
-            acTextKey[ 0 ] = 0;
-
-            GetString( offset + 8, acTextKey, _countof( acTextKey ), _countof( acTextKey ) );
-
-            int keylen = strlen( acTextKey );
-            int valuelen = len - keylen - 1;
-            unique_ptr<char> textValue( new char[ valuelen + 1 ] );
-            GetString( offset + 8 + keylen + 1, textValue.get(), valuelen + 1, valuelen + 1 );
-
-            prf( "text key:                             %s, value: %s\n", acTextKey, textValue.get() );
-        }
-        else if ( 0x69545874 == type ) // iTXt
-        {
-            prf( "text chunk length:     %16d\n", len );
-            DumpBinaryData( offset + 8, 0, len, 8, offset + 8 );
-        }
-        else if ( 0x504c5445 == type ) // PLTE palette
-        {
-            DWORD entries = len / 3;
-
-            if ( 0 != ( len % 3 ) )
-            {
-                prf( "PNG palette chunk is malformed\n" );
-                return;
-            }
-
-            prf( "palette has %d entries\n", entries );
-
-            for ( DWORD e = 0; e < entries; e++ )
-            {
-                DWORD o = offset + 8 + e * 3;
-                prf( "    %3d: r %3d, g %3d, b %3d\n", e, GetBYTE( o ), GetBYTE( o + 1 ), GetBYTE( o + 2 ) );
-            }
-        }
-        else if ( 0x74524e53 == type ) // tRNS transparency information
-        {
-            prf( "transparency length:   %16d\n", len );
-            DumpBinaryData( offset + 8, 0, len, 8, offset + 8 );
-        }
-        else if ( 0x73424954 == type ) // sBIT
-        {
-            prf( "significant bits len:  %16d\n", len );
-            DumpBinaryData( offset + 8, 0, len, 8, offset + 8 );
-        }
-        else if ( 0x624b4744 == type ) // bKGD
-        {
-            prf( "background color len:  %16d\n", len );
-            DumpBinaryData( offset + 8, 0, len, 8, offset + 8 );
-        }
-        else if ( 0x74494d45 == type ) // tIME
-        {
-            prf( "last modification:                    year %d, month %d, day %d, hour %d, minute %d, second %d\n",
-                    GetWORD( offset + 8, false ),
-                    GetBYTE( offset + 10 ),
-                    GetBYTE( offset + 11 ),
-                    GetBYTE( offset + 12 ),
-                    GetBYTE( offset + 13 ),
-                    GetBYTE( offset + 14 ) );
-        }
-        else if ( 0x7a545874 == type ) // zTXt
-        {
-            char acTextKey[ 80 ];
-            acTextKey[ 0 ] = 0;
-            GetString( offset + 8, acTextKey, _countof( acTextKey ), _countof( acTextKey ) );
-            int keyLen = strlen( acTextKey );
-
-            BYTE compressionMethod = GetBYTE( offset + 8 + keyLen + 1 );
-            int valueLen = len - keyLen - 2;
-            prf( "compressed text key:                  %s, compression method %d, value %d bytes\n", acTextKey, compressionMethod, valueLen );
-            int dataOffset = offset + 8 + keyLen + valueLen + 2;
-            DumpBinaryData( dataOffset, 0, valueLen, 8, dataOffset );
-        }
-        else if ( 0x69434350 == type ) // iCCP
-        {
-            prf( "embedded ICC profile length %d\n", len );
-            DumpBinaryData( offset + 8, 0, len, 8, offset + 8 );
-        }
-        else if ( 0x6f464673 == type ) // oFFs
-        {
-            prf( "%s tag %d\n", acChunkType, len );
-            DumpBinaryData( offset + 8, 0, len, 8, offset + 8 );
-        }
-#if false
-        else if ( 0x6d655461 == type ) // meTa
-        {
-        }
-        else if ( 0x76704167 == type )
-        {
-        }
-        else if ( 0x69444f54 == type )
-        {
-        }
-        else if ( 0x65584966 == type )
-        {
-        }
-        else if ( 0x70725657 == type )
-        {
-        }
-        else if ( 0x6d6b4246 == type )
-        {
-        }
-        else if ( 0x6d6b5453 == type )
-        {
-        }
-        else if ( 0x6d6b4254 == type )
-        {
-        }
-        else if ( 0x6d6b4253 == type )
-        {
-        }
-        else if ( 0x70416e69 == type )
-        {
-        }
-#endif
         else
         {
-            prf( "unrecognized PNG chunk type %s %#x, length %d\n", acChunkType, type, len );
-            DumpBinaryData( offset + 8, 0, len, 8, offset + 8 );
+            if ( sawIDAT )
+                idatEnded = true;
 
-            if ( 0 == *acChunkType )
-                break;
+            if ( 0 == memcmp( type, "PLTE", 4 ) )
+            {
+                if ( sawPLTE || sawIDAT || 0 == length || length > 768 || length % 3 != 0 ||
+                     colorType == 0 || colorType == 4 )
+                {
+                    prf( "invalid PNG palette chunk\n" );
+                    return 0;
+                }
+                paletteEntries = length / 3;
+                if ( colorType == 3 && paletteEntries > ( 1u << bitDepth ) )
+                {
+                    prf( "PNG palette has %u entries, exceeding bit depth %u capacity\n",
+                         paletteEntries, bitDepth );
+                    return 0;
+                }
+                sawPLTE = true;
+                prf( "palette has %u entries\n", paletteEntries );
+                for ( DWORD entry = 0; entry < paletteEntries; entry++ )
+                {
+                    BYTE rgb[ 3 ];
+                    if ( !PNGReadBytes( dataOffset + entry * 3, rgb, sizeof rgb ) )
+                        return 0;
+                    prf( "    %3u: r %3u, g %3u, b %3u\n", entry, rgb[ 0 ], rgb[ 1 ], rgb[ 2 ] );
+                }
+            }
+            else if ( 0 == memcmp( type, "sRGB", 4 ) )
+            {
+                if ( length != 1 )
+                    prf( "invalid PNG sRGB chunk length %u\n", length );
+                else
+                {
+                    BYTE intent = GetBYTE( dataOffset );
+                    prf( "sRGB rendering intent: %16u (%s)\n", intent, GetPNGRenderingIntent( intent ) );
+                }
+            }
+            else if ( 0 == memcmp( type, "gAMA", 4 ) )
+            {
+                if ( length != 4 )
+                    prf( "invalid PNG gAMA chunk length %u\n", length );
+                else
+                {
+                    DWORD gamma = GetDWORD( dataOffset, false );
+                    prf( "gamma:               %18.5f (stored %u / 100000)\n", gamma / 100000.0, gamma );
+                }
+            }
+            else if ( 0 == memcmp( type, "pHYs", 4 ) )
+            {
+                if ( length != 9 )
+                    prf( "invalid PNG pHYs chunk length %u\n", length );
+                else
+                {
+                    DWORD pixelsPerUnitX = GetDWORD( dataOffset, false );
+                    DWORD pixelsPerUnitY = GetDWORD( dataOffset + 4, false );
+                    BYTE unit = GetBYTE( dataOffset + 8 );
+                    prf( "pixels per unit X:     %16u\n", pixelsPerUnitX );
+                    prf( "pixels per unit Y:     %16u\n", pixelsPerUnitY );
+                    prf( "unit specifier:        %16u (%s)\n", unit, GetPNGUnitSpecifier( unit ) );
+                    if ( unit == 1 )
+                        prf( "resolution:            %.2f x %.2f dpi\n",
+                             pixelsPerUnitX * 0.0254, pixelsPerUnitY * 0.0254 );
+                }
+            }
+            else if ( 0 == memcmp( type, "cHRM", 4 ) )
+            {
+                if ( length != 32 )
+                    prf( "invalid PNG cHRM chunk length %u\n", length );
+                else
+                {
+                    static const char * labels[] = { "white point", "red", "green", "blue" };
+                    prf( "chromaticity (x, y):\n" );
+                    for ( int i = 0; i < 4; i++ )
+                        prf( "  %-12s %.5f, %.5f\n", labels[ i ],
+                             GetDWORD( dataOffset + i * 8, false ) / 100000.0,
+                             GetDWORD( dataOffset + i * 8 + 4, false ) / 100000.0 );
+                }
+            }
+            else if ( 0 == memcmp( type, "tEXt", 4 ) ||
+                      0 == memcmp( type, "zTXt", 4 ) ||
+                      0 == memcmp( type, "iTXt", 4 ) )
+            {
+                vector<BYTE> data;
+                if ( !PNGReadTextChunk( dataOffset, length, data ) )
+                {
+                    prf( "PNG %.4s metadata is too large to display (%u bytes)\n", type, length );
+                }
+                else
+                {
+                    vector<BYTE>::const_iterator keyEnd = find( data.begin(), data.end(), 0 );
+                    size_t keyLength = (size_t) ( keyEnd - data.begin() );
+                    if ( keyEnd == data.end() || 0 == keyLength || keyLength > 79 )
+                    {
+                        prf( "malformed PNG %.4s keyword\n", type );
+                    }
+                    else
+                    {
+                        string key = PNGPrintableText( data.data(), keyLength );
+                        if ( 0 == memcmp( type, "tEXt", 4 ) )
+                        {
+                            string value = PNGPrintableText( data.data() + keyLength + 1,
+                                                             data.size() - keyLength - 1 );
+                            prf( "text key:                             %s, value: %s\n", key.c_str(), value.c_str() );
+                        }
+                        else if ( 0 == memcmp( type, "zTXt", 4 ) )
+                        {
+                            size_t methodOffset = keyLength + 1;
+                            if ( methodOffset >= data.size() )
+                                prf( "malformed PNG zTXt chunk for key %s\n", key.c_str() );
+                            else
+                                prf( "compressed text key:                  %s, compression method %u, compressed value %u bytes\n",
+                                     key.c_str(), data[ methodOffset ],
+                                     (DWORD) ( data.size() - methodOffset - 1 ) );
+                        }
+                        else
+                        {
+                            size_t cursor = keyLength + 1;
+                            if ( data.size() - cursor < 2 )
+                                prf( "malformed PNG iTXt chunk for key %s\n", key.c_str() );
+                            else
+                            {
+                                BYTE compressionFlag = data[ cursor++ ];
+                                BYTE compressionMethod = data[ cursor++ ];
+                                vector<BYTE>::const_iterator languageEnd = find( data.begin() + cursor, data.end(), 0 );
+                                if ( languageEnd == data.end() )
+                                    prf( "malformed PNG iTXt language tag for key %s\n", key.c_str() );
+                                else
+                                {
+                                    string language = PNGPrintableText( data.data() + cursor,
+                                        (size_t) ( languageEnd - ( data.begin() + cursor ) ) );
+                                    cursor = (size_t) ( languageEnd - data.begin() ) + 1;
+                                    vector<BYTE>::const_iterator translatedEnd = find( data.begin() + cursor, data.end(), 0 );
+                                    if ( translatedEnd == data.end() )
+                                        prf( "malformed PNG iTXt translated keyword for key %s\n", key.c_str() );
+                                    else
+                                    {
+                                        string translated = PNGPrintableText( data.data() + cursor,
+                                            (size_t) ( translatedEnd - ( data.begin() + cursor ) ) );
+                                        cursor = (size_t) ( translatedEnd - data.begin() ) + 1;
+                                        if ( compressionFlag > 1 || compressionMethod != 0 )
+                                            prf( "invalid PNG iTXt compression fields for key %s\n", key.c_str() );
+                                        else if ( compressionFlag )
+                                            prf( "compressed international text:       %s, language %s, %u compressed bytes\n",
+                                                 key.c_str(), language.c_str(), (DWORD) ( data.size() - cursor ) );
+                                        else
+                                        {
+                                            string value = PNGPrintableText( data.data() + cursor, data.size() - cursor );
+                                            prf( "international text:                   %s, language %s, translated key %s, value: %s\n",
+                                                 key.c_str(), language.c_str(), translated.c_str(), value.c_str() );
+                                            if ( 0 == key.compare( "XML:com.adobe.xmp" ) )
+                                                PrintXMPData( (const char *) data.data() + cursor, data.size() - cursor );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            else if ( 0 == memcmp( type, "iCCP", 4 ) )
+            {
+                BYTE profileName[ 80 ];
+                DWORD nameLength = 0;
+                while ( nameLength < min( length, (DWORD) sizeof profileName ) &&
+                        PNGReadBytes( dataOffset + nameLength, &profileName[ nameLength ], 1 ) &&
+                        profileName[ nameLength ] )
+                    nameLength++;
+
+                if ( nameLength == 0 || nameLength >= sizeof profileName ||
+                     nameLength + 2 > length )
+                    prf( "malformed PNG iCCP chunk\n" );
+                else
+                {
+                    BYTE compressionMethod = GetBYTE( dataOffset + nameLength + 1 );
+                    prf( "ICC profile name:                      %s\n",
+                         PNGPrintableText( profileName, nameLength ).c_str() );
+                    prf( "ICC profile compression:               method %u, %u compressed bytes\n",
+                         compressionMethod, length - nameLength - 2 );
+                    if ( compressionMethod != 0 )
+                        prf( "unsupported PNG ICC profile compression method\n" );
+                }
+            }
+            else if ( 0 == memcmp( type, "tIME", 4 ) )
+            {
+                if ( length != 7 )
+                    prf( "invalid PNG tIME chunk length %u\n", length );
+                else
+                    prf( "last modification:                    %04u-%02u-%02u %02u:%02u:%02u\n",
+                         GetWORD( dataOffset, false ), GetBYTE( dataOffset + 2 ),
+                         GetBYTE( dataOffset + 3 ), GetBYTE( dataOffset + 4 ),
+                         GetBYTE( dataOffset + 5 ), GetBYTE( dataOffset + 6 ) );
+            }
+            else if ( 0 == memcmp( type, "eXIf", 4 ) )
+            {
+                if ( exifOffset )
+                    prf( "multiple PNG eXIf chunks; using the first\n" );
+                else if ( length < 8 )
+                    prf( "PNG eXIf chunk is too short to contain a TIFF header\n" );
+                else
+                {
+                    DWORD tiffHeader = GetDWORD( dataOffset, true );
+                    if ( tiffHeader != 0x002a4949 && tiffHeader != 0x2a004d4d )
+                        prf( "invalid TIFF header in PNG eXIf chunk\n" );
+                    else
+                        exifOffset = dataOffset;
+                }
+            }
+            else if ( 0 == memcmp( type, "tRNS", 4 ) )
+            {
+                if ( colorType == 3 && sawPLTE && length <= paletteEntries )
+                {
+                    prf( "palette transparency: %u entries\n", length );
+                    for ( DWORD i = 0; i < length; i++ )
+                        prf( "    %3u: alpha %3u\n", i, GetBYTE( dataOffset + i ) );
+                }
+                else if ( ( colorType == 0 && length == 2 ) || ( colorType == 2 && length == 6 ) )
+                {
+                    prf( "transparent sample value(s):" );
+                    for ( DWORD i = 0; i < length; i += 2 )
+                        prf( " %u", GetWORD( dataOffset + i, false ) );
+                    prf( "\n" );
+                }
+                else
+                    prf( "invalid PNG tRNS chunk length %u for color type %u\n", length, colorType );
+            }
+            else if ( 0 == memcmp( type, "sBIT", 4 ) )
+            {
+                static const char * names[][4] = {
+                    { "gray", NULL, NULL, NULL }, { "red", "green", "blue", NULL },
+                    { "red", "green", "blue", NULL }, { "red", "green", "blue", NULL },
+                    { "gray", "alpha", NULL, NULL }, { "red", "green", "blue", "alpha" }
+                };
+                static const DWORD expectedLengths[] = { 1, 0, 3, 3, 2, 4, 4 };
+                DWORD expectedLength = expectedLengths[ colorType ];
+                if ( length != expectedLength )
+                    prf( "invalid PNG sBIT chunk length %u for color type %u\n", length, colorType );
+                else
+                {
+                    prf( "significant bits:\n" );
+                    for ( DWORD i = 0; i < length; i++ )
+                        prf( "  %-8s %u\n", names[ colorType ][ i ], GetBYTE( dataOffset + i ) );
+                }
+            }
+            else if ( 0 == memcmp( type, "bKGD", 4 ) )
+            {
+                if ( colorType == 3 && length == 1 )
+                    prf( "background palette index:              %u\n", GetBYTE( dataOffset ) );
+                else if ( ( colorType == 0 || colorType == 4 ) && length == 2 )
+                    prf( "background gray sample:                 %u\n", GetWORD( dataOffset, false ) );
+                else if ( ( colorType == 2 || colorType == 6 ) && length == 6 )
+                    prf( "background RGB sample:                  %u, %u, %u\n",
+                         GetWORD( dataOffset, false ), GetWORD( dataOffset + 2, false ),
+                         GetWORD( dataOffset + 4, false ) );
+                else
+                    prf( "invalid PNG bKGD chunk length %u for color type %u\n", length, colorType );
+            }
+            else if ( 0 == memcmp( type, "oFFs", 4 ) )
+            {
+                if ( length != 9 )
+                    prf( "invalid PNG oFFs chunk length %u\n", length );
+                else
+                    prf( "image offset:                         %d, %d (unit %u)\n",
+                         (LONG) GetDWORD( dataOffset, false ), (LONG) GetDWORD( dataOffset + 4, false ),
+                         GetBYTE( dataOffset + 8 ) );
+            }
+            else if ( ( type[ 0 ] & 0x20 ) == 0 )
+            {
+                prf( "unrecognized critical PNG chunk %.4s, length %u\n", type, length );
+                return 0;
+            }
+            else
+            {
+                prf( "unrecognized ancillary PNG chunk %.4s, length %u\n", type, length );
+                if ( g_FullInformation && length )
+                    DumpBinaryData( dataOffset, 0, length, 8, (DWORD) dataOffset );
+            }
         }
 
-        offset += ( 12 + len );
-    } while( true );
+        if ( sawIDAT && 0 != memcmp( type, "IDAT", 4 ) && 0 != memcmp( type, "IEND", 4 ) )
+            idatEnded = true;
 
-    prf( "IDAT segments:         %16d\n", idatSegments );
-    prf( "IDAT data bytes:       %16d\n", idatSize );
+        offset = crcOffset + 4;
+        if ( sawIEND )
+        {
+            if ( offset < fileLength )
+                prf( "trailing data after PNG IEND: %I64d bytes\n", fileLength - offset );
+            break;
+        }
+    }
+
+    if ( !sawIHDR || !sawIDAT || !sawIEND )
+    {
+        prf( "incomplete PNG: missing %s%s%s\n",
+             sawIHDR ? "" : "IHDR ",
+             sawIDAT ? "" : "IDAT ",
+             sawIEND ? "" : "IEND" );
+        return 0;
+    }
+
+    prf( "IDAT segments:         %16u\n", idatSegments );
+    prf( "IDAT data bytes:       %16I64u\n", idatSize );
+    return exifOffset;
 } //ParsePNG
 
 const char * BmpCompression( DWORD c )
@@ -6930,14 +10766,41 @@ const char * BmpCompression( DWORD c )
     if ( BI_BITFIELDS == c )
         return "bitfields";
 
+    if ( 6 == c )
+        return "alpha bitfields";
+
     if ( BI_JPEG == c )
         return "JPEG";
 
     if ( BI_PNG == c )
         return "PNG";
 
+    if ( 11 == c )
+        return "CMYK";
+
+    if ( 12 == c )
+        return "CMYK RLE8";
+
+    if ( 13 == c )
+        return "CMYK RLE4";
+
     return "unknown";
 } //BmpCompression
+
+const char * BmpBitDepth( WORD bits )
+{
+    switch ( bits )
+    {
+        case 1: return "monochrome";
+        case 4: return "16-color indexed";
+        case 8: return "256-color indexed";
+        case 16: return "high color";
+        case 24: return "true color";
+        case 32: return "true color";
+    }
+
+    return "unknown";
+} //BmpBitDepth
 
 const char * BmpColorSpace( DWORD cs )
 {
@@ -6980,63 +10843,231 @@ void ParseBMP()
 {
     prf( "mimetype:                             image/bmp\n" );
 
-    BITMAPFILEHEADER bfh;
-    GetBytes( 0, &bfh, sizeof bfh );
-
-    prf( "type:                         %#x %#x == %c%c\n", bfh.bfType & 0xff, bfh.bfType >> 8, bfh.bfType & 0xff, bfh.bfType >> 8 );
-    prf( "size of file field:%20d\n", bfh.bfSize );
-
-    if ( bfh.bfSize != g_pStream->Length() )
-        prf( "  (warning: file size %lld isn't the same as bitmap file header size %d)\n", g_pStream->Length(), bfh.bfSize );
-
-    prf( "reserved 1:          %18d\n", bfh.bfReserved1 );
-    prf( "reserved 2:          %18d\n", bfh.bfReserved2 );
-    prf( "offset of bits:      %18d\n", bfh.bfOffBits );
-
-    BITMAPV5HEADER bih;
-    GetBytes( sizeof bfh, &bih, sizeof bih );
-
-    prf( "header size:         %18d\n", bih.bV5Size );
-    prf( "width:               %18d\n", bih.bV5Width );
-    prf( "height:              %18d\n", bih.bV5Height );
-    prf( "planes:              %18d\n", bih.bV5Planes );
-    prf( "bit count:           %18d\n", bih.bV5BitCount );
-    prf( "compression:         %18d == %s\n", bih.bV5Compression, BmpCompression( bih.bV5Compression ) );
-    prf( "size of image:       %18d\n", bih.bV5SizeImage );
-    prf( "pixels per meter X:  %18d\n", bih.bV5XPelsPerMeter );
-    prf( "pixels per meter Y:  %18d\n", bih.bV5YPelsPerMeter );
-    prf( "color indices:       %18d\n", bih.bV5ClrUsed );
-    prf( "colors required:     %18d\n", bih.bV5ClrImportant );
-
-    if ( bih.bV5Size >= sizeof BITMAPV4HEADER )
+    if ( !IsFileRangeValid( 0, 14 ) )
     {
-        // >= bV5RedMask
-
-        if ( BI_BITFIELDS == bih.bV5Compression )
-            prf( "RGB masks:                            %#010x %#010x %#010x\n", bih.bV5RedMask, bih.bV5GreenMask, bih.bV5BlueMask );
-
-        if ( LCS_CALIBRATED_RGB == bih.bV5CSType )
-        {
-            prf( "gamma red:        %#21x\n", bih.bV5GammaRed );
-            prf( "gamma green:      %#21x\n", bih.bV5GammaGreen );
-            prf( "gamma blue:       %#21x\n", bih.bV5GammaBlue );
-        }
-
-        prf( "alpha mask:                  %#010x\n", bih.bV5AlphaMask );
-        prf( "color space:         %18d == %s\n", bih.bV5CSType, BmpColorSpace( bih.bV5CSType ) );
+        prf( "BMP file header is truncated\n" );
+        return;
     }
 
-    if ( bih.bV5Size >= sizeof BITMAPV5HEADER )
+    WORD fileType = GetWORD( 0, true );
+    DWORD declaredFileSize = GetDWORD( 2, true );
+    WORD reserved1 = GetWORD( 6, true );
+    WORD reserved2 = GetWORD( 8, true );
+    DWORD pixelOffset = GetDWORD( 10, true );
+    __int64 fileLength = GetStreamLength();
+
+    prf( "type:                         %#x %#x == %c%c\n", fileType & 0xff, fileType >> 8, fileType & 0xff, fileType >> 8 );
+    prf( "declared file size:            %18u\n", declaredFileSize );
+    prf( "container length:              %18lld\n", fileLength );
+    if ( declaredFileSize > fileLength )
+        prf( "  (warning: declared bitmap size exceeds available data by %lld bytes)\n", (__int64) declaredFileSize - fileLength );
+    else if ( declaredFileSize && declaredFileSize < fileLength )
+        prf( "  trailing bytes after declared bitmap: %u\n", (DWORD) ( fileLength - declaredFileSize ) );
+
+    prf( "reserved 1:                    %18u\n", reserved1 );
+    prf( "reserved 2:                    %18u\n", reserved2 );
+    prf( "pixel data offset:             %18u\n", pixelOffset );
+    if ( declaredFileSize && declaredFileSize < pixelOffset )
+        prf( "  (warning: declared bitmap size ends before the pixel data)\n" );
+
+    if ( !IsFileRangeValid( 14, sizeof( DWORD ) ) )
     {
-        // >= bV5Intent
+        prf( "DIB header size is unavailable; file is truncated\n" );
+        return;
+    }
 
-        prf( "intent:              %18d == %s\n", bih.bV5Intent, BmpIntent( bih.bV5Intent ) );
+    DWORD headerSize = GetDWORD( 14, true );
+    prf( "header size:                   %18u\n", headerSize );
 
-        if ( PROFILE_LINKED == bih.bV5CSType || PROFILE_EMBEDDED == bih.bV5CSType )
+    if ( 12 == headerSize )
+    {
+        if ( !IsFileRangeValid( 14, headerSize ) )
         {
-            prf( "profile offset:       %18d\n", bih.bV5ProfileData );
-            prf( "profile size:         %18d\n", bih.bV5ProfileSize );
+            prf( "OS/2 BITMAPCOREHEADER is truncated\n" );
+            return;
         }
+
+        DWORD width = GetWORD( 18, true );
+        DWORD height = GetWORD( 20, true );
+        WORD planes = GetWORD( 22, true );
+        WORD bitCount = GetWORD( 24, true );
+        DWORD paletteEntries = bitCount <= 8 ? ( 1u << bitCount ) : 0;
+        __int64 paletteOffset = 14 + headerSize;
+        __int64 paletteBytes = pixelOffset >= paletteOffset ? pixelOffset - paletteOffset : 0;
+
+        prf( "header type:                    OS/2 BITMAPCOREHEADER\n" );
+        prf( "width:                          %18u\n", width );
+        prf( "height:                         %18u (bottom-up)\n", height );
+        prf( "planes:                         %18u\n", planes );
+        prf( "bit count:                      %18u == %s\n", bitCount, BmpBitDepth( bitCount ) );
+        prf( "compression:                    uncompressed\n" );
+        if ( paletteEntries )
+        {
+            unsigned __int64 availableEntryCount = (unsigned __int64) paletteBytes / 3;
+            DWORD availableEntries = availableEntryCount < paletteEntries ? (DWORD) availableEntryCount : paletteEntries;
+            prf( "palette entries:                %u of %u expected\n", availableEntries, paletteEntries );
+            if ( availableEntries < paletteEntries )
+                prf( "  (warning: color table overlaps pixel data or is truncated)\n" );
+        }
+        if ( pixelOffset < paletteOffset || pixelOffset > fileLength )
+            prf( "  (warning: pixel data offset is outside the valid BMP data range)\n" );
+        return;
+    }
+
+    if ( headerSize < 40 || 64 == headerSize ||
+         !IsFileRangeValid( 14, headerSize ) )
+    {
+        prf( "unsupported or truncated DIB header (%u bytes)\n", headerSize );
+        return;
+    }
+
+    LONG width = (LONG) GetDWORD( 18, true );
+    LONG signedHeight = (LONG) GetDWORD( 22, true );
+    WORD planes = GetWORD( 26, true );
+    WORD bitCount = GetWORD( 28, true );
+    DWORD compression = GetDWORD( 30, true );
+    DWORD imageSize = GetDWORD( 34, true );
+    LONG xPixelsPerMeter = (LONG) GetDWORD( 38, true );
+    LONG yPixelsPerMeter = (LONG) GetDWORD( 42, true );
+    DWORD colorsUsed = GetDWORD( 46, true );
+    DWORD colorsImportant = GetDWORD( 50, true );
+    const char * headerType = 40 == headerSize ? "Windows BITMAPINFOHEADER" :
+                              52 == headerSize ? "Windows V2" :
+                              56 == headerSize ? "Windows V3" :
+                              108 == headerSize ? "Windows V4" :
+                              124 == headerSize ? "Windows V5" : "Windows DIB";
+    prf( "header type:                    %s\n", headerType );
+    prf( "width:                          %18d\n", width );
+    if ( 0 == signedHeight )
+        prf( "height:                         0 (invalid)\n" );
+    else if ( signedHeight < 0 )
+        prf( "height:                         %18lld (top-down)\n", -(long long) signedHeight );
+    else
+        prf( "height:                         %18d (bottom-up)\n", signedHeight );
+    prf( "planes:                         %18u\n", planes );
+    prf( "bit count:                      %18u == %s\n", bitCount, BmpBitDepth( bitCount ) );
+    prf( "compression:                    %18u == %s\n", compression, BmpCompression( compression ) );
+    prf( "size of image:                  %18u\n", imageSize );
+    prf( "pixels per meter X:             %18d\n", xPixelsPerMeter );
+    prf( "pixels per meter Y:             %18d\n", yPixelsPerMeter );
+    prf( "color indices:                  %18u\n", colorsUsed );
+    prf( "colors required:                %18u\n", colorsImportant );
+
+    DWORD redMask = 0, greenMask = 0, blueMask = 0, alphaMask = 0;
+    __int64 maskOffset = 14 + 40;
+    if ( headerSize >= 52 )
+    {
+        redMask = GetDWORD( 54, true );
+        greenMask = GetDWORD( 58, true );
+        blueMask = GetDWORD( 62, true );
+        if ( headerSize >= 56 )
+            alphaMask = GetDWORD( 66, true );
+    }
+    else if ( 40 == headerSize && ( BI_BITFIELDS == compression || 6 == compression ) )
+    {
+        DWORD maskCount = 3 == compression ? 3 : 4;
+        if ( IsFileRangeValid( maskOffset, (QWORD) maskCount * sizeof( DWORD ) ) &&
+             14 + headerSize + maskCount * sizeof( DWORD ) <= pixelOffset )
+        {
+            redMask = GetDWORD( maskOffset, true );
+            greenMask = GetDWORD( maskOffset + 4, true );
+            blueMask = GetDWORD( maskOffset + 8, true );
+            if ( 4 == maskCount )
+                alphaMask = GetDWORD( maskOffset + 12, true );
+            maskOffset += maskCount * sizeof( DWORD );
+        }
+        else
+            prf( "  (warning: color masks are truncated or overlap pixel data)\n" );
+    }
+
+    if ( redMask || greenMask || blueMask )
+        prf( "RGB masks:                      %#010x %#010x %#010x\n", redMask, greenMask, blueMask );
+    if ( alphaMask )
+        prf( "alpha mask:                     %#010x\n", alphaMask );
+
+    DWORD colorSpace = 0;
+    if ( headerSize >= 108 )
+    {
+        colorSpace = GetDWORD( 70, true );
+        prf( "color space:                    %#010x == %s\n", colorSpace, BmpColorSpace( colorSpace ) );
+        if ( LCS_CALIBRATED_RGB == colorSpace )
+        {
+            prf( "gamma red:                      %#010x\n", GetDWORD( 110, true ) );
+            prf( "gamma green:                    %#010x\n", GetDWORD( 114, true ) );
+            prf( "gamma blue:                     %#010x\n", GetDWORD( 118, true ) );
+        }
+    }
+
+    if ( headerSize >= 124 )
+    {
+        DWORD intent = GetDWORD( 122, true );
+        DWORD profileData = GetDWORD( 126, true );
+        DWORD profileSize = GetDWORD( 130, true );
+        __int64 profileOffset = 14 + (__int64) profileData;
+        prf( "intent:                         %18u == %s\n", intent, BmpIntent( intent ) );
+        if ( PROFILE_LINKED == colorSpace || PROFILE_EMBEDDED == colorSpace )
+        {
+            prf( "profile offset:                 %18u (DIB-relative; file offset %lld)\n", profileData, profileOffset );
+            prf( "profile size:                   %18u\n", profileSize );
+            if ( !IsFileRangeValid( profileOffset, profileSize ) )
+                prf( "  (warning: color profile extends beyond available file data)\n" );
+        }
+    }
+
+    if ( 0 == width || 0 == signedHeight || width < 0 ||
+         (unsigned __int64) (unsigned int) width > UINT_MAX / 4 )
+    {
+        prf( "row layout:                     unavailable (invalid dimensions)\n" );
+        return;
+    }
+
+    unsigned __int64 absHeight = signedHeight < 0 ? (unsigned __int64) -(long long) signedHeight : (unsigned __int64) signedHeight;
+    unsigned __int64 rowBits = (unsigned __int64) (unsigned int) width * bitCount;
+    unsigned __int64 rowStride = ((rowBits + 31) / 32) * 4;
+    if ( rowStride > ULLONG_MAX / absHeight )
+    {
+        prf( "row layout:                     unavailable (dimensions overflow)\n" );
+        return;
+    }
+
+    unsigned __int64 calculatedImageSize = rowStride * absHeight;
+    prf( "row stride:                     %18llu bytes\n", rowStride );
+    if ( BI_RGB == compression || BI_BITFIELDS == compression || 6 == compression )
+        prf( "calculated pixel array:         %18llu bytes\n", calculatedImageSize );
+
+    DWORD paletteEntries = colorsUsed;
+    if ( 0 == paletteEntries && bitCount <= 8 )
+        paletteEntries = 1u << bitCount;
+    __int64 paletteOffset = 14 + headerSize;
+    __int64 paletteBytes = pixelOffset >= paletteOffset ? pixelOffset - paletteOffset : 0;
+    if ( 40 == headerSize && ( BI_BITFIELDS == compression || 6 == compression ) )
+        paletteOffset = maskOffset;
+    paletteBytes = pixelOffset >= paletteOffset ? pixelOffset - paletteOffset : 0;
+    if ( paletteEntries )
+    {
+        DWORD entrySize = headerSize == 12 ? 3 : 4;
+        unsigned __int64 expectedPaletteBytes = (unsigned __int64) paletteEntries * entrySize;
+        prf( "palette entries:                %18u (expected %llu bytes, %lld available before pixels)\n",
+             paletteEntries, expectedPaletteBytes, paletteBytes );
+        if ( expectedPaletteBytes > (unsigned __int64) paletteBytes )
+            prf( "  (warning: color table overlaps pixel data or is truncated)\n" );
+    }
+
+    if ( pixelOffset < 14 + headerSize || pixelOffset > fileLength )
+        prf( "  (warning: pixel data offset is outside the valid BMP data range)\n" );
+    else
+    {
+        __int64 availablePixelBytes = fileLength - pixelOffset;
+        if ( declaredFileSize && declaredFileSize >= pixelOffset && declaredFileSize <= fileLength )
+            availablePixelBytes = declaredFileSize - pixelOffset;
+        prf( "available pixel data:           %18lld bytes\n", availablePixelBytes );
+
+        if ( 0 != imageSize && imageSize > availablePixelBytes )
+            prf( "  (warning: declared image data exceeds available pixel bytes)\n" );
+        else if ( 0 == imageSize &&
+                  ( BI_RGB == compression || BI_BITFIELDS == compression || 6 == compression ) &&
+                  calculatedImageSize > (unsigned __int64) availablePixelBytes )
+            prf( "  (warning: calculated pixel array exceeds available pixel bytes)\n" );
     }
 } //ParseBMP
 
@@ -7107,118 +11138,193 @@ void ConvertInvalidCharsToDot( WCHAR * pwc )
     }
 } //ConvertInvalidCharsToDot
 
-void ReadMP3String( __int64 offset, WCHAR * pwc, int cwc, int maxBytes, bool lang, bool throwawayField = false, bool invalidCharsToDot = true )
+int DecodeMP3Text( const byte * data, int length, byte encoding, WCHAR * output, int outputCount )
 {
-    int cbOutput = cwc * sizeof WCHAR;
-    if ( cwc > 0 )
-        *pwc = 0;
-
-    if ( maxBytes > cbOutput )
-    {
-        prf( "maxBytes %d is > cbOutput %d; truncating\n", maxBytes, cbOutput );
-        maxBytes = cbOutput - 2;
-    }
-
-    unique_ptr<byte> data( new byte[ maxBytes ] );
-    GetBytes( offset, data.get(), maxBytes );
-    int o = 0;
-    byte encoding = data.get()[ o++ ];
-
-    if ( o >= maxBytes )
-        return;
-
-    if ( encoding > 3 )
-    {
-        // there must not be an encoding
-
-        encoding = 0;
-        o--;
-    }
-
-    if ( lang )
-    {
-        // skip past the language tag
-
-        o += 3;
-    }
-
-    if ( o >= maxBytes )
-        return;
-
-    // skip past the throwaway null-terminated string
-
-    if ( throwawayField )
-    {
-        if ( 0 == encoding || 3 == encoding )
-        {
-            while ( 0 != data.get()[ o ] )
-            {
-                o++;
-
-                if ( o >= maxBytes )
-                    return;
-            }
-
-            o++;
-        }
-        else if ( 1 == encoding || 2 == encoding )
-        {
-            while ( 0 != ( data.get()[ o ] | ( ( data.get()[ o + 1 ] ) << 8 ) ) )
-            {
-                o += 2;
-
-                if ( o >= maxBytes )
-                    return;
-            }
-
-            o += 2;
-        }
-    }
-
-    if ( o >= maxBytes )
-        return;
+    if ( outputCount <= 0 )
+        return 0;
+    output[ 0 ] = 0;
 
     if ( 0 == encoding || 3 == encoding )
     {
-        int cwcWritten = MultiByteToWideChar( CP_UTF8, 0, (char *) data.get() + o, maxBytes - o, pwc, cwc );
-        pwc[ cwcWritten ] = 0;
+        while ( length > 0 && 0 == data[ length - 1 ] )
+            length--;
+        UINT codePage = ( 0 == encoding ) ? 28591 : CP_UTF8;
+        int written = MultiByteToWideChar( codePage, 0, (const char *) data, length, output, outputCount - 1 );
+        output[ written ] = 0;
+        return written;
     }
-    else if ( 1 == encoding )
-    {
-        WCHAR *pwcInput = (WCHAR *) ( data.get() + o );
 
-        if ( 0xfeff == *pwcInput )
-        {
-            pwcInput++;
-            o += 2;
-        }
-
-        int wchars = ( maxBytes - o ) / 2;
-        memcpy( pwc, pwcInput, 2 * wchars );
-        pwc[ wchars ] = 0;
-    
-        // Convert some well-known Unicode chars to ascii equivalents so they
-        // appear correctly in a CMD window
-        
-        for ( int i = 0; i < wcslen( pwc ); i++ )
-        {
-            // Right and Left Single Quotation Mark
-        
-            if ( 0x2019 == pwc[ i ] || 0x2018 == pwc[ i ] )
-                pwc[i] = '\'';
-        }
-    }
-    else if ( 2 == encoding )
+    if ( 1 == encoding || 2 == encoding )
     {
-        // UTF-16. I've yet to find an mp3 file with this
-        prf( "MP3 file with encoding 2!\n" );
+        bool littleEndian = false;
+        if ( length >= 2 && 0xfe == data[ 0 ] && 0xff == data[ 1 ] )
+        {
+            littleEndian = true;
+            data += 2;
+            length -= 2;
+        }
+        else if ( length >= 2 && 0xff == data[ 0 ] && 0xfe == data[ 1 ] )
+        {
+            littleEndian = true;
+            data += 2;
+            length -= 2;
+        }
+        int written = 0;
+        for ( int i = 0; i + 1 < length && written < outputCount - 1; i += 2 )
+        {
+            WORD character = littleEndian
+                ? (WORD) ( data[ i ] | ( data[ i + 1 ] << 8 ) )
+                : (WORD) ( ( data[ i ] << 8 ) | data[ i + 1 ] );
+            if ( 0 == character )
+                break;
+            output[ written++ ] = character;
+        }
+        output[ written ] = 0;
+        return written;
     }
-    else
-        prf( "unknown string encoding: %d\n", encoding );
+
+    return 0;
+} //DecodeMP3Text
+
+bool ReadMP3String( __int64 offset, WCHAR * pwc, int cwc, int maxBytes, bool lang,
+                    bool throwawayField = false, bool invalidCharsToDot = true,
+                    bool unsynchronize = false, WCHAR * description = NULL,
+                    bool hasEncodingByte = true )
+{
+    if ( cwc <= 0 )
+        return false;
+    pwc[ 0 ] = 0;
+    if ( NULL != description )
+        description[ 0 ] = 0;
+    if ( maxBytes <= 0 )
+        return false;
+
+    vector<byte> data( maxBytes );
+    GetBytes( offset, data.data(), maxBytes );
+    if ( unsynchronize )
+    {
+        size_t write = 0;
+        for ( size_t read = 0; read < data.size(); read++ )
+        {
+            data[ write++ ] = data[ read ];
+            if ( 0xff == data[ read ] && read + 1 < data.size() && 0 == data[ read + 1 ] &&
+                 ( read + 2 == data.size() || 0 == data[ read + 2 ] || data[ read + 2 ] >= 0xe0 ) )
+                read++;
+        }
+        data.resize( write );
+    }
+
+    if ( data.empty() )
+        return false;
+    byte encoding = hasEncodingByte ? data[ 0 ] : 0;
+    if ( hasEncodingByte && encoding > 3 )
+        return false;
+
+    size_t textOffset = hasEncodingByte ? 1 : 0;
+    if ( lang )
+        textOffset += 3;
+    if ( textOffset > data.size() )
+        return false;
+    size_t descriptionOffset = textOffset;
+
+    if ( throwawayField )
+    {
+        size_t terminator = textOffset;
+        if ( 0 == encoding || 3 == encoding )
+        {
+            while ( terminator < data.size() && 0 != data[ terminator ] )
+                terminator++;
+            if ( terminator == data.size() )
+                return false;
+            textOffset = terminator + 1;
+        }
+        else
+        {
+            while ( terminator + 1 < data.size() &&
+                    ( 0 != data[ terminator ] || 0 != data[ terminator + 1 ] ) )
+                terminator += 2;
+            if ( terminator + 1 >= data.size() )
+                return false;
+            textOffset = terminator + 2;
+        }
+    }
+
+    DecodeMP3Text( data.data() + textOffset, (int) ( data.size() - textOffset ), encoding, pwc, cwc );
+
+    if ( NULL != description )
+    {
+        size_t descriptionEnd = descriptionOffset;
+        if ( 0 == encoding || 3 == encoding )
+        {
+            while ( descriptionEnd < data.size() && 0 != data[ descriptionEnd ] )
+                descriptionEnd++;
+        }
+        else
+        {
+            while ( descriptionEnd + 1 < data.size() &&
+                    ( 0 != data[ descriptionEnd ] || 0 != data[ descriptionEnd + 1 ] ) )
+                descriptionEnd += 2;
+        }
+        DecodeMP3Text( data.data() + descriptionOffset, (int) ( descriptionEnd - descriptionOffset ), encoding, description, cwc );
+    }
 
     if ( invalidCharsToDot )
         ConvertInvalidCharsToDot( pwc );
+    return true;
 } //ReadMP3String
+
+DWORD ReadSyncSafeDWORD( const byte * data )
+{
+    return ( (DWORD) ( data[ 0 ] & 0x7f ) << 21 ) |
+           ( (DWORD) ( data[ 1 ] & 0x7f ) << 14 ) |
+           ( (DWORD) ( data[ 2 ] & 0x7f ) << 7 ) |
+           (DWORD) ( data[ 3 ] & 0x7f );
+} //ReadSyncSafeDWORD
+
+const char * GetMP3Genre( int g );
+
+void PrintMP3ID3v1( __int64 fileLength, WCHAR * value, int valueCount,
+                    bool hasTitle, bool hasArtist, bool hasAlbum, bool hasYear,
+                    bool hasComment, bool hasTrack, bool hasGenre )
+{
+    if ( fileLength < 128 )
+        return;
+
+    struct ID3v1Tag
+    {
+        char id[ 3 ];
+        char title[ 30 ];
+        char artist[ 30 ];
+        char album[ 30 ];
+        char year[ 4 ];
+        char comment[ 30 ];
+        byte genre;
+    } tag = {};
+    GetBytes( fileLength - sizeof tag, &tag, sizeof tag );
+    if ( 0 != memcmp( tag.id, "TAG", 3 ) )
+        return;
+
+    auto printText = [&]( const char * label, const char * data, int length )
+    {
+        while ( length > 0 && ( 0 == data[ length - 1 ] || ' ' == data[ length - 1 ] ) )
+            length--;
+        if ( 0 == length )
+            return;
+        DecodeMP3Text( (const byte *) data, length, 0, value, valueCount );
+        wprf( L"%S: %ws\n", label, value );
+    };
+
+    if ( !hasTitle ) printText( "Title", tag.title, sizeof tag.title );
+    if ( !hasArtist ) printText( "Lead performer(s)", tag.artist, sizeof tag.artist );
+    if ( !hasAlbum ) printText( "Album", tag.album, sizeof tag.album );
+    if ( !hasYear ) printText( "Year", tag.year, sizeof tag.year );
+    if ( !hasComment ) printText( "Comments", tag.comment, ( 0 == tag.comment[ 28 ] ) ? 28 : 30 );
+
+    if ( !hasTrack && 0 == tag.comment[ 28 ] && 0 != tag.comment[ 29 ] )
+        prf( "Track:                %u\n", (byte) tag.comment[ 29 ] );
+    if ( !hasGenre && 255 != tag.genre )
+        prf( "Genre:                %u == %s\n", tag.genre, GetMP3Genre( tag.genre ) );
+} //PrintMP3ID3v1
 
 const char * GetMPEGAudioVersion( int x )
 {
@@ -7620,7 +11726,7 @@ void ParseMP3()
     #pragma pack(push, 1)
 
     __int64 len = g_pStream->Length();
-    if ( len < 128 )
+    if ( len <= 0 )
         return;
 
     prf( "mimetype:             audio/mpeg\n" );
@@ -7629,9 +11735,14 @@ void ParseMP3()
     // other mp3 files have random header info that's not documented anywhere followed by 11 bits set.
 
     DWORD dwHead = 0;
-    GetBytes( 0, &dwHead, sizeof dwHead );
+    if ( len >= 4 )
+        GetBytes( 0, &dwHead, sizeof dwHead );
     bool ID3HeaderExists = ( 0x334449 == ( dwHead & 0xffffff ) ); // "ID3"
-    int bitstreamOffset = 0;
+    __int64 bitstreamOffset = 0;
+    bool id3v2Unsynchronize = false;
+    bool hasTitle = false, hasArtist = false, hasAlbum = false;
+    bool hasYear = false, hasComment = false, hasTrack = false, hasGenre = false;
+    WCHAR awcID3v1[ 256 ];
 
     if ( ID3HeaderExists )
     {
@@ -7645,33 +11756,61 @@ void ParseMP3()
     
         ID3v2Header start;
         memset( &start, 0, sizeof start );
+        if ( len < sizeof start )
+        {
+            prf( "invalid truncated ID3 header\n" );
+            return;
+        }
         GetBytes( 0, &start, sizeof start );
-        start.size = _byteswap_ulong( start.size );
-        start.size = ( ( start.size & 0x7f000000 ) >> 3 ) | ( ( start.size & 0x7f0000 ) >> 2 ) | ( ( start.size & 0x7f00 ) >> 1 ) | ( start.size & 0x7f );
+        DWORD tagSize = ReadSyncSafeDWORD( (const byte *) &start.size );
+        start.size = tagSize;
+
+        if ( start.ver[ 0 ] < 2 || start.ver[ 0 ] > 4 || 0xff == start.ver[ 1 ] ||
+             (__int64) tagSize > len - sizeof start )
+        {
+            prf( "invalid or unsupported ID3v2 header/version/size\n" );
+            return;
+        }
     
         __int64 firstFrameOffset = sizeof start;
         bitstreamOffset = start.size + firstFrameOffset;
-    
-        #if false // I've not found a file that has this.
-            struct ID3v2ExtendedHeader
+
+        id3v2Unsynchronize = 0 != ( start.flags & 0x80 );
+        if ( 0 != ( start.flags & 0x40 ) )
+        {
+            if ( 2 == start.ver[ 0 ] )
             {
-                DWORD size;
-                WORD flags;
-                DWORD paddingSize;
-            };
-        
-            ID3v2ExtendedHeader extendedHeader;
-            memset( &extendedHeader, 0, sizeof extendedHeader );
-            bool extendedHeaderExists = 0 != ( start.flags & 0x20 );
-            if ( extendedHeaderExists )
-            {
-                // untested: I haven't seen a file that uses this code
-        
-                GetBytes( firstFrameOffset, &extendedHeader, sizeof extendedHeader );
-                firstFrameOffset += sizeof extendedHeader;
-                prf( "extended MP3 header exists\n" );
+                prf( "compressed ID3v2.2 tag is unsupported\n" );
+                return;
             }
-        #endif
+
+            DWORD extendedHeaderSize = 0;
+            if ( 3 == start.ver[ 0 ] )
+                extendedHeaderSize = GetDWORD( firstFrameOffset, false ) + 4;
+            else
+            {
+                byte syncSafeSize[ 4 ];
+                GetBytes( firstFrameOffset, syncSafeSize, sizeof syncSafeSize );
+                extendedHeaderSize = ReadSyncSafeDWORD( syncSafeSize );
+            }
+
+            if ( extendedHeaderSize < 4 || extendedHeaderSize > start.size )
+            {
+                prf( "invalid ID3 extended-header size: %u\n", extendedHeaderSize );
+                return;
+            }
+            firstFrameOffset += extendedHeaderSize;
+            prf( "ID3 extended header: %u bytes\n", extendedHeaderSize );
+        }
+
+        __int64 frameDataEnd = bitstreamOffset;
+        if ( 4 == start.ver[ 0 ] && 0 != ( start.flags & 0x10 ) )
+            frameDataEnd -= 10;
+        if ( frameDataEnd < firstFrameOffset || frameDataEnd > len )
+        {
+            prf( "invalid ID3 tag boundary\n" );
+            return;
+        }
     
         prf( "ID3 version:          ID3v2.%d.%d\n", start.ver[0], start.ver[1] );
         prf( "  flags:              %#x\n", start.flags );
@@ -7695,8 +11834,11 @@ void ParseMP3()
         ID3v23FrameHeader frameHeader;
         WCHAR awcField[ 8192 ];
     
-        while ( frameOffset < ( start.size + firstFrameOffset ) )
+        while ( frameOffset < frameDataEnd )
         {
+            if ( frameDataEnd - frameOffset < ( 2 == start.ver[ 0 ] ? 6 : 10 ) )
+                break;
+
             if ( g_FullInformation )
                 prf( "reading next frame at offset %I64d\n", frameOffset );
     
@@ -7722,7 +11864,11 @@ void ParseMP3()
             else if ( start.ver[0] >= 3 )
             {
                 GetBytes( frameOffset, &frameHeader, sizeof frameHeader );
-                frameHeader.size = _byteswap_ulong( frameHeader.size );
+                if ( 4 == start.ver[0] )
+                    frameHeader.size = ReadSyncSafeDWORD( (const byte *) &frameHeader.size );
+                else
+                    frameHeader.size = _byteswap_ulong( frameHeader.size );
+                frameHeader.flags = (WORD) ( ( GetBYTE( frameOffset + 8 ) << 8 ) | GetBYTE( frameOffset + 9 ) );
             }
     
             if ( g_FullInformation )
@@ -7734,7 +11880,14 @@ void ParseMP3()
     
             if ( 0 == frameHeader.size )
                 break;
-    
+
+            if ( frameOffset + frameHeaderSize > frameDataEnd ||
+                 frameHeader.size > frameDataEnd - frameOffset - frameHeaderSize )
+            {
+                prf( "invalid ID3 frame size: %u exceeds tag boundary\n", frameHeader.size );
+                break;
+            }
+
             if ( frameHeader.size > 1024 * 1024 * 40 )
             {
                 prf( "invalid frame size is too large: %u == %#x\n", frameHeader.size, frameHeader.size );
@@ -7752,12 +11905,85 @@ void ParseMP3()
                 DumpBinaryData( frameOffset + frameHeaderSize, 0, frameHeader.size, 4, frameOffset + frameHeaderSize );
     
             awcField[0] = 0;
-    
+
+            __int64 framePayloadOffset = frameOffset + frameHeaderSize;
+            int framePayloadSize = frameHeader.size;
+            int physicalFramePayloadSize = frameHeader.size;
+            int framePayloadReadSize = framePayloadSize;
+            int skippedFramePrefixSize = 0;
+            bool frameUnsynchronize = id3v2Unsynchronize;
+            WORD formatFlags = (WORD) ( frameHeader.flags & 0xff );
+            bool unsupportedFrameEncoding = false;
+            if ( 3 == start.ver[ 0 ] )
+            {
+                unsupportedFrameEncoding = 0 != ( formatFlags & 0xc0 );
+                if ( 0 != ( formatFlags & 0x20 ) && framePayloadSize > 0 )
+                {
+                    framePayloadOffset++;
+                    framePayloadSize--;
+                    skippedFramePrefixSize++;
+                }
+                if ( id3v2Unsynchronize )
+                {
+                    __int64 physicalOffset = framePayloadOffset;
+                    int logicalBytes = 0;
+                    while ( logicalBytes < framePayloadSize && physicalOffset < frameDataEnd )
+                    {
+                        byte value = GetBYTE( physicalOffset++ );
+                        logicalBytes++;
+                        if ( 0xff == value && physicalOffset < frameDataEnd && 0 == GetBYTE( physicalOffset ) &&
+                             ( physicalOffset + 1 == frameDataEnd || 0 == GetBYTE( physicalOffset + 1 ) ||
+                               GetBYTE( physicalOffset + 1 ) >= 0xe0 ) )
+                            physicalOffset++;
+                    }
+                    if ( logicalBytes != framePayloadSize )
+                    {
+                        prf( "invalid unsynchronized ID3 frame size\n" );
+                        break;
+                    }
+                    physicalFramePayloadSize = skippedFramePrefixSize +
+                                               (int) ( physicalOffset - framePayloadOffset );
+                }
+            }
+            else if ( 4 == start.ver[ 0 ] )
+            {
+                unsupportedFrameEncoding = 0 != ( formatFlags & 0x0c );
+                frameUnsynchronize = frameUnsynchronize || 0 != ( formatFlags & 0x02 );
+                if ( 0 != ( formatFlags & 0x40 ) && framePayloadSize > 0 )
+                {
+                    framePayloadOffset++;
+                    framePayloadSize--;
+                    skippedFramePrefixSize++;
+                }
+                if ( 0 != ( formatFlags & 0x01 ) )
+                {
+                    if ( framePayloadSize < 4 )
+                        unsupportedFrameEncoding = true;
+                    else
+                    {
+                        byte dataLength[ 4 ];
+                        GetBytes( framePayloadOffset, dataLength, sizeof dataLength );
+                        framePayloadOffset += 4;
+                        framePayloadSize -= 4;
+                    }
+                }
+            }
+            if ( 3 == start.ver[ 0 ] && id3v2Unsynchronize )
+                framePayloadReadSize = physicalFramePayloadSize - skippedFramePrefixSize;
+            else
+                framePayloadReadSize = framePayloadSize;
+
             if ( ( ( 'T' == frameHeader.id[0] ) && !isMP3Frame( frameHeader.id, "TXXX" ) ) ||
                    ( 'W' == frameHeader.id[0] ) )
-                ReadMP3String( frameOffset + frameHeaderSize, awcField, _countof( awcField ), frameHeader.size, false, false );
-    
-            if ( isMP3Frame( frameHeader.id, "APIC", "PIC" ) )
+                ReadMP3String( framePayloadOffset, awcField, _countof( awcField ), framePayloadReadSize,
+                               false, false, true, frameUnsynchronize, NULL,
+                               !( 'W' == frameHeader.id[0] && !isMP3Frame( frameHeader.id, "WXXX", "WXX" ) ) );
+
+            if ( unsupportedFrameEncoding )
+                prf( "skipping compressed or encrypted ID3 frame %.4s\n", frameHeader.id );
+            else if ( isMP3Frame( frameHeader.id, "APIC", "PIC" ) && frameUnsynchronize )
+                prf( "skipping unsynchronized embedded-image frame\n" );
+            else if ( isMP3Frame( frameHeader.id, "APIC", "PIC" ) )
             {
                 // Embedded image (or a link to an image)
                 // byte:                           encoding
@@ -7766,7 +11992,7 @@ void ParseMP3()
                 // null-terminated encoded string: description
                 // 
     
-                int o = frameOffset + frameHeaderSize;
+                int o = (int) framePayloadOffset;
                 int oFrameData = o;
                 byte encoding = GetBYTE( o++ );
     
@@ -7878,7 +12104,7 @@ void ParseMP3()
     
                 if ( o < ( oFrameData + frameHeader.size ) )
                 {
-                    int imageSize = frameHeader.size - ( o - oFrameData );
+                    int imageSize = framePayloadReadSize - ( o - oFrameData );
                     prf( "  image size:         %d at file offset %d\n", imageSize, o );
     
                     // Sometimes there are multiple embedded images. Use the first with a reasonable size.
@@ -7904,9 +12130,12 @@ void ParseMP3()
                 // short description: null-terminated string
                 // text:              non-null terminated string to end of size
     
-                ReadMP3String( frameOffset + frameHeaderSize, awcField, _countof( awcField ), frameHeader.size, true, true );
+                ReadMP3String( framePayloadOffset, awcField, _countof( awcField ), framePayloadReadSize, true, true, true, frameUnsynchronize );
                 if ( 0 != awcField[0] )
+                {
                     wprf( L"Comments:             %ws\n", awcField );
+                    hasComment = true;
+                }
             }
             else if ( isMP3Frame( frameHeader.id, "GEOB" ) )
             {
@@ -7938,6 +12167,7 @@ void ParseMP3()
             else if ( isMP3Frame( frameHeader.id, "TALB", "TAL" ) )
             {
                 wprf( L"Album:                %ws\n", awcField );
+                hasAlbum = 0 != awcField[ 0 ];
             }
             else if ( isMP3Frame( frameHeader.id, "TBPM", "TBP" ) )
             {
@@ -7958,6 +12188,7 @@ void ParseMP3()
                     prf( " == %s\n", GetMP3Genre( awcField ) );
                 else
                     prf( "\n" );
+                hasGenre = 0 != awcField[ 0 ];
             }
             else if ( isMP3Frame( frameHeader.id, "TCOP" ) )
             {
@@ -7974,6 +12205,7 @@ void ParseMP3()
             else if ( isMP3Frame( frameHeader.id, "TDRC" ) )
             {
                 wprf( L"Recording time:       %ws\n", awcField );
+                hasYear = 0 != awcField[ 0 ];
             }
             else if ( isMP3Frame( frameHeader.id, "TDRL" ) )
             {
@@ -7994,6 +12226,7 @@ void ParseMP3()
             else if ( isMP3Frame( frameHeader.id, "TIT2", "TT2" ) )
             {
                 wprf( L"Title:                %ws\n", awcField );
+                hasTitle = 0 != awcField[ 0 ];
             }
             else if ( isMP3Frame( frameHeader.id, "TIT3", "TT3" ) )
             {
@@ -8030,6 +12263,7 @@ void ParseMP3()
             else if ( isMP3Frame( frameHeader.id, "TPE1", "TP1" ) )
             {
                 wprf( L"Lead performer(s):    %ws\n", awcField );
+                hasArtist = 0 != awcField[ 0 ];
             }
             else if ( isMP3Frame( frameHeader.id, "TPE2", "TP2" ) )
             {
@@ -8050,6 +12284,7 @@ void ParseMP3()
             else if ( isMP3Frame( frameHeader.id, "TRCK", "TRK" ) )
             {
                 wprf( L"Track:                %ws\n", awcField );
+                hasTrack = 0 != awcField[ 0 ];
             }
             else if ( isMP3Frame( frameHeader.id, "TRDA" ) )
             {
@@ -8097,10 +12332,16 @@ void ParseMP3()
             }
             else if ( isMP3Frame( frameHeader.id, "TXXX" ) )
             {
+                WCHAR description[ 8192 ];
+                ReadMP3String( framePayloadOffset, awcField, _countof( awcField ), framePayloadReadSize,
+                               false, true, true, frameUnsynchronize, description );
+                if ( 0 != description[ 0 ] )
+                    wprf( L"User text:            %ws = %ws\n", description, awcField );
             }
             else if ( isMP3Frame( frameHeader.id, "TYER", "TYE" ) )
             {
                 wprf( L"Year:                 %ws\n", awcField );
+                hasYear = 0 != awcField[ 0 ];
             }
             else if ( isMP3Frame( frameHeader.id, "UFID", "UFI" ) )
             {
@@ -8113,7 +12354,7 @@ void ParseMP3()
                 // string           description
                 // string           lyrics
 
-                ReadMP3String( frameOffset + frameHeaderSize, awcField, _countof( awcField ), frameHeader.size, true, true, false );
+                ReadMP3String( framePayloadOffset, awcField, _countof( awcField ), framePayloadReadSize, true, true, false, frameUnsynchronize );
 
                 if ( wcschr( awcField, L'\n' ) || wcschr( awcField, L'\r' ) || wcschr( awcField, 0xa ) )
                     wprf( L"Lyrics:\n%ws\n", awcField );
@@ -8134,7 +12375,13 @@ void ParseMP3()
             }
             else if ( isMP3Frame( frameHeader.id, "WXXX", "WXX" ) )
             {
-                wprf( L"Webpage:              %ws\n", awcField );
+                WCHAR description[ 8192 ];
+                ReadMP3String( framePayloadOffset, awcField, _countof( awcField ), framePayloadSize,
+                               false, true, true, frameUnsynchronize, description );
+                if ( 0 != description[ 0 ] )
+                    wprf( L"Webpage (%ws):        %ws\n", description, awcField );
+                else
+                    wprf( L"Webpage:              %ws\n", awcField );
             }
             else
             {
@@ -8142,9 +12389,9 @@ void ParseMP3()
                         0xff & frameHeader.id[0], 0xff & frameHeader.id[1], 0xff & frameHeader.id[2], 0xff & frameHeader.id[3] );
             }
     
-            frameOffset += ( frameHeaderSize + frameHeader.size );
+            frameOffset += frameHeaderSize + physicalFramePayloadSize;
     
-            if ( frameOffset >= g_pStream->Length() )
+            if ( frameOffset > g_pStream->Length() )
             {
                 prf( "invalid frame offset is beyond the end of the file %#I64x\n", frameOffset );
                 break;
@@ -8152,49 +12399,14 @@ void ParseMP3()
     
             // the >= case will be caught in the while loop above; no need to break
     
-            if ( frameOffset > ( start.size + firstFrameOffset ) )
+            if ( frameOffset > frameDataEnd )
             {
-                prf( "invalid frame offset %I64d is beyond the size in the header + firstFrame %I64d\n", frameOffset, start.size + firstFrameOffset );
+                prf( "invalid frame offset %I64d is beyond the ID3 tag boundary %I64d\n", frameOffset, frameDataEnd );
             }
         }
     }
-    else
-    {
-        // There is apparently no modern MP3 tag data, so look for the old 128 bytes at the end of the file
-
-        struct TagsEnd
-        {
-            char tag[ 3 ];
-            char name[ 30 ];
-            char artist[ 30 ];
-            char album[ 30 ];
-            char year [ 4 ];
-            char comment[ 30 ];
-            char genre;
-        };
-    
-        TagsEnd end;
-        memset( &end, 0, sizeof end );
-        GetBytes( len - 128, &end, sizeof end );
-    
-        bool endTagExists = ( 'T' == end.tag[0] && 'A' == end.tag[1] && 'G' == end.tag[2] );
-
-        if ( endTagExists )
-        {
-            //printf( "MP3 end of file tags:\n" );
-            prf( "song name:            %.30s\n", end.name );
-            prf( "artist:               %.30s\n", end.artist );
-            prf( "album:                %.30s\n", end.album );
-            prf( "year:                 %c%c%c%c\n", end.year[0], end.year[1], end.year[2], end.year[3] );
-            prf( "comment:              %.30s\n", end.comment );
-
-            if ( 0 == end.comment[ 28 ] && 0 != end.comment[29 ] )
-                prf( "track:                %d\n", 0xff & end.comment[29] );
-
-            if ( -1 != end.genre && 0 != end.genre ) // this throws away "blues", but it's usually incorrect anyway.
-                prf( "genre:                %d == %s\n", end.genre, GetMP3Genre( end.genre ) );
-        }
-    }
+    PrintMP3ID3v1( len, awcID3v1, _countof( awcID3v1 ), hasTitle, hasArtist, hasAlbum,
+                   hasYear, hasComment, hasTrack, hasGenre );
 
     //printf( "bitstreamOffset: %d\n", bitstreamOffset );
 
@@ -8207,7 +12419,7 @@ void ParseMP3()
     // Since the search rarely happens and it's safe, allow such a long search.
     // http://www.multiweb.cz/twoinches/mp3inside.htm
 
-    const int searchLen = 8192;
+    const int searchLen = (int) min( (__int64) 8192, max( (__int64) 0, len - bitstreamOffset - 1 ) );
     int delta = 0;
 
     for ( delta = 0; delta < searchLen; delta++ )
@@ -8227,66 +12439,15 @@ void ParseMP3()
     if ( delta > 0 )
         prf( "found bitstream header %d bytes from end of TAG set\n", delta );
 
-    // check for Variable Bitrate
-    
-    struct VBRInfo
+    __int64 frameOffset = bitstreamOffset + delta;
+    if ( frameOffset + sizeof( DWORD ) > len )
     {
-        DWORD header;            // For many older MP3 files, this header is the only valid data
-        byte unused4[ 9 ];
-        DWORD xing13;
-        DWORD unused17;
-        DWORD xing21;
-        byte unused25[11];
-        DWORD xing36;
-        DWORD flags40;
-        DWORD frames44;
-        DWORD len48;
-        byte toc52[100];
-        DWORD scale152;
-
-        char      m_lame_version[9];       // "LAME<major>.<minor><release>
-        uint8_t   m_revision : 4;
-        uint8_t   m_vbr_type : 4;
-        uint8_t   m_lowpass_frequency;
-        uint32_t  m_peak_signal;           // 9.23 fixed point
-        uint16_t  m_radio_replay_pad : 2;
-        uint16_t  m_radio_replay_set_name : 2;
-        uint16_t  m_radio_replay_originator_code : 2;
-        uint16_t  m_radio_replay_gain : 10;
-        uint16_t  m_audiophile_replay_gain;
-        uint8_t   m_flag_ath_type : 4;
-        uint8_t   m_flag_expn_psy_tune : 1;
-        uint8_t   m_flag_safe_joint : 1;
-        uint8_t   m_flag_no_gap_more : 1;
-        uint8_t   m_flag_no_gap_previous : 1;
-        uint8_t   m_average_bit_rate;
-        uint8_t   m_delay_padding_delay_high;
-        uint8_t   m_delay_padding_delay_low : 4;
-        uint8_t   m_delay_padding_padding_high : 4;
-        uint8_t   m_delay_padding_padding_low;
-        uint8_t   m_noise_shaping : 2;
-        uint8_t   m_stereo_mode : 3;
-        uint8_t   m_non_optimal : 1;
-        uint8_t   m_source_frequency : 2;
-        uint8_t   m_unused;                // set to 0
-        uint16_t  m_preset;
-        uint32_t  m_music_length;
-        uint16_t  m_music_crc16;
-        uint16_t  m_crc16;                 // if (protection bit)
-    };
-    
-    VBRInfo vbr;
-    GetBytes( bitstreamOffset + delta, &vbr, sizeof vbr );
-    vbr.header = _byteswap_ulong( vbr.header );
-    vbr.flags40 = _byteswap_ulong( vbr.flags40 );
-    vbr.frames44 = _byteswap_ulong( vbr.frames44 );
-    vbr.len48 = _byteswap_ulong( vbr.len48 );
-    vbr.scale152 = _byteswap_ulong( vbr.scale152 );
-    vbr.m_music_length = _byteswap_ulong( vbr.m_music_length );
-
-    DWORD h = vbr.header;
+        prf( "truncated MPEG frame header\n" );
+        return;
+    }
+    DWORD h = GetDWORD( frameOffset, false );
     prf( "MPEGHeader:           %#x == ", h );
-    for ( int i = 31; i > 0; i-- )
+    for ( int i = 31; i >= 0; i-- )
         prf( 0 != ( ( h >> i ) & 0x1 ) ? "1" : "0" );
     prf( "\n" );
 
@@ -8298,57 +12459,99 @@ void ParseMP3()
         int layerDescription = ( h >> 17 ) & 0x3;
         prf( "Layer:               %2d == %s\n", layerDescription, GetMPEGLayerDescription( layerDescription ) );
     
-        const DWORD xing = 0x676e6958;  // "Xing"
+        DWORD frameCount = 0;
+        DWORD audioBytes = 0;
+        DWORD xingFlags = 0;
         bool variableBitrate = false;
-    
-        if ( 3 == audioVersion && xing == vbr.xing36 )
+        int channelmode = ( h >> 6 ) & 0x3;
+        int protectedBit = ( h >> 16 ) & 0x1;
+        if ( 1 == layerDescription )
         {
-            variableBitrate = true;
-            prf( "Variable bitrate:     xing for mpeg1 and channel != mono, flags %#x, xing offset %d\n", vbr.flags40, bitstreamOffset + delta + 36 );
-    
-            if ( vbr.flags40 & 0x1 )
-                prf( "  VBR frames:         %d\n", vbr.frames44 );
-    
-            if ( vbr.flags40 & 0x2 )
-                prf( "  VBR bytes:          %d\n", vbr.len48 );
-    
-            if ( vbr.flags40 & 0x8 )
-                prf( "  VBR scale:          %d\n", vbr.scale152 );
-
-            if ( 0 != vbr.m_lame_version[0] )
+            int sideInformationSize = ( 3 == audioVersion )
+                ? ( 3 == channelmode ? 17 : 32 )
+                : ( 3 == channelmode ? 9 : 17 );
+            __int64 xingOffset = frameOffset + 4 + ( 0 == protectedBit ? 2 : 0 ) + sideInformationSize;
+            if ( xingOffset + 8 <= len )
             {
-                prf( "  Encoder:            " );
-                for ( int x = 0; x < 9; x++ )
+                DWORD marker = GetDWORD( xingOffset, false );
+                if ( 0x58696e67 == marker || 0x496e666f == marker ) // Xing or Info
                 {
-                    if ( 0 == vbr.m_lame_version[x] )
-                        break;
-                    prf( "%c", vbr.m_lame_version[x] );
-                }
-                prf( "\n" );
+                    __int64 fieldOffset = xingOffset + 4;
+                    xingFlags = GetDWORD( fieldOffset, false );
+                    fieldOffset += 4;
+                    variableBitrate = 0x58696e67 == marker;
+                    prf( "%s header:            flags %#x, offset %I64d\n",
+                         variableBitrate ? "Variable bitrate (Xing)" : "MPEG Info", xingFlags, xingOffset );
 
-                //printf( "  Encoder:            %.9s\n", vbr.m_lame_version );
-                prf( "  Revision:           %d\n", vbr.m_revision );
-                prf( "  VBR type:           %d\n", vbr.m_vbr_type );
-                prf( "  Lowpass frequency:  %3.1lf kHz\n", (double) vbr.m_lowpass_frequency * 100.0 / 1000.0 );
-                prf( "  Peak signal:        %#x\n", vbr.m_peak_signal );
-                prf( "  Average bitrate:    %d kbps\n", vbr.m_average_bit_rate );
-                prf( "  Source frequency:   %s\n", GetMP3SourceFrequency( vbr.m_source_frequency ) );
-                prf( "  Audio bytes:        %d\n", vbr.m_music_length );
-    
-                if ( vbr.m_flag_no_gap_more )
-                    prf( "  No-gap next:        %d\n", vbr.m_flag_no_gap_more );
-                if ( vbr.m_flag_no_gap_previous )
-                    prf( "  No-gap previous:    %d\n", vbr.m_flag_no_gap_previous );
+                    if ( 0 != ( xingFlags & 0x1 ) && fieldOffset + 4 <= len )
+                    {
+                        frameCount = GetDWORD( fieldOffset, false );
+                        fieldOffset += 4;
+                        prf( "  VBR frames:         %u\n", frameCount );
+                    }
+                    if ( 0 != ( xingFlags & 0x2 ) && fieldOffset + 4 <= len )
+                    {
+                        audioBytes = GetDWORD( fieldOffset, false );
+                        fieldOffset += 4;
+                        prf( "  VBR bytes:          %u\n", audioBytes );
+                    }
+                    if ( 0 != ( xingFlags & 0x4 ) )
+                        fieldOffset += 100;
+                    if ( 0 != ( xingFlags & 0x8 ) )
+                        fieldOffset += 4;
+
+                    if ( fieldOffset + 9 <= len )
+                    {
+                        char encoder[ 10 ] = {};
+                        GetBytes( fieldOffset, encoder, 9 );
+                        if ( 0 == strncmp( encoder, "LAME", 4 ) )
+                            prf( "  Encoder:            %.9s\n", encoder );
+                    }
+
+                    if ( frameCount > 0 && audioBytes > 0 )
+                    {
+                        int sampleRateIndex = ( h >> 10 ) & 0x3;
+                        static const int sampleRates[ 3 ][ 3 ] =
+                        {
+                            { 11025, 12000, 8000 },
+                            { 22050, 24000, 16000 },
+                            { 44100, 48000, 32000 }
+                        };
+                        int sampleRateRow = ( 3 == audioVersion ) ? 2 : ( 2 == audioVersion ? 1 : 0 );
+                        int samplesPerFrame = ( 3 == audioVersion ) ? 1152 : 576;
+                        if ( sampleRateIndex < 3 )
+                        {
+                            double duration = (double) frameCount * samplesPerFrame /
+                                              sampleRates[ sampleRateRow ][ sampleRateIndex ];
+                            double averageBitrate = (double) audioBytes * 8.0 / duration / 1000.0;
+                            bool plausibleCounts = averageBitrate >= 8.0 && averageBitrate <= 640.0;
+                            if ( 0x496e666f == marker )
+                            {
+                                char infoScratch[ 10 ];
+                                int nominalBitrate = atoi( GetMPEGBitrate( ( h >> 12 ) & 0xf,
+                                                                          audioVersion, layerDescription,
+                                                                          infoScratch ) );
+                                if ( nominalBitrate > 0 &&
+                                     fabs( averageBitrate - nominalBitrate ) > max( 10.0, nominalBitrate * 0.2 ) )
+                                    plausibleCounts = false;
+                            }
+
+                            if ( plausibleCounts )
+                            {
+                                int durationSeconds = (int) ( duration + 0.5 );
+                                prf( "  Audio duration:     %d:%02d (approx)\n",
+                                     durationSeconds / 60, durationSeconds % 60 );
+                                prf( "  Average bitrate:    %.1lf kbps (from Xing frame/byte counts)\n",
+                                     averageBitrate );
+                            }
+                            else
+                                prf( "  ignored inconsistent Xing frame/byte counts\n" );
+                        }
+                    }
+                }
             }
         }
-        else if ( 3 == audioVersion && xing == vbr.xing21 )
-            prf( "xing for mpeg1 and channel == mono\n" );
-        else if ( 2 == audioVersion && xing == vbr.xing21 )
-            prf( "xing for mpeg2 and channel != mono\n" );
-        else if ( 2 == audioVersion && xing == vbr.xing13 )
-            prf( "xing for mpeg2 and channel == mono\n" );
     
-        int protectedBit = ( h >> 16 ) & 0x1;
         prf( "Protected:           %2d == %s\n", protectedBit, GetMPEGProtected( protectedBit ) );
     
         int bitrate = ( h >> 12 ) & 0xf;
@@ -8360,7 +12563,6 @@ void ParseMP3()
         char const * pcSamplerate = GetMPEGSamplerate( samplerate, audioVersion, acScratch );
         prf( "Sample rate:         %2d == %s Hz\n", samplerate, pcSamplerate );
     
-        int channelmode = ( h >> 6 ) & 0x3;
         prf( "Channel mode:        %2d == %s\n", channelmode, GetMPEGChannelMode( channelmode ) );
     
         int modeextension = ( h >> 4 ) & 0x3;
@@ -8392,6 +12594,8 @@ const GUID ASF_Timecode_Index_Object =               { 0x3CB73FD0, 0x0C4A, 0x480
                                                      
 const GUID ASF_File_Properties_Object =              { 0x8CABDCA1, 0xA947, 0x11CF, 0x8E, 0xE4, 0x00, 0xC0, 0x0C, 0x20, 0x53, 0x65 };
 const GUID ASF_Stream_Properties_Object =            { 0xB7DC0791, 0xA9B7, 0x11CF, 0x8E, 0xE6, 0x00, 0xC0, 0x0C, 0x20, 0x53, 0x65 };
+const GUID ASF_Audio_Media =                         { 0xF8699E40, 0x5B4D, 0x11CF, 0xA8, 0xFD, 0x00, 0x80, 0x5F, 0x5C, 0x44, 0x2B };
+const GUID ASF_Video_Media =                         { 0xBC19EFC0, 0x5B4D, 0x11CF, 0xA8, 0xFD, 0x00, 0x80, 0x5F, 0x5C, 0x44, 0x2B };
 const GUID ASF_Header_Extension_Object =             { 0x5FBF03B5, 0xA92E, 0x11CF, 0x8E, 0xE3, 0x00, 0xC0, 0x0C, 0x20, 0x53, 0x65 };
 const GUID ASF_Codec_List_Object =                   { 0x86D15240, 0x311D, 0x11D0, 0xA3, 0xA4, 0x00, 0xA0, 0xC9, 0x03, 0x48, 0xF6 };
 const GUID ASF_Script_Command_Object =               { 0x1EFB1A30, 0x0B62, 0x11D0, 0xA3, 0x9B, 0x00, 0xA0, 0xC9, 0x03, 0x48, 0xF6 };
@@ -8490,10 +12694,213 @@ void PrintAsfGuid( const char * pcPrefix, GUID & id, QWORD size )
             size );
 } //PrintAsfGuid
 
+void PrintAsfTextField( const WCHAR * label, __int64 offset, WORD byteLength )
+{
+    if ( 0 == byteLength )
+        return;
+
+    if ( 0 != byteLength % sizeof( WCHAR ) )
+    {
+        prf( "    invalid UTF-16 field length: %u\n", byteLength );
+        return;
+    }
+
+    vector<WCHAR> text( byteLength / sizeof( WCHAR ) + 1 );
+    GetBytes( offset, text.data(), byteLength );
+    text[ byteLength / sizeof( WCHAR ) ] = 0;
+    wprf( L"    %-30ls: %ls\n", label, text.data() );
+} //PrintAsfTextField
+
+void PrintAsfStreamProperties( __int64 offset, QWORD objectSize )
+{
+    const QWORD fixedSize = 24 + 16 + 16 + sizeof( QWORD ) +
+                            2 * sizeof( DWORD ) + sizeof( WORD ) + sizeof( DWORD );
+    if ( objectSize < fixedSize )
+    {
+        prf( "    invalid Stream Properties Object size\n" );
+        return;
+    }
+
+    __int64 p = offset + 24;
+    GUID streamType;
+    GUID errorCorrectionType;
+    GetBytes( p, &streamType, sizeof streamType );
+    p += sizeof streamType;
+    GetBytes( p, &errorCorrectionType, sizeof errorCorrectionType );
+    p += sizeof errorCorrectionType + sizeof( QWORD );
+    DWORD typeSpecificDataLength = GetDWORD( p, true );
+    p += sizeof DWORD;
+    DWORD errorCorrectionDataLength = GetDWORD( p, true );
+    p += sizeof DWORD;
+    WORD flags = GetWORD( p, true );
+    p += sizeof WORD + sizeof( DWORD );
+    QWORD dataLength = (QWORD) typeSpecificDataLength + errorCorrectionDataLength;
+
+    if ( fixedSize + dataLength > objectSize )
+    {
+        prf( "    invalid Stream Properties data lengths\n" );
+        return;
+    }
+
+    prf( "    %-30s: %u\n", "Stream Number", flags & 0x7f );
+    if ( flags & 0x8000 )
+        prf( "    stream is encrypted\n" );
+
+    if ( ASF_Audio_Media == streamType && typeSpecificDataLength >= 18 )
+    {
+        WORD formatTag = GetWORD( p, true );
+        WORD channels = GetWORD( p + 2, true );
+        DWORD sampleRate = GetDWORD( p + 4, true );
+        DWORD averageBytesPerSecond = GetDWORD( p + 8, true );
+        WORD blockAlign = GetWORD( p + 12, true );
+        WORD bitsPerSample = GetWORD( p + 14, true );
+        WORD extraSize = GetWORD( p + 16, true );
+
+        prf( "    %-30s: Audio\n", "Stream Type" );
+        prf( "    %-30s: %#06x\n", "Audio Format Tag", formatTag );
+        prf( "    %-30s: %u\n", "Audio Channels", channels );
+        prf( "    %-30s: %u Hz\n", "Audio Sample Rate", sampleRate );
+        prf( "    %-30s: %I64u bits per second\n", "Stream Average Bitrate",
+             (QWORD) averageBytesPerSecond * 8 );
+        prf( "    %-30s: %u\n", "Audio Block Align", blockAlign );
+        prf( "    %-30s: %u\n", "Audio Bits Per Sample", bitsPerSample );
+        if ( g_FullInformation )
+            prf( "    %-30s: %u bytes\n", "Audio Format Extra Data", extraSize );
+    }
+    else if ( ASF_Video_Media == streamType )
+    {
+        prf( "    %-30s: Video\n", "Stream Type" );
+        if ( typeSpecificDataLength >= 11 )
+        {
+            DWORD width = GetDWORD( p, true );
+            DWORD height = GetDWORD( p + 4, true );
+            WORD formatDataSize = GetWORD( p + 9, true );
+            prf( "    %-30s: %u\n", "Video Width", width );
+            prf( "    %-30s: %u\n", "Video Height", height );
+
+            if ( formatDataSize > 0 && formatDataSize <= typeSpecificDataLength - 11 )
+            {
+                __int64 bitmapInfo = p + 11;
+                if ( formatDataSize >= 40 && GetDWORD( bitmapInfo, true ) >= 40 &&
+                     GetDWORD( bitmapInfo, true ) <= formatDataSize )
+                {
+                    DWORD compression = GetDWORD( bitmapInfo + 16, true );
+                    prf( "    %-30s: %c%c%c%c\n", "Video Codec FourCC",
+                         compression & 0xff, ( compression >> 8 ) & 0xff,
+                         ( compression >> 16 ) & 0xff, ( compression >> 24 ) & 0xff );
+                }
+            }
+            else if ( formatDataSize )
+                prf( "    invalid video format data size: %u\n", formatDataSize );
+        }
+        else
+            prf( "    incomplete video stream properties data\n" );
+    }
+    else
+    {
+        prf( "    %-30s: unknown\n", "Stream Type" );
+    }
+} //PrintAsfStreamProperties
+
+bool PrintAsfExtendedContentDescription( __int64 objectOffset, QWORD objectSize )
+{
+    __int64 position = objectOffset + sizeof( GUID ) + sizeof( QWORD );
+    __int64 end = objectOffset + (__int64) objectSize;
+    if ( objectSize < sizeof( GUID ) + sizeof( QWORD ) + sizeof( WORD ) )
+    {
+        prf( "    invalid Extended Content Description Object size\n" );
+        return false;
+    }
+
+    WORD descriptorCount = GetWORD( position, true );
+    position += sizeof( WORD );
+    prf( "    extended content count        : %u\n", descriptorCount );
+
+    for ( WORD descriptor = 0; descriptor < descriptorCount; descriptor++ )
+    {
+        if ( end - position < sizeof( WORD ) )
+        {
+            prf( "    truncated extended content descriptor name length\n" );
+            return false;
+        }
+        WORD nameLength = GetWORD( position, true );
+        position += sizeof( WORD );
+        if ( ( nameLength & 1 ) || nameLength > end - position ||
+             end - position - nameLength < 2 * sizeof( WORD ) )
+        {
+            prf( "    invalid extended content descriptor name length: %u\n", nameLength );
+            return false;
+        }
+
+        vector<WCHAR> name( nameLength / sizeof( WCHAR ) + 1 );
+        if ( nameLength )
+            GetBytes( position, name.data(), nameLength );
+        position += nameLength;
+        name[ nameLength / sizeof( WCHAR ) ] = 0;
+
+        WORD valueType = GetWORD( position, true );
+        position += sizeof( WORD );
+        WORD valueLength = GetWORD( position, true );
+        position += sizeof( WORD );
+        if ( valueLength > end - position )
+        {
+            prf( "    invalid extended content value length: %u\n", valueLength );
+            return false;
+        }
+
+        if ( g_FullInformation )
+            prf( "      value type %u, length %u\n", valueType, valueLength );
+
+        wprf( L"    %-30ls: ", name.data() );
+        if ( 0 == valueType )
+        {
+            if ( valueLength & 1 )
+                prf( "invalid UTF-16 value length %u\n", valueLength );
+            else
+            {
+                vector<WCHAR> value( valueLength / sizeof( WCHAR ) + 1 );
+                if ( valueLength )
+                    GetBytes( position, value.data(), valueLength );
+                value[ valueLength / sizeof( WCHAR ) ] = 0;
+                wprf( L"%ls\n", value.data() );
+            }
+        }
+        else if ( 1 == valueType )
+        {
+            prf( "binary data (%u bytes)\n", valueLength );
+            if ( g_FullInformation && valueLength )
+                DumpBinaryData( position, 0, valueLength, 6, position );
+        }
+        else if ( 2 == valueType && sizeof( DWORD ) == valueLength )
+            prf( "%s\n", GetDWORD( position, true ) ? "true" : "false" );
+        else if ( 3 == valueType && sizeof( DWORD ) == valueLength )
+            prf( "%u\n", GetDWORD( position, true ) );
+        else if ( 4 == valueType && sizeof( QWORD ) == valueLength )
+            prf( "%I64u\n", GetULONGLONG( position, true ) );
+        else if ( 5 == valueType && sizeof( WORD ) == valueLength )
+            prf( "%u\n", GetWORD( position, true ) );
+        else if ( 6 == valueType && sizeof( GUID ) == valueLength )
+        {
+            GUID value;
+            GetBytes( position, &value, sizeof value );
+            prf( "{%08lx-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x}\n",
+                 value.Data1, value.Data2, value.Data3, value.Data4[ 0 ], value.Data4[ 1 ],
+                 value.Data4[ 2 ], value.Data4[ 3 ], value.Data4[ 4 ], value.Data4[ 5 ],
+                 value.Data4[ 6 ], value.Data4[ 7 ] );
+        }
+        else
+            prf( "unsupported value type %u (%u bytes)\n", valueType, valueLength );
+
+        position += valueLength;
+    }
+
+    return true;
+} //PrintAsfExtendedContentDescription
+
 // WMA, WMV, etc.
 // note: as far as I can tell, WMA files never have an embedded image.
 
-void ParseAsf()
+void ParseAsf( const char * mimeType )
 {
     #pragma pack(push, 1)
 
@@ -8542,7 +12949,7 @@ void ParseAsf()
     };
 
     __int64 len = g_pStream->Length();
-    if ( len < 128 )
+    if ( len < (int) sizeof( AsfObject ) )
     {
         prf( "ASF file is too small\n" );
         return;
@@ -8557,11 +12964,18 @@ void ParseAsf()
         return;
     }
 
-    WCHAR awcBuf[ 200 ];
+    prf( "mimetype:                             %s\n", mimeType );
+
     __int64 frameOffset = 0;
 
     while ( frameOffset < len )
     {
+        if ( len - frameOffset < (int) sizeof( AsfObject ) )
+        {
+            prf( "truncated ASF object header at offset %I64d\n", frameOffset );
+            return;
+        }
+
         if ( g_FullInformation )
             prf( "reading next frame at offset %I64d\n", frameOffset );
 
@@ -8570,12 +12984,10 @@ void ParseAsf()
     
         PrintAsfGuid( "", obj.id, obj.size );
     
-        if ( 0 == obj.size )
-            break;
-    
-        if ( obj.size > 1024 * 1024 * 40 )
+        if ( obj.size < sizeof( AsfObject ) || obj.size > (QWORD) ( len - frameOffset ) )
         {
-            prf( "invalid frame size is too large: %I64u == %#I64x\n", obj.size, obj.size );
+            prf( "invalid ASF object size %I64u at offset %I64d (remaining %I64d)\n",
+                 obj.size, frameOffset, len - frameOffset );
             return;
         }
 
@@ -8583,23 +12995,56 @@ void ParseAsf()
         {
 
             AsfHeaderObject headobj;
+            if ( obj.size < sizeof headobj )
+            {
+                prf( "invalid ASF Header Object size\n" );
+                return;
+            }
             GetBytes( frameOffset, &headobj, sizeof headobj );
 
             prf( "header object count: %d\n", headobj.numObjects );
+            if ( headobj.numObjects > ( obj.size - sizeof headobj ) / sizeof( AsfObject ) )
+            {
+                prf( "invalid ASF header object count: %u\n", headobj.numObjects );
+                return;
+            }
 
             __int64 offset = frameOffset + sizeof headobj;
 
             for ( DWORD i = 0; i < headobj.numObjects; i++ )
             {
+                if ( offset > frameOffset + obj.size ||
+                     frameOffset + obj.size - offset < sizeof( AsfObject ) )
+                {
+                    prf( "truncated ASF header object\n" );
+                    return;
+                }
                 AsfObject headerObject;
                 GetBytes( offset, &headerObject, sizeof headerObject );
 
                 PrintAsfGuid( "  ", headerObject.id, headerObject.size );
+                if ( headerObject.size < sizeof( AsfObject ) ||
+                     offset > frameOffset + obj.size ||
+                     headerObject.size > frameOffset + obj.size - offset ||
+                     headerObject.size > len - offset )
+                {
+                    prf( "invalid ASF header object size\n" );
+                    return;
+                }
 
                 if ( ASF_Content_Description_Object == headerObject.id )
                 {
+                    if ( headerObject.size < sizeof( AsfContentDescriptionObject ) )
+                    {
+                        prf( "    invalid Content Description Object size\n" );
+                        offset += headerObject.size;
+                        continue;
+                    }
                     AsfContentDescriptionObject cdo;
                     GetBytes( offset, &cdo, sizeof cdo );
+                    QWORD textLength = (QWORD) cdo.titleLen + cdo.authorLen +
+                                       cdo.copyrightLen + cdo.descriptionLen +
+                                       cdo.ratingLen;
 
                     if ( g_FullInformation )
                     {
@@ -8610,115 +13055,202 @@ void ParseAsf()
                         prf( "    rating length: %u\n", cdo.ratingLen );
                     }
 
-                    if ( ( cdo.titleLen >= 0 ) && ( cdo.titleLen < ( sizeof awcBuf - 2 ) ) )
+                    if ( sizeof cdo + textLength > headerObject.size )
                     {
-                        GetBytes( offset + sizeof cdo, awcBuf, cdo.titleLen );
-                        awcBuf[ cdo.titleLen / 2 ] = 0;
-                        wprf( L"    %-30s: %ws\n", "Title", awcBuf );
+                        prf( "    invalid Content Description field lengths\n" );
                     }
-
-                    if ( ( cdo.authorLen >= 0 ) && ( cdo.authorLen < ( sizeof awcBuf - 2 ) ) )
+                    else
                     {
-                        GetBytes( offset + sizeof cdo + cdo.titleLen, awcBuf, cdo.authorLen );
-                        awcBuf[ cdo.authorLen / 2 ] = 0;
-                        wprf( L"    %-30s: %ws\n", "Author", awcBuf );
+                        __int64 textOffset = offset + sizeof cdo;
+                        PrintAsfTextField( L"Title", textOffset, cdo.titleLen );
+                        textOffset += cdo.titleLen;
+                        PrintAsfTextField( L"Author", textOffset, cdo.authorLen );
+                        textOffset += cdo.authorLen;
+                        PrintAsfTextField( L"Copyright", textOffset, cdo.copyrightLen );
+                        textOffset += cdo.copyrightLen;
+                        PrintAsfTextField( L"Description", textOffset, cdo.descriptionLen );
+                        textOffset += cdo.descriptionLen;
+                        PrintAsfTextField( L"Rating", textOffset, cdo.ratingLen );
                     }
                 }
                 else if ( ASF_Extended_Content_Description_Object == headerObject.id )
                 {
-                    __int64 ecdOffset = offset + sizeof headerObject;
-                    WORD cdCount = GetWORD( ecdOffset, true );
-                    ecdOffset += sizeof WORD;
-
-                    prf( "    extended content count        : %u\n", cdCount );
-
-                    for ( WORD cd = 0; cd < cdCount; cd++ )
-                    {
-                        WORD namelen = GetWORD( ecdOffset, true );
-                        ecdOffset += sizeof WORD;
-
-                        if ( g_FullInformation )
-                            prf( "      descriptor name length: %u\n", namelen );
-
-                        unique_ptr<byte> name( new byte[ 2 + namelen ] );
-                        GetBytes( ecdOffset, name.get(), namelen );
-                        ecdOffset += namelen;
-
-                        WCHAR * pwcName = (WCHAR *) name.get();
-                        pwcName[ namelen / 2 ] = 0;
-                        if ( g_FullInformation )
-                            wprf( L"      name: %ws\n", pwcName );
-
-                        WORD valuetype = GetWORD( ecdOffset, true );
-                        ecdOffset += sizeof WORD;
-
-                        WORD valuelen = GetWORD( ecdOffset, true );
-                        ecdOffset += sizeof WORD;
-
-                        unique_ptr<byte> value( new byte[ 2 + valuelen ] );
-                        GetBytes( ecdOffset, value.get(), valuelen );
-                        ecdOffset += valuelen;
-
-                        if ( g_FullInformation )
-                            prf( "      value type %u, length %u\n", valuetype, valuelen );
-
-                        prf( "    %-30ws: ", pwcName );
-
-                        if ( 0 == valuetype )
-                        {
-                            WCHAR * pwcValue = (WCHAR *) value.get();
-                            pwcValue[ valuelen / 2 ] = 0;
-                            wprf( L"%ws\n", pwcValue );
-                        }
-                        else if ( 1 == valuetype )
-                        {
-                            prf( "\n" );
-                            DumpBinaryData( ecdOffset - valuelen, 0, valuelen, 6, ecdOffset - valuelen );
-                        }
-                        else if ( 2 == valuetype )
-                        {
-                            BOOL x = * ( BOOL * ) value.get();
-                            prf( "%s\n", x ? "true" : "false" );
-                        }
-                        else if ( 3 == valuetype )
-                        {
-                            DWORD x = * ( DWORD * ) value.get();
-                            prf( "%u\n", x );
-                        }
-                        else if ( 4 == valuetype )
-                        {
-                            QWORD x = * ( QWORD * ) value.get();
-                            prf( "%I64u\n", x );
-                        }
-                        else if ( 5 == valuetype )
-                        {
-                            WORD x = * ( WORD * ) value.get();
-                            prf( "%u\n", x );
-                        }
-                    }
+                    if ( !PrintAsfExtendedContentDescription( offset, headerObject.size ) )
+                        return;
                 }
                 else if ( ASF_Header_Extension_Object == headerObject.id )
                 {
+                    if ( headerObject.size < sizeof( AsfHeaderExtensionObject ) )
+                    {
+                        prf( "    invalid Header Extension Object size\n" );
+                        offset += headerObject.size;
+                        continue;
+                    }
                     AsfHeaderExtensionObject ext;
                     GetBytes( offset, &ext, sizeof ext );
 
                     prf( "    Header Extension Object size %u\n", ext.dataSize );
-                    DumpBinaryData( offset + sizeof ext, 0, ext.dataSize, 6, offset + sizeof ext );
+                    if ( ext.dataSize > headerObject.size - sizeof ext )
+                    {
+                        prf( "    invalid Header Extension data size\n" );
+                    }
+                    else
+                    {
+                        __int64 nestedOffset = offset + sizeof ext;
+                        __int64 nestedEnd = nestedOffset + ext.dataSize;
+                        while ( nestedOffset < nestedEnd )
+                        {
+                            if ( nestedEnd - nestedOffset < sizeof( AsfObject ) )
+                            {
+                                prf( "    truncated nested ASF header object\n" );
+                                break;
+                            }
+                            AsfObject nestedObject;
+                            GetBytes( nestedOffset, &nestedObject, sizeof nestedObject );
+                            if ( nestedObject.size < sizeof( AsfObject ) ||
+                                 nestedObject.size > (QWORD) ( nestedEnd - nestedOffset ) )
+                            {
+                                prf( "    invalid nested ASF header object size %I64u\n",
+                                     nestedObject.size );
+                                break;
+                            }
+                            if ( ASF_Stream_Properties_Object == nestedObject.id )
+                            {
+                                PrintAsfGuid( "    ", nestedObject.id, nestedObject.size );
+                                PrintAsfStreamProperties( nestedOffset, nestedObject.size );
+                            }
+                            nestedOffset += nestedObject.size;
+                        }
+                        if ( g_FullInformation && ext.dataSize )
+                            DumpBinaryData( offset + sizeof ext, 0, ext.dataSize, 6,
+                                            offset + sizeof ext );
+                    }
                 }
                 else if ( ASF_File_Properties_Object == headerObject.id )
                 {
+                    if ( headerObject.size < sizeof( AsfFilePropertiesObject ) )
+                    {
+                        prf( "    invalid File Properties Object size\n" );
+                        offset += headerObject.size;
+                        continue;
+                    }
                     AsfFilePropertiesObject props;
                     GetBytes( offset, &props, sizeof props );
 
-                    QWORD durationSecs = props.playDuration / 10000000;
-                    prf( "    %-30s: %I64u seconds\n", "Duration", durationSecs );
+                    QWORD durationMilliseconds = props.playDuration / 10000;
+                    QWORD sendDurationMilliseconds = props.sendDuration / 10000;
+                    QWORD prerollMilliseconds = props.preroll;
+                    QWORD playbackMilliseconds = durationMilliseconds > prerollMilliseconds ?
+                                                 durationMilliseconds - prerollMilliseconds : 0;
+                    prf( "    %-30s: %I64u.%03I64u seconds\n", "Duration",
+                         durationMilliseconds / 1000, durationMilliseconds % 1000 );
+                    prf( "    %-30s: %I64u.%03I64u seconds\n", "Duration excluding preroll",
+                         playbackMilliseconds / 1000, playbackMilliseconds % 1000 );
+                    prf( "    %-30s: %I64u.%03I64u seconds\n", "Send Duration",
+                         sendDurationMilliseconds / 1000, sendDurationMilliseconds % 1000 );
+                    prf( "    %-30s: %I64u milliseconds\n", "Preroll", prerollMilliseconds );
                     prf( "    %-30s: %u bits per second\n", "Maximum Bitrate", props.maxBitrate );
+                }
+                else if ( ASF_Stream_Properties_Object == headerObject.id )
+                {
+                    PrintAsfStreamProperties( offset, headerObject.size );
+                }
+                else if ( ASF_Codec_List_Object == headerObject.id )
+                {
+                    const __int64 dataStart = offset + sizeof( AsfObject );
+                    const __int64 dataEnd = offset + headerObject.size;
+                    if ( headerObject.size < sizeof( AsfObject ) + sizeof( GUID ) + sizeof( DWORD ) )
+                    {
+                        prf( "    invalid Codec List Object size\n" );
+                    }
+                    else
+                    {
+                        DWORD codecCount = GetDWORD( dataStart + sizeof( GUID ), true );
+                        __int64 p = dataStart + sizeof( GUID ) + sizeof( DWORD );
+                        prf( "    codec count: %u\n", codecCount );
+
+                        for ( DWORD codec = 0; codec < codecCount; codec++ )
+                        {
+                            if ( p > dataEnd || dataEnd - p < 8 )
+                            {
+                                prf( "    truncated codec list entry\n" );
+                                break;
+                            }
+
+                            WORD type = GetWORD( p, true );
+                            WORD nameLength = GetWORD( p + 2, true );
+                            p += 4;
+                            QWORD nameBytes = (QWORD) nameLength * sizeof( WCHAR );
+                            if ( nameBytes > (QWORD) ( dataEnd - p ) )
+                            {
+                                prf( "    invalid codec name length\n" );
+                                break;
+                            }
+
+                            vector<WCHAR> codecName( (size_t) nameLength + 1 );
+                            if ( nameLength )
+                                GetBytes( p, codecName.data(), (int) nameBytes );
+                            codecName[ nameLength ] = 0;
+                            p += nameBytes;
+
+                            if ( dataEnd - p < sizeof( WORD ) )
+                            {
+                                prf( "    truncated codec description length\n" );
+                                break;
+                            }
+                            WORD descriptionLength = GetWORD( p, true );
+                            p += sizeof WORD;
+                            QWORD descriptionBytes = (QWORD) descriptionLength * sizeof( WCHAR );
+                            if ( descriptionBytes > (QWORD) ( dataEnd - p ) )
+                            {
+                                prf( "    invalid codec description length\n" );
+                                break;
+                            }
+
+                            vector<WCHAR> codecDescription( (size_t) descriptionLength + 1 );
+                            if ( descriptionLength )
+                                GetBytes( p, codecDescription.data(), (int) descriptionBytes );
+                            codecDescription[ descriptionLength ] = 0;
+                            p += descriptionBytes;
+
+                            if ( dataEnd - p < sizeof( WORD ) )
+                            {
+                                prf( "    truncated codec information length\n" );
+                                break;
+                            }
+                            WORD informationLength = GetWORD( p, true );
+                            p += sizeof WORD;
+                            if ( informationLength > (QWORD) ( dataEnd - p ) )
+                            {
+                                prf( "    invalid codec information length\n" );
+                                break;
+                            }
+
+                            wprf( L"    Codec Type: %ls\n",
+                                  2 == type ? L"Audio" : 1 == type ? L"Video" : L"Unknown" );
+                            wprf( L"    Codec Name: %ls\n", codecName.data() );
+                            if ( descriptionLength )
+                                wprf( L"    Codec Description: %ls\n", codecDescription.data() );
+                            if ( g_FullInformation && informationLength )
+                                prf( "    Codec Information: %u bytes\n", informationLength );
+                            p += informationLength;
+                        }
+                    }
                 }
                 else if ( ASF_Stream_Bitrate_Properties_Object == headerObject.id )
                 {
                     __int64 o = offset + sizeof AsfObject;
                     WORD recordCount = GetWORD( o, true );
                     o += sizeof WORD;
+
+                    if ( headerObject.size < sizeof( AsfObject ) + sizeof( WORD ) ||
+                         recordCount > ( headerObject.size - sizeof( AsfObject ) - sizeof( WORD ) ) /
+                                       ( sizeof( WORD ) + sizeof( DWORD ) ) )
+                    {
+                        prf( "    invalid stream bitrate record count\n" );
+                        offset += headerObject.size;
+                        continue;
+                    }
         
                     //printf( "Bitrate for %u streams\n", recordCount );
         
@@ -8729,7 +13261,7 @@ void ParseAsf()
                         DWORD averageBitrate = GetDWORD( o, true );
                         o += sizeof DWORD;
         
-                        prf( "    %-30s: %u\n", "Stream Number", flags & 0xef );
+                        prf( "    %-30s: %u\n", "Stream Number", flags & 0x7f );
                         prf( "    %-30s: %u bits per second\n", "Average Bitrate", averageBitrate );
                     }
                 }
@@ -8756,7 +13288,7 @@ const char * WavFormatType( DWORD format )
         return "8-bit ITU-T G.711 A-law";
 
     if ( 7 == format )
-        return "8-bit ITU-T G.711 æ-law";
+        return "8-bit ITU-T G.711 ï¿½-law";
 
     if ( 0xfffe == ( format & 0xffff ) )
         return "Extensible (Subformat)";
@@ -9124,65 +13656,401 @@ struct RafHeader
     }
 };
 
-void AttemptFujifilmParse()
+const char * RafRecordName( WORD tag )
 {
-    prf( "Fujifilm RAF raw file:\n" );
-    RafHeader raf = { 0 };
-    GetBytes( 0, &raf, sizeof raf );
-    raf.littleEndian();
+    switch ( tag )
+    {
+        case 0x0100: return "Sensor dimensions";
+        case 0x0110: return "Active area top-left";
+        case 0x0111: return "Active area height and width";
+        case 0x0121: return "Output height and width";
+        case 0x0130: return "Raw information";
+        case 0x0131: return "CFA pattern";
+        case 0x2ff0: return "Camera multipliers";
+        case 0xc000: return "Additional RAF data";
+        default: return NULL;
+    }
+}
 
-    prf( "  RAF magic:                          " );
-    for ( int i = 0; i < sizeof raf.magic; i++ )
-        prf( "%c", raf.magic[ i ] );
+void PrintRafRecordData( WORD tag, __int64 dataOffset, WORD size )
+{
+    if ( ( 0x0100 == tag || 0x0111 == tag || 0x0121 == tag ) && 4 == size )
+    {
+        WORD first = GetWORD( dataOffset, false );
+        WORD second = GetWORD( dataOffset + 2, false );
+        prf( "%u x %u (height x width)\n", first, second );
+    }
+    else if ( 0x0110 == tag && 4 == size )
+    {
+        prf( "x=%u, y=%u\n", GetWORD( dataOffset, false ), GetWORD( dataOffset + 2, false ) );
+    }
+    else if ( 0x0131 == tag && size > 0 )
+    {
+        if ( 36 == size )
+        {
+            prf( "6x6 X-Trans CFA pattern (0=red, 1=green, 2=blue):\n" );
+            for ( int y = 0; y < 6; y++ )
+            {
+                prf( "      " );
+                for ( int x = 0; x < 6; x++ )
+                    prf( "%u%s", GetBYTE( dataOffset + y * 6 + x ), x == 5 ? "" : " " );
+                prf( "\n" );
+            }
+        }
+        else
+        {
+            prf( "%u-byte CFA pattern: ", size );
+            for ( WORD i = 0; i < min( size, (WORD) 36 ); i++ )
+                prf( "%s%u", i ? " " : "", GetBYTE( dataOffset + i ) );
+            prf( "\n" );
+        }
+    }
+    else if ( 0x0130 == tag && size > 0 )
+    {
+        prf( "%u bytes (layout not documented):", size );
+        for ( WORD i = 0; i < min( size, (WORD) 16 ); i++ )
+            prf( " %02x", GetBYTE( dataOffset + i ) );
+        if ( size > 16 )
+            prf( " ..." );
+        prf( "\n" );
+    }
+    else if ( 0x2ff0 == tag && size >= 8 && 0 == ( size % 2 ) )
+    {
+        prf( "u16 values (documented channel order 1, 0, 3, 2; repeated):" );
+        for ( WORD i = 0; i < min( size / 2, (WORD) 16 ); i++ )
+            prf( " %u", GetWORD( dataOffset + i * 2, false ) );
+        prf( "\n" );
+    }
+    else if ( 0xc000 == tag )
+    {
+        prf( "%u bytes (opaque vendor data)\n", size );
+    }
+    else if ( size > 0 )
+    {
+        prf( "%u bytes", size );
+        for ( WORD i = 0; i < min( size, (WORD) 16 ); i++ )
+            prf( " %02x", GetBYTE( dataOffset + i ) );
+        if ( size > 16 )
+            prf( " ..." );
+        prf( "\n" );
+    }
+    else
+        prf( "empty\n" );
+}
+
+void ParseRafDataImageDimensions( __int64 dataOffset, WORD size, DWORD fullWidth, DWORD fullHeight,
+                                  DWORD & imageWidth, DWORD & imageHeight )
+{
+    if ( size < 16 || 0 == fullWidth || 0 == fullHeight )
+        return;
+
+    // RAFData has several documented index layouts; prefer the plausible pair closest to the full sensor size.
+    DWORD values[ 4 ] = {};
+    for ( int i = 0; i < _countof( values ); i++ )
+        values[ i ] = GetDWORD( dataOffset + i * sizeof( DWORD ), true );
+
+    unsigned __int64 bestScore = ULLONG_MAX;
+    DWORD bestWidth = 0;
+    DWORD bestHeight = 0;
+    for ( int i = 0; i < 3; i++ )
+    {
+        DWORD width = values[ i ];
+        DWORD height = values[ i + 1 ];
+        if ( 0 == width || 0 == height || width > fullWidth || height > fullHeight )
+            continue;
+
+        unsigned __int64 score = (unsigned __int64) ( fullWidth - width ) + ( fullHeight - height );
+        if ( score < bestScore )
+        {
+            bestScore = score;
+            bestWidth = width;
+            bestHeight = height;
+        }
+    }
+
+    if ( bestWidth && bestHeight )
+    {
+        imageWidth = bestWidth;
+        imageHeight = bestHeight;
+    }
+}
+
+const char * RafFujiIfdTagName( WORD tag )
+{
+    switch ( tag )
+    {
+        case 0xf003: return "BitsPerSample";
+        case 0xf007: return "StripOffsets";
+        case 0xf008: return "StripByteCounts";
+        case 0xf00a: return "BlackLevel";
+        case 0xf00b: return "GeometricDistortionParams";
+        case 0xf00c: return "WB_GRBLevelsStandard";
+        case 0xf00d: return "WB_GRBLevelsAuto";
+        case 0xf00e: return "WB_GRBLevels";
+        case 0xf00f: return "ChromaticAberrationParams";
+        case 0xf010: return "VignettingParams";
+        default: return NULL;
+    }
+}
+
+void PrintRafFujiIfdField( WORD tag, __int64 entryOffset, bool littleEndian, const RafHeader & raf )
+{
+    const char * tagName = RafFujiIfdTagName( tag );
+    if ( NULL == tagName )
+        return;
+
+    IFDHeader head = {};
+    GetBytes( entryOffset, &head, sizeof head );
+    head.Endian( littleEndian );
+    if ( head.type > 13 )
+        return;
+    DWORD valueSize = ( 1 == head.type || 2 == head.type || 6 == head.type || 7 == head.type ) ? 1 :
+                      ( 3 == head.type || 8 == head.type ) ? 2 :
+                      ( 5 == head.type || 10 == head.type ) ? 8 : 4;
+    unsigned __int64 byteCount = (unsigned __int64) head.count * valueSize;
+    if ( 0 == head.count || byteCount > 0x10000 )
+        return;
+
+    __int64 valueOffset = byteCount <= 4 ? entryOffset + 8 : (__int64) raf.cfaOffset + head.offset;
+    __int64 cfaEnd = (__int64) raf.cfaOffset + raf.cfaLength;
+    if ( valueOffset < raf.cfaOffset || valueOffset > cfaEnd ||
+         (__int64) byteCount > cfaEnd - valueOffset || !IsFileRangeValid( valueOffset, (__int64) byteCount ) )
+        return;
+
+    prf( "  RAF FujiIFD %-27s: ", tagName );
+    if ( 2 == head.type )
+    {
+        vector<char> text( min( head.count, (DWORD) 256 ) + 1, 0 );
+        GetBytes( valueOffset, text.data(), (int) text.size() - 1 );
+        for ( size_t i = 0; i + 1 < text.size(); i++ )
+        {
+            unsigned char ch = (unsigned char) text[ i ];
+            if ( 0 == ch )
+                break;
+            if ( ch < ' ' || ch > '~' )
+            {
+                text[ i ] = 0;
+                break;
+            }
+        }
+        prf( "%s\n", text.data() );
+        return;
+    }
+
+    DWORD valuesToPrint = min( head.count, 8u );
+    if ( valuesToPrint > 1 )
+        prf( "[%u values] ", head.count );
+
+    for ( DWORD i = 0; i < valuesToPrint; i++ )
+    {
+        if ( i )
+            prf( ", " );
+        if ( 1 == head.type || 6 == head.type )
+            prf( "%u", GetBYTE( valueOffset + i ) );
+        else if ( 3 == head.type || 8 == head.type )
+            prf( "%u", GetWORD( valueOffset + i * 2, littleEndian ) );
+        else if ( 4 == head.type || 9 == head.type )
+        {
+            DWORD value = GetDWORD( valueOffset + i * 4, littleEndian );
+            if ( 9 == head.type )
+                prf( "%ld", (LONG) value );
+            else
+                prf( "%u", value );
+        }
+        else if ( 5 == head.type || 10 == head.type )
+        {
+            DWORD numerator = GetDWORD( valueOffset + i * 8, littleEndian );
+            DWORD denominator = GetDWORD( valueOffset + i * 8 + 4, littleEndian );
+            if ( 10 == head.type )
+                prf( "%ld/%ld", (LONG) numerator, (LONG) denominator );
+            else
+                prf( "%u/%u", numerator, denominator );
+        }
+        else
+        {
+            prf( "type %u (%u bytes)", head.type, head.count );
+            break;
+        }
+    }
+    if ( valuesToPrint < head.count )
+        prf( ", ..." );
     prf( "\n" );
+}
 
-    prf( "  RAF format version:                 " );
-    for ( int i = 0; i < sizeof raf.formatVersion; i++ )
-        prf( "%c", raf.formatVersion[ i ] );
-    prf( "\n" );
-
-    prf( "  RAF camera number ID:               " );
-    for ( int i = 0; i < sizeof raf.cameraNumberID; i++ )
-        prf( "%c", raf.cameraNumberID[ i ] );
-    prf( "\n" );
-
-    prf( "  RAF camera body name:               %s\n", raf.camerabodyname );
-
-    prf( "  RAF sub version:                    " );
-    for ( int i = 0; i < sizeof raf.subVersion; i++ )
-        prf( "%c", raf.subVersion[ i ] );
-    prf( "\n" );
-
-    prf( "  RAF jpg offset:                     %#x\n", raf.jpgOffset );
-    prf( "  RAF jpg length:                     %#x\n", raf.jpgLength );
-    prf( "  RAF cfa header offset:              %#x\n", raf.cfaHeaderOffset );
-    prf( "  RAF cfa header length:              %#x\n", raf.cfaHeaderLength );
-    prf( "  RAF cfa offset:                     %#x\n", raf.cfaOffset );
-    prf( "  RAF cfa length:                     %#x\n", raf.cfaLength );
+void ParseRafCfaRecords( const RafHeader & raf, DWORD fullWidth, DWORD fullHeight,
+                         DWORD & imageWidth, DWORD & imageHeight )
+{
+    if ( 0 == raf.cfaHeaderLength )
+    {
+        prf( "  RAF CFA metadata records:            not present\n" );
+        return;
+    }
+    if ( raf.cfaHeaderLength < sizeof( DWORD ) )
+    {
+        prf( "  RAF CFA metadata record block is too short\n" );
+        return;
+    }
 
     DWORD recordCount = GetDWORD( raf.cfaHeaderOffset, false );
-    prf( "  RAF count of records:               %d\n", recordCount );
-
-    DWORD recordOffset = raf.cfaHeaderOffset + sizeof DWORD;
+    __int64 recordOffset = (__int64) raf.cfaHeaderOffset + sizeof( DWORD );
+    __int64 recordsEnd = (__int64) raf.cfaHeaderOffset + raf.cfaHeaderLength;
+    prf( "  RAF CFA metadata records:            %u\n", recordCount );
 
     for ( DWORD r = 0; r < recordCount; r++ )
     {
-        WORD tagID = GetWORD( recordOffset, false );
-        recordOffset += sizeof WORD;
-        WORD size = GetWORD( recordOffset, false );
-        recordOffset += sizeof WORD;
-
-        prf( "    RAF cfa record tag                %d == %#x\n", tagID, tagID );
-        prf( "    RAF cfa record size               %d\n", size );
-
-        if ( 4 == size )
+        if ( recordOffset > recordsEnd || recordsEnd - recordOffset < 4 )
         {
-            DWORD val = GetDWORD( recordOffset, false );
-            prf( "    RAF cfa record value:             %#x\n", val );
+            prf( "  RAF CFA metadata record %u has a truncated header\n", r );
+            return;
         }
 
+        WORD tag = GetWORD( recordOffset, false );
+        WORD size = GetWORD( recordOffset + 2, false );
+        recordOffset += 4;
+        if ( size > recordsEnd - recordOffset )
+        {
+            prf( "  RAF CFA metadata record %#x exceeds its declared block\n", tag );
+            return;
+        }
+
+        const char * tagName = RafRecordName( tag );
+        prf( "    %-34s: ", tagName ? tagName : "Undocumented record" );
+        if ( !tagName )
+            prf( "tag %#x, ", tag );
+        PrintRafRecordData( tag, recordOffset, size );
+        if ( 0xc000 == tag )
+            ParseRafDataImageDimensions( recordOffset, size, fullWidth, fullHeight, imageWidth, imageHeight );
         recordOffset += size;
     }
+}
+
+bool ParseRafRawDimensions( const RafHeader & raf, DWORD & rawFullWidth, DWORD & rawFullHeight )
+{
+    if ( raf.cfaLength < 8 || !IsFileRangeValid( raf.cfaOffset, raf.cfaLength ) )
+        return false;
+
+    WORD byteOrder = GetWORD( raf.cfaOffset, true );
+    bool littleEndian;
+    if ( 0x4949 == byteOrder )
+        littleEndian = true;
+    else if ( 0x4d4d == byteOrder )
+        littleEndian = false;
+    else
+        return false;
+
+    if ( 42 != GetWORD( (__int64) raf.cfaOffset + 2, littleEndian ) )
+        return false;
+
+    DWORD firstIfd = GetDWORD( (__int64) raf.cfaOffset + 4, littleEndian );
+    __int64 firstIfdOffset = (__int64) raf.cfaOffset + firstIfd;
+    if ( firstIfd > raf.cfaLength || !IsFileRangeValid( firstIfdOffset, 2 ) ||
+         firstIfdOffset + 2 > (__int64) raf.cfaOffset + raf.cfaLength )
+        return false;
+
+    WORD firstIfdCount = GetWORD( firstIfdOffset, littleEndian );
+    if ( firstIfdCount > ( raf.cfaLength - firstIfd - 2 ) / sizeof( IFDHeader ) ||
+         !IsFileRangeValid( firstIfdOffset + 2, (__int64) firstIfdCount * sizeof( IFDHeader ) ) )
+        return false;
+
+    DWORD fujiIfdOffset = 0;
+    for ( WORD i = 0; i < firstIfdCount; i++ )
+    {
+        __int64 entryOffset = firstIfdOffset + 2 + (__int64) i * sizeof( IFDHeader );
+        if ( 0xf000 == GetWORD( entryOffset, littleEndian ) &&
+             13 == GetWORD( entryOffset + 2, littleEndian ) &&
+             1 == GetDWORD( entryOffset + 4, littleEndian ) )
+        {
+            fujiIfdOffset = GetDWORD( entryOffset + 8, littleEndian );
+            break;
+        }
+    }
+
+    if ( 0 == fujiIfdOffset || fujiIfdOffset > raf.cfaLength - 2 )
+        return false;
+
+    __int64 fujiIfd = (__int64) raf.cfaOffset + fujiIfdOffset;
+    WORD fujiIfdCount = GetWORD( fujiIfd, littleEndian );
+    if ( fujiIfdCount > ( raf.cfaLength - fujiIfdOffset - 2 ) / sizeof( IFDHeader ) ||
+         !IsFileRangeValid( fujiIfd + 2, (__int64) fujiIfdCount * sizeof( IFDHeader ) ) )
+        return false;
+
+    DWORD rawWidth = 0;
+    DWORD rawHeight = 0;
+    for ( WORD i = 0; i < fujiIfdCount; i++ )
+    {
+        __int64 entryOffset = fujiIfd + 2 + (__int64) i * sizeof( IFDHeader );
+        WORD tag = GetWORD( entryOffset, littleEndian );
+        WORD type = GetWORD( entryOffset + 2, littleEndian );
+        DWORD count = GetDWORD( entryOffset + 4, littleEndian );
+        if ( 0xf001 == tag && 4 == type && 1 == count )
+            rawWidth = GetDWORD( entryOffset + 8, littleEndian );
+        else if ( 0xf002 == tag && 4 == type && 1 == count )
+            rawHeight = GetDWORD( entryOffset + 8, littleEndian );
+        else
+            PrintRafFujiIfdField( tag, entryOffset, littleEndian, raf );
+    }
+
+    if ( 0 == rawWidth || 0 == rawHeight )
+        return false;
+
+    rawFullWidth = rawWidth;
+    rawFullHeight = rawHeight;
+    return true;
+}
+
+bool AttemptFujifilmParse( RafHeader & raf )
+{
+    if ( !IsFileRangeValid( 0, sizeof raf ) )
+    {
+        prf( "truncated RAF header\n" );
+        return false;
+    }
+
+    memset( &raf, 0, sizeof raf );
+    GetBytes( 0, &raf, sizeof raf );
+    raf.littleEndian();
+
+    if ( 0 != memcmp( raf.magic, "FUJIFILMCCD-RAW ", 16 ) )
+    {
+        prf( "invalid Fujifilm RAF magic\n" );
+        return false;
+    }
+
+    prf( "Fujifilm RAF raw file:\n" );
+    prf( "  RAF magic:                          %.*s\n", (int) sizeof raf.magic, raf.magic );
+    prf( "  RAF format version:                 %.*s\n", (int) sizeof raf.formatVersion, raf.formatVersion );
+    prf( "  RAF camera number ID:               %.*s\n", (int) sizeof raf.cameraNumberID, raf.cameraNumberID );
+    prf( "  RAF camera body name:               %.*s\n", (int) sizeof raf.camerabodyname, raf.camerabodyname );
+    prf( "  RAF sub-version (ExifTool RAFVersion): %.*s\n", (int) sizeof raf.subVersion, raf.subVersion );
+    prf( "  RAF JPEG offset:                     %#x\n", raf.jpgOffset );
+    prf( "  RAF JPEG length:                     %#x\n", raf.jpgLength );
+    prf( "  RAF CFA header offset:               %#x\n", raf.cfaHeaderOffset );
+    prf( "  RAF CFA header length:               %#x\n", raf.cfaHeaderLength );
+    prf( "  RAF CFA data offset:                 %#x\n", raf.cfaOffset );
+    prf( "  RAF CFA data length:                 %#x\n", raf.cfaLength );
+
+    if ( raf.jpgLength < 16 || !IsFileRangeValid( raf.jpgOffset, raf.jpgLength ) )
+    {
+        prf( "RAF embedded JPEG range is invalid\n" );
+        return false;
+    }
+
+    DWORD rawFullWidth = 0, rawFullHeight = 0;
+    DWORD rawWidth = 0, rawHeight = 0;
+    if ( raf.cfaLength && !IsFileRangeValid( raf.cfaOffset, raf.cfaLength ) )
+        prf( "RAF CFA raw-data range is outside the file\n" );
+    else if ( ParseRafRawDimensions( raf, rawFullWidth, rawFullHeight ) )
+        prf( "  RAF raw image full dimensions:       %u x %u\n", rawFullWidth, rawFullHeight );
+
+    if ( raf.cfaHeaderLength && !IsFileRangeValid( raf.cfaHeaderOffset, raf.cfaHeaderLength ) )
+        prf( "RAF CFA metadata record block is outside the file\n" );
+    else
+        ParseRafCfaRecords( raf, rawFullWidth, rawFullHeight, rawWidth, rawHeight );
+
+    if ( rawWidth && rawHeight )
+        prf( "  RAF raw image dimensions:            %u x %u\n", rawWidth, rawHeight );
+
+    return true;
 } //AttemptFujifilmParse
 
 #pragma pack( push, 1 )
@@ -9236,24 +14104,90 @@ struct WebPAnmf
 
 #pragma pack(pop)
 
+DWORD WebPRead24( __int64 offset )
+{
+    return (DWORD) GetBYTE( offset ) |
+           ( (DWORD) GetBYTE( offset + 1 ) << 8 ) |
+           ( (DWORD) GetBYTE( offset + 2 ) << 16 );
+}
+
 void EnumerateWebP()
 {
-    RIFFChunk chunk;
-    __int64 offset = 12;
     __int64 length = GetStreamLength();
 
     prf( "mimetype:                            image/webp\n" );
 
-    while ( offset < length )
+    if ( !IsFileRangeValid( 0, 12 ) )
     {
-        GetBytes( offset, &chunk, sizeof( chunk ) );
-        prf( "chunk: %c%c%c%c size %u\n", chunk.CC[ 0 ], chunk.CC[ 1 ], chunk.CC[ 2 ], chunk.CC[ 3 ], chunk.size );
+        prf( "WebP RIFF header is truncated\n" );
+        return;
+    }
 
-        if ( !strncmp( & chunk.CC[0], "VP8X", 4 ) )
+    DWORD riffSize = GetDWORD( 4, true );
+    char riff[ 4 ], form[ 4 ];
+    GetBytes( 0, riff, sizeof riff );
+    GetBytes( 8, form, sizeof form );
+    if ( 0 != memcmp( riff, "RIFF", sizeof riff ) || 0 != memcmp( form, "WEBP", sizeof form ) )
+    {
+        prf( "invalid RIFF/WEBP signature\n" );
+        return;
+    }
+    if ( riffSize < 4 )
+    {
+        prf( "invalid RIFF size %u (must include the WEBP form type)\n", riffSize );
+        return;
+    }
+
+    __int64 riffEnd = (__int64) riffSize + 8;
+    if ( riffEnd > length )
+    {
+        prf( "  (warning: RIFF declares %lld bytes but only %lld are available)\n", riffEnd, length );
+        riffEnd = length;
+    }
+    else if ( riffEnd < length )
+        prf( "  trailing bytes after RIFF container: %lld\n", length - riffEnd );
+
+    __int64 offset = 12;
+    unsigned int frameCount = 0;
+    while ( offset < riffEnd )
+    {
+        if ( !IsFileRangeValid( offset, sizeof( RIFFChunk ) ) || offset + sizeof( RIFFChunk ) > riffEnd )
+        {
+            prf( "truncated WebP chunk header at offset %lld\n", offset );
+            break;
+        }
+
+        RIFFChunk chunk;
+        GetBytes( offset, &chunk, sizeof( chunk ) );
+        if ( chunk.size > riffEnd - offset - sizeof( chunk ) )
+        {
+            prf( "chunk %.4s at offset %lld declares %u bytes beyond the RIFF container; stopping\n",
+                 chunk.CC, offset, chunk.size );
+            break;
+        }
+
+        __int64 dataOffset = offset + sizeof( chunk );
+        __int64 nextChunkOffset = dataOffset + chunk.size + ( chunk.size & 1 );
+        if ( nextChunkOffset > riffEnd )
+        {
+            prf( "chunk %.4s at offset %lld is missing its required padding byte; stopping\n",
+                 chunk.CC, offset );
+            break;
+        }
+        prf( "chunk: %.4s size %u\n", chunk.CC, chunk.size );
+
+        if ( 0 == memcmp( chunk.CC, "VP8X", 4 ) )
         {
             struct WebPVP8X vp8x;
-            GetBytes( offset + 8, &vp8x, sizeof( vp8x ) );
+            if ( chunk.size < sizeof( vp8x ) )
+            {
+                prf( "  (warning: VP8X chunk is too short for its feature header)\n" );
+                goto nextWebPChunk;
+            }
+            GetBytes( dataOffset, &vp8x, sizeof( vp8x ) );
             prf( "  flags:       %#x\n", vp8x.flags );
+            if ( ( vp8x.flags & 0xc1 ) || vp8x.reserved[ 0 ] || vp8x.reserved[ 1 ] || vp8x.reserved[ 2 ] )
+                prf( "  (warning: reserved VP8X flag or header bits are nonzero)\n" );
             prf( "  Anim exists  %u\n", ( 0 != ( vp8x.flags & 0x2 ) ) ); 
             prf( "  XMP  exists  %u\n", ( 0 != ( vp8x.flags & 0x4 ) ) ); 
             prf( "  EXIF exists  %u\n", ( 0 != ( vp8x.flags & 0x8 ) ) ); 
@@ -9267,67 +14201,102 @@ void EnumerateWebP()
             prf( "  width        %u\n", width );
             prf( "  height       %u\n", height );
         }
-        else if ( !strncmp( & chunk.CC[0], "VP8 ", 4 ) )
+        else if ( 0 == memcmp( chunk.CC, "VP8 ", 4 ) )
         {
             struct WebPVP8 vp8;
-            GetBytes( offset + 8, &vp8, sizeof( vp8 ) );
-            prf( "  width       %u\n", vp8.width );
-            prf( "  height      %u\n", vp8.height );
+            if ( chunk.size < sizeof( vp8 ) )
+            {
+                prf( "  (warning: VP8 chunk is too short for its key-frame header)\n" );
+                goto nextWebPChunk;
+            }
+            GetBytes( dataOffset, &vp8, sizeof( vp8 ) );
+            DWORD frameTag = WebPRead24( dataOffset );
+            WORD width = GetWORD( dataOffset + 6, true );
+            WORD height = GetWORD( dataOffset + 8, true );
+            if ( 0 != memcmp( vp8.startCode, "\x9d\x01\x2a", 3 ) || ( frameTag & 1 ) )
+                prf( "  (warning: VP8 frame is not a valid key-frame header)\n" );
+            prf( "  key frame   %u\n", 0 == ( frameTag & 1 ) );
+            prf( "  width       %u (scale %u)\n", width & 0x3fff, width >> 14 );
+            prf( "  height      %u (scale %u)\n", height & 0x3fff, height >> 14 );
         }
-        else if ( !strncmp( & chunk.CC[0], "VP8L ", 4 ) )
+        else if ( 0 == memcmp( chunk.CC, "VP8L", 4 ) )
         {
             struct WebPVP8L vp8l;
-            GetBytes( offset + 8, &vp8l, sizeof( vp8l ) );
+            if ( chunk.size < sizeof( vp8l ) )
+            {
+                prf( "  (warning: VP8L chunk is too short for its image header)\n" );
+                goto nextWebPChunk;
+            }
+            GetBytes( dataOffset, &vp8l, sizeof( vp8l ) );
+            vp8l.metadata = GetDWORD( dataOffset + 1, true );
             prf( "  signature    %#x\n", vp8l.signature );
             prf( "  metadata     %#x\n", vp8l.metadata );
+            if ( 0x2f != vp8l.signature || 0 != ( ( vp8l.metadata >> 29 ) & 3 ) )
+                prf( "  (warning: invalid VP8L signature or version)\n" );
             prf( "    width      %u\n", 1 + ( vp8l.metadata & 0x3fff ) );
             prf( "    height     %u\n", 1 + ( ( vp8l.metadata >> 14 ) & 0x3fff ) );
             prf( "    alpha      %u\n", ( vp8l.metadata >> 28 ) & 1 );
             prf( "    version    %u\n", ( vp8l.metadata >> 29 ) & 3 );
         }
-        else if ( !strncmp( & chunk.CC[0], "EXIF", 4 ) )
+        else if ( 0 == memcmp( chunk.CC, "EXIF", 4 ) )
         {
-            g_WebP_Exif_Offset = offset + 8;
+            if ( 0 != g_WebP_Exif_Offset )
+                prf( "  (warning: multiple EXIF chunks; using the last one)\n" );
+            g_WebP_Exif_Offset = dataOffset;
             g_WebP_Exif_Length = chunk.size;
             prf( "  exif offset  %llu\n", g_WebP_Exif_Offset );
             prf( "  exif length  %llu\n", g_WebP_Exif_Length );
         }
-        else if ( !strncmp( & chunk.CC[0], "ANIM", 4 ) )
+        else if ( 0 == memcmp( chunk.CC, "ICCP", 4 ) )
+            prf( "  ICC profile: %u bytes\n", chunk.size );
+        else if ( 0 == memcmp( chunk.CC, "XMP ", 4 ) )
+            prf( "  XMP metadata: %u bytes\n", chunk.size );
+        else if ( 0 == memcmp( chunk.CC, "ANIM", 4 ) )
         {
+            if ( chunk.size < sizeof( struct WebPAnim ) )
+            {
+                prf( "  (warning: ANIM chunk is shorter than 6 bytes)\n" );
+                goto nextWebPChunk;
+            }
             struct WebPAnim anim;
-            GetBytes( offset + 8, &anim, sizeof( anim ) );
-            prf( "  background color rgba: %#x %#x %#x %#x\n", anim.b, anim.g, anim.r, anim.a );
-            prf( "  loop count:            %u\n", anim.loopCount );
+            GetBytes( dataOffset, &anim, sizeof( anim ) );
+            prf( "  background color BGRA: %#x %#x %#x %#x\n", anim.b, anim.g, anim.r, anim.a );
+            prf( "  loop count:            %u\n", GetWORD( dataOffset + 4, true ) );
         }
-        else if ( !strncmp( & chunk.CC[0], "ANMF", 4 ) )
+        else if ( 0 == memcmp( chunk.CC, "ANMF", 4 ) )
         {
+            if ( chunk.size < sizeof( struct WebPAnmf ) )
+            {
+                prf( "  (warning: ANMF chunk is shorter than 16 bytes)\n" );
+                goto nextWebPChunk;
+            }
             struct WebPAnmf anmf;
-            GetBytes( offset + 8, &anmf, sizeof( anmf ) );
+            GetBytes( dataOffset, &anmf, sizeof( anmf ) );
 
-            uint32_t x = 0, y = 0;
-            memcpy( &x, anmf.x, 3 );
-            memcpy( &y, anmf.y, 3 );
+            DWORD x = WebPRead24( dataOffset );
+            DWORD y = WebPRead24( dataOffset + 3 );
+            DWORD width = WebPRead24( dataOffset + 6 ) + 1;
+            DWORD height = WebPRead24( dataOffset + 9 ) + 1;
+            DWORD duration = WebPRead24( dataOffset + 12 );
+            frameCount++;
+            prf( "  frame        %u\n", frameCount );
             prf( "  x            %u\n", x * 2 );
             prf( "  y            %u\n", y * 2 );
-
-            uint32_t width = 0, height = 0;
-            memcpy( &width, anmf.widthm1, 3 );
-            memcpy( &height, anmf.heightm1, 3 );
             prf( "  width        %u\n", width );
             prf( "  height       %u\n", height );
-
-            uint32_t duration = 0;
-            memcpy( &duration, anmf.duration, 3 );
             prf( "  duration ms  %u\n", duration );
-
-            prf( "  alpha blend  %u\n", ( 0 != ( anmf.flags & 0x40 ) ) );
-            prf( "  dispose      %u\n", ( 0 != ( anmf.flags & 0x80 ) ) );
+            if ( anmf.flags & 0xfc )
+                prf( "  (warning: reserved ANMF flag bits are nonzero: %#x)\n", anmf.flags & 0xfc );
+            prf( "  alpha blend  %s\n", ( 0 == ( anmf.flags & 0x02 ) ) ? "yes" : "no" );
+            prf( "  dispose      %s\n", ( 0 != ( anmf.flags & 0x01 ) ) ? "background" : "none" );
         }
 
-        offset += 8 + chunk.size;
-        if ( offset & 1 )
-            offset++;
+        nextWebPChunk:
+        offset = nextChunkOffset;
     }
+
+    if ( frameCount )
+        prf( "animation frames: %u\n", frameCount );
 } //EnumerateWebP
 
 void EnumerateImageData( WCHAR const * pwc )
@@ -9358,10 +14327,32 @@ void EnumerateImageData( WCHAR const * pwc )
             return;
         }
 
+        if ( g_Heif_Exif_Length < 18 ||
+             g_Heif_Exif_Offset < 0 ||
+             g_Heif_Exif_Offset > g_pStream->Length() ||
+             g_Heif_Exif_Length > g_pStream->Length() - g_Heif_Exif_Offset )
+        {
+            prf( "invalid Exif item extent in this heif (.heic/.hif) file\n" );
+            return;
+        }
+
         prf( "mimetype:                             image/heic\n" );
         DWORD o = GetDWORD( g_Heif_Exif_Offset, false );
+        if ( o < 6 || o > (ULONGLONG) g_Heif_Exif_Length - 12 )
+        {
+            prf( "invalid Exif TIFF-header offset in this heif (.heic/.hif) file\n" );
+            return;
+        }
 
         heifOffsetBase = o + g_Heif_Exif_Offset + 4;
+        char exifIdentifier[ 6 ];
+        GetBytes( g_Heif_Exif_Offset + 4, exifIdentifier, sizeof exifIdentifier );
+        if ( 0 != memcmp( exifIdentifier, "Exif\0\0", sizeof exifIdentifier ) )
+        {
+            prf( "invalid Exif item signature in this heif (.heic/.hif) file\n" );
+            return;
+        }
+
         g_pStream->Seek( heifOffsetBase );
         prf( "file size: %I64d\n", GetStreamLength() );
 
@@ -9395,7 +14386,8 @@ void EnumerateImageData( WCHAR const * pwc )
     }
     else if ( !wcsicmp( pwcExt, L".wma" ) || !wcsicmp( pwcExt, L".wmv" ) )
     {
-        ParseAsf();
+        ParseAsf( !wcsicmp( pwcExt, L".wmv" ) ?
+                  "video/x-ms-wmv" : "audio/x-ms-wma" );
         return;
     }
     else if ( !wcsicmp( pwcExt, L".wav" ) )
@@ -9405,7 +14397,7 @@ void EnumerateImageData( WCHAR const * pwc )
     }
     else if ( !wcsicmp( pwcExt, L".m4a" ) )
     {
-        EnumerateHeif( g_pStream );
+    EnumerateM4A( g_pStream );
         return;
     }
     else if ( !wcsicmp( pwcExt, L".ico" ) || !wcsicmp( pwcExt, L".cur" ) )
@@ -9512,8 +14504,19 @@ void EnumerateImageData( WCHAR const * pwc )
             return;
         }
 
-        ParsePNG();
-        return;
+        __int64 pngExifOffset = ParsePNG();
+        if ( 0 == pngExifOffset )
+            return;
+        if ( pngExifOffset > ( __int64 ) MAXDWORD - 8 )
+        {
+            prf( "PNG Exif data is beyond the supported TIFF offset range\n" );
+            return;
+        }
+
+        header = GetDWORD( pngExifOffset, true );
+        littleEndian = ( 0x002a4949 == header );
+        headerBase = (DWORD) pngExifOffset;
+        startingOffset = headerBase + 4;
     }
     else if ( 0xd8ff == ( header & 0xffff ) ) 
     {
@@ -9559,12 +14562,11 @@ void EnumerateImageData( WCHAR const * pwc )
         // But RAF files have an embedded JPG with full properties, so show those.
         // https://libopenraw.freedesktop.org/formats/raf/
 
-        AttemptFujifilmParse();
+        RafHeader raf;
+        if ( !AttemptFujifilmParse( raf ) )
+            return;
 
-        DWORD jpgOffset = GetDWORD( 84, false );
-        DWORD jpgLength = GetDWORD( 88, false );
-        DWORD jpgSig = GetDWORD( jpgOffset, true );
-        //printf( "jpgOffset %d, jpgSig: %#x\n", jpgOffset, jpgSig );
+        DWORD jpgSig = GetDWORD( raf.jpgOffset, true );
 
         if ( 0xd8ff != ( jpgSig & 0xffff ) )
         {
@@ -9572,9 +14574,15 @@ void EnumerateImageData( WCHAR const * pwc )
             return;
         }
 
+        if ( raf.jpgLength < (__int64) exifHeaderOffset + 4 )
+        {
+            prf( "embedded RAF JPEG is too short to contain its EXIF header\n" );
+            return;
+        }
+
         prf( "Embedded JPG in RAF:\n" );
-        int exifMaybe = ParseOldJpg( jpgOffset );
-        DWORD exifSig = GetDWORD( jpgOffset + exifHeaderOffset, true );
+        int exifMaybe = ParseOldJpg( raf.jpgOffset, raf.jpgLength );
+        DWORD exifSig = GetDWORD( raf.jpgOffset + exifHeaderOffset, true );
         //printf( "jpg exif Sig: %#x\n", exifSig );
 
         if ( 0x002a4949 != exifSig )
@@ -9584,11 +14592,11 @@ void EnumerateImageData( WCHAR const * pwc )
         }
 
         header = exifSig;
-        headerBase = jpgOffset + exifHeaderOffset;
+        headerBase = raf.jpgOffset + exifHeaderOffset;
         startingOffset = headerBase + 4;
 
-        g_Embedded_Image_Offset = jpgOffset;
-        g_Embedded_Image_Length = jpgLength;
+        g_Embedded_Image_Offset = raf.jpgOffset;
+        g_Embedded_Image_Length = raf.jpgLength;
 
         //printf( "headerBase %d, startingOffset %d\n", headerBase, startingOffset );
     }
@@ -9880,4 +14888,3 @@ extern "C" int __cdecl wmain( int argc, WCHAR * argv[] )
 
     return 0;
 } //wmain
-
