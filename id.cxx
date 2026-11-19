@@ -15,6 +15,7 @@
 #include <float.h>
 #include <eh.h>
 #include <math.h>
+#include <ctype.h>
 
 #include <string>
 #include <memory>
@@ -23,6 +24,11 @@
 #include "djl_strm.hxx"
 
 using namespace std;
+
+#ifdef IMGENAI_ONLY
+string g_imgenaiParserOutput;
+bool g_imgenaiInputError = false;
+#endif
 
 /*
    1 = BYTE An 8-bit unsigned integer
@@ -90,6 +96,9 @@ WCHAR * g_Embedded_File_Extension = L".JPG";
 
 char g_acMake[ 100 ] = { 0, 0, 0 };
 char g_acModel[ 100 ] = { 0, 0, 0 };
+#ifndef IMGENAI_ONLY
+bool g_C2PAManifestDetected = false;
+#endif
 
 class CFile
 {
@@ -171,6 +180,9 @@ struct IFDHeader
     
 void printWide( WCHAR const * pwc )
 {
+#ifdef IMGENAI_ONLY
+    (void) pwc;
+#else
     fflush( 0 ); // make sure the C runtime is caught up
     HANDLE h = GetStdHandle( STD_OUTPUT_HANDLE );
     DWORD mode;
@@ -210,10 +222,14 @@ void printWide( WCHAR const * pwc )
             }
         }
     }
+#endif
 } //printWide
 
 void printNarrow( char const * pc )
 {
+#ifdef IMGENAI_ONLY
+    g_imgenaiParserOutput += pc;
+#else
     HANDLE h = GetStdHandle( STD_OUTPUT_HANDLE );
     DWORD mode;
     int len = strlen( pc );
@@ -228,6 +244,7 @@ void printNarrow( char const * pc )
         else
             printf( "%s", pc ); // need printf to do /n to /r/n processing
     }
+#endif
 } //printNarrow
 
 void prf( const char * format, ... )
@@ -254,6 +271,12 @@ void wprf( const WCHAR * format, ... )
 
 void Usage()
 {
+#ifdef IMGENAI_ONLY
+    printf( "usage: imgenai [-s:<outputfile>] [image]\n" );
+    printf( "  Assess whether image metadata indicates generative AI may have been used.\n" );
+    printf( "  -s:<outputfile>  Write a JPEG copy with AI-related metadata and C2PA/JUMBF removed.\n" );
+    exit( 1 );
+#else
     prf( "usage: id [-e:name.jpg] [-f] [filename]\n" );
     prf( "  image data enumeration\n" );
     prf( "       filename       filename of the image to check\n" );
@@ -274,6 +297,7 @@ void Usage()
     prf( "      Embedded images may be JPG, PNG, HIF, or some other format\n" );
     prf( "      Fujifilm RAF headers, CFA metadata, raw dimensions, and embedded JPG metadata are parsed\n" );
     exit( 1 );
+#endif
 } //Usage
 
 __int64 GetStreamLength() { return g_pStream->Length(); }
@@ -7271,6 +7295,187 @@ void PrintXMPField( const char * data, size_t length, const char * name, const c
         prf( "  %-22s: %.*s\n", label, (int) min( valueLength, (size_t) 200 ), field );
 }
 
+void PrintXMPHistorySoftwareAgents( const char * data, size_t length )
+{
+    string xmp( data, length );
+    const string name = "softwareAgent";
+    size_t searchOffset = 0;
+    bool topazFound = false;
+
+    while ( searchOffset < xmp.size() )
+    {
+        size_t nameOffset = xmp.find( name, searchOffset );
+        if ( string::npos == nameOffset )
+            break;
+        searchOffset = nameOffset + name.size();
+
+        size_t tagStart = xmp.rfind( '<', nameOffset );
+        if ( string::npos == tagStart || tagStart + 1 >= nameOffset )
+            continue;
+        if ( '/' == xmp[ tagStart + 1 ] || '!' == xmp[ tagStart + 1 ] || '?' == xmp[ tagStart + 1 ] )
+            continue;
+
+        size_t tagEnd = xmp.find( '>', searchOffset );
+        if ( string::npos == tagEnd )
+            continue;
+
+        size_t valueStart = searchOffset;
+        while ( valueStart < tagEnd && isspace( (unsigned char) xmp[ valueStart ] ) )
+            valueStart++;
+
+        size_t valueEnd = string::npos;
+        if ( valueStart < tagEnd && '=' == xmp[ valueStart ] )
+        {
+            size_t quote = xmp.find_first_of( "\"'", valueStart + 1 );
+            if ( string::npos != quote && quote < tagEnd )
+            {
+                valueStart = quote + 1;
+                valueEnd = xmp.find( xmp[ quote ], valueStart );
+                if ( valueEnd > tagEnd )
+                    valueEnd = string::npos;
+            }
+        }
+        else if ( valueStart < tagEnd && '>' == xmp[ valueStart ] )
+        {
+            valueStart++;
+            valueEnd = xmp.find( '<', valueStart );
+        }
+
+        if ( string::npos == valueEnd || valueEnd <= valueStart )
+            continue;
+
+        string value = xmp.substr( valueStart, valueEnd - valueStart );
+        while ( !value.empty() && isspace( (unsigned char) value.back() ) )
+            value.pop_back();
+        size_t first = 0;
+        while ( first < value.size() && isspace( (unsigned char) value[ first ] ) )
+            first++;
+        if ( first )
+            value.erase( 0, first );
+        if ( value.empty() )
+            continue;
+
+        prf( "  History Software Agent: %.*s\n",
+             (int) min( value.size(), (size_t) 200 ), value.c_str() );
+        for ( size_t i = 0; i + 5 <= value.size(); i++ )
+            if ( 0 == _strnicmp( value.c_str() + i, "Topaz", 5 ) )
+            {
+                topazFound = true;
+                break;
+            }
+    }
+
+    if ( topazFound )
+        prf( "  History note: Topaz is recorded in edit history; this does not establish that its generative-AI features were used\n" );
+}
+
+void PrintDigitalSourceType( const char * data, size_t length )
+{
+    string xmp( data, length );
+    const char * names[] = { "DigitalSourceType", "digitalSourceType" };
+    vector<string> values;
+
+    for ( const char * name : names )
+    {
+        size_t searchOffset = 0;
+        while ( searchOffset < xmp.size() )
+        {
+            size_t nameOffset = xmp.find( name, searchOffset );
+            if ( string::npos == nameOffset )
+                break;
+            searchOffset = nameOffset + strlen( name );
+
+            size_t tagStart = xmp.rfind( '<', nameOffset );
+            size_t tagEnd = xmp.find( '>', nameOffset );
+            if ( string::npos == tagStart || string::npos == tagEnd )
+                continue;
+
+            size_t valueStart = string::npos;
+            size_t valueEnd = string::npos;
+            size_t attributeOffset = xmp.find( "rdf:resource", nameOffset );
+            if ( attributeOffset != string::npos && attributeOffset < tagEnd )
+            {
+                size_t equals = xmp.find( '=', attributeOffset + 12 );
+                if ( equals != string::npos && equals < tagEnd )
+                {
+                    size_t quote = xmp.find_first_of( "\"'", equals + 1 );
+                    if ( quote != string::npos && quote < tagEnd )
+                    {
+                        valueStart = quote + 1;
+                        valueEnd = xmp.find( xmp[ quote ], valueStart );
+                        if ( valueEnd > tagEnd )
+                            valueEnd = string::npos;
+                    }
+                }
+            }
+
+            if ( string::npos == valueStart )
+            {
+                size_t afterName = nameOffset + strlen( name );
+                while ( afterName < tagEnd && isspace( (unsigned char) xmp[ afterName ] ) )
+                    afterName++;
+
+                if ( afterName < tagEnd && '=' == xmp[ afterName ] )
+                {
+                    size_t quote = xmp.find_first_of( "\"'", afterName + 1 );
+                    if ( quote != string::npos && quote < tagEnd )
+                    {
+                        valueStart = quote + 1;
+                        valueEnd = xmp.find( xmp[ quote ], valueStart );
+                        if ( valueEnd > tagEnd )
+                            valueEnd = string::npos;
+                    }
+                }
+                else
+                {
+                    size_t contentStart = tagEnd + 1;
+                    size_t listItem = xmp.find( "<rdf:li", contentStart );
+                    if ( listItem != string::npos && listItem < xmp.find( "</", contentStart ) )
+                    {
+                        size_t listEnd = xmp.find( '>', listItem );
+                        if ( listEnd != string::npos )
+                            contentStart = listEnd + 1;
+                    }
+                    valueStart = contentStart;
+                    valueEnd = xmp.find( '<', valueStart );
+                }
+            }
+
+            if ( string::npos == valueStart || string::npos == valueEnd || valueEnd <= valueStart )
+                continue;
+
+            string value = xmp.substr( valueStart, valueEnd - valueStart );
+            if ( find( values.begin(), values.end(), value ) != values.end() )
+                continue;
+            values.push_back( value );
+
+            const char * interpretation = NULL;
+            if ( string::npos != value.find( "compositeWithTrainedAlgorithmicMedia" ) )
+                interpretation = "photo combined with AI-generated elements";
+            else if ( string::npos != value.find( "trainedAlgorithmicMedia" ) )
+                interpretation = "created using generative AI";
+            else if ( string::npos != value.find( "algorithmicMedia" ) )
+                interpretation = "algorithmically generated or processed; this alone does not establish generative AI";
+
+            prf( "  DigitalSourceType:    %.*s\n",
+                 (int) min( value.size(), (size_t) 200 ), value.c_str() );
+            if ( interpretation )
+                prf( "  AI-use interpretation: %s (IPTC label)\n", interpretation );
+        }
+    }
+
+    const char firefly[] = "firefly";
+    for ( size_t i = 0; i + sizeof firefly - 1 <= xmp.size(); i++ )
+    {
+        if ( 0 == _strnicmp( xmp.data() + i, firefly, sizeof firefly - 1 ) )
+        {
+            prf( "  AI tool mention:       %.*s (tool metadata; the specific AI operation is not stated)\n",
+                 (int) min( sizeof firefly - 1, (size_t) 200 ), xmp.data() + i );
+            break;
+        }
+    }
+}
+
 void PrintXMPData( const char * pcIn, size_t dataLength = 0 )
 {
     if ( 0 == dataLength )
@@ -7281,12 +7486,440 @@ void PrintXMPData( const char * pcIn, size_t dataLength = 0 )
     PrintXMPField( pcIn, dataLength, "xap:Rating", "Rating" );
     PrintXMPField( pcIn, dataLength, "xmp:Label", "Label" );
     PrintXMPField( pcIn, dataLength, "xmp:CreatorTool", "CreatorTool" );
+    PrintXMPField( pcIn, dataLength, "c2pa:SoftwareAgent", "C2PA SoftwareAgent" );
+    PrintXMPField( pcIn, dataLength, "c2pa:softwareAgent", "C2PA SoftwareAgent" );
+    PrintXMPField( pcIn, dataLength, "c2pa:actions", "C2PA actions" );
+    PrintXMPHistorySoftwareAgents( pcIn, dataLength );
     PrintXMPField( pcIn, dataLength, "photoshop:DateCreated", "DateCreated" );
     PrintXMPField( pcIn, dataLength, "dc:title", "Title" );
     PrintXMPField( pcIn, dataLength, "dc:description", "Description" );
     PrintXMPField( pcIn, dataLength, "dc:creator", "Creator" );
     PrintXMPField( pcIn, dataLength, "dc:rights", "Rights" );
+    PrintDigitalSourceType( pcIn, dataLength );
 } //PrintXMPData
+
+void PrintC2PAManifestNotice( const char * container )
+{
+#ifndef IMGENAI_ONLY
+    g_C2PAManifestDetected = true;
+#endif
+    prf( "%s: C2PA/JUMBF data block detected; Content Credentials may be present\n",
+         container );
+    prf( "  Assertions and signature are not decoded or validated by id\n" );
+    prf( "  Note: a manifest indicates provenance data, not by itself that AI was used\n" );
+}
+
+#ifdef IMGENAI_ONLY
+void PrintImgenaiWide( const WCHAR * text )
+{
+    int byteCount = WideCharToMultiByte( CP_UTF8, 0, text, -1, NULL, 0, NULL, NULL );
+    if ( byteCount <= 1 )
+        return;
+    vector<char> utf8( byteCount );
+    if ( WideCharToMultiByte( CP_UTF8, 0, text, -1, utf8.data(), byteCount, NULL, NULL ) )
+        printf( "%s", utf8.data() );
+}
+
+bool ContainsInsensitive( const BYTE * data, size_t length, const char * text )
+{
+    size_t textLength = strlen( text );
+    if ( 0 == textLength || textLength > length )
+        return false;
+    for ( size_t i = 0; i <= length - textLength; i++ )
+        if ( 0 == _strnicmp( (const char *) data + i, text, textLength ) )
+            return true;
+    return false;
+}
+
+bool IsKnownGenerativeAITool( const string & value )
+{
+    static const char * names[] =
+    {
+        "Topaz",
+        "Adobe Photoshop",
+        "Adobe Lightroom",
+        "Adobe Firefly",
+        "Firefly",
+        "Luminar Neo",
+        "ON1 Photo RAW",
+        "Canva",
+        "Picsart",
+        "PhotoDirector"
+    };
+
+    for ( const char * name : names )
+        for ( size_t i = 0; i + strlen( name ) <= value.size(); i++ )
+            if ( 0 == _strnicmp( value.c_str() + i, name, strlen( name ) ) )
+                return true;
+    return false;
+}
+
+void PrintImgenaiAssessment()
+{
+    vector<string> aiEvidence;
+    vector<string> otherEvidence;
+    string cameraMake;
+    string cameraModel;
+    bool hasC2PABlock = false;
+    size_t lineStart = 0;
+    while ( lineStart < g_imgenaiParserOutput.size() )
+    {
+        size_t lineEnd = g_imgenaiParserOutput.find( '\n', lineStart );
+        if ( string::npos == lineEnd )
+            lineEnd = g_imgenaiParserOutput.size();
+        string line = g_imgenaiParserOutput.substr( lineStart, lineEnd - lineStart );
+        lineStart = lineEnd + ( lineEnd < g_imgenaiParserOutput.size() );
+
+        while ( !line.empty() && ( '\r' == line.back() || isspace( (unsigned char) line.back() ) ) )
+            line.pop_back();
+        size_t first = 0;
+        while ( first < line.size() && isspace( (unsigned char) line[ first ] ) )
+            first++;
+        if ( first )
+            line.erase( 0, first );
+        if ( line.empty() )
+            continue;
+
+        bool isAiEvidence = false;
+        if ( 0 == line.find( "DigitalSourceType:" ) )
+        {
+            isAiEvidence =
+                string::npos != line.find( "trainedAlgorithmicMedia" ) ||
+                string::npos != line.find( "compositeWithTrainedAlgorithmicMedia" );
+            if ( string::npos != line.find( "algorithmicMedia" ) && !isAiEvidence )
+                otherEvidence.push_back( line );
+        }
+        else if ( 0 == line.find( "AI tool mention:" ) )
+            isAiEvidence = true;
+        else if ( 0 == line.find( "AI-use interpretation:" ) &&
+                  ( string::npos != line.find( "generative AI" ) ||
+                    string::npos != line.find( "AI-generated elements" ) ) )
+            isAiEvidence = true;
+        else if ( 0 == line.find( "History Software Agent:" ) ||
+                  0 == line.find( "CreatorTool" ) ||
+                  0 == line.find( "C2PA SoftwareAgent" ) ||
+                  0 == line.find( "Software:" ) ||
+                  0 == line.find( "ProcessingSoftware:" ) )
+            isAiEvidence = IsKnownGenerativeAITool( line );
+
+        if ( 0 == line.find( "Make:" ) )
+            cameraMake = line.substr( strlen( "Make:" ) );
+        else if ( 0 == line.find( "Model:" ) )
+            cameraModel = line.substr( strlen( "Model:" ) );
+
+        if ( isAiEvidence )
+        {
+            if ( find( aiEvidence.begin(), aiEvidence.end(), line ) == aiEvidence.end() )
+                aiEvidence.push_back( line );
+        }
+        else if ( string::npos != line.find( "C2PA/JUMBF data block detected" ) )
+        {
+            hasC2PABlock = true;
+            otherEvidence.push_back( line );
+        }
+    }
+
+    if ( g_imgenaiInputError )
+    {
+        printf( "ERROR: Could not read the image; no assessment was made.\n" );
+        return;
+    }
+
+    while ( !cameraMake.empty() && isspace( (unsigned char) cameraMake.back() ) )
+        cameraMake.pop_back();
+    while ( !cameraModel.empty() && isspace( (unsigned char) cameraModel.back() ) )
+        cameraModel.pop_back();
+    size_t modelStart = 0;
+    while ( modelStart < cameraModel.size() && isspace( (unsigned char) cameraModel[ modelStart ] ) )
+        modelStart++;
+    if ( modelStart )
+        cameraModel.erase( 0, modelStart );
+
+    if ( !aiEvidence.empty() )
+        printf( "RESULT: Metadata indicates generative AI may have been used.\n" );
+    else
+        printf( "RESULT: Metadata cannot determine whether generative AI was used.\n" );
+
+    if ( !aiEvidence.empty() || !otherEvidence.empty() )
+        printf( "Metadata evidence:\n" );
+    for ( const string & line : aiEvidence )
+        printf( "  %s\n", line.c_str() );
+    for ( const string & line : otherEvidence )
+        printf( "  %s\n", line.c_str() );
+
+    if ( hasC2PABlock && string::npos != cameraMake.find( "LEICA" ) )
+    {
+        printf( "Leica camera and C2PA/JUMBF metadata detected%s%s.\n",
+                cameraModel.empty() ? "" : ": ",
+                cameraModel.empty() ? "" : cameraModel.c_str() );
+        if ( ContainsInsensitive( (const BYTE *) cameraModel.data(), cameraModel.size(), "M11-P" ) )
+            printf( "Leica says the M11-P signs captured images with Content Credentials; verify this file at https://contentcredentials.org/verify.\n" );
+        else
+            printf( "Leica's M11-P is one Leica model that signs captured images with Content Credentials; verify any credential at https://contentcredentials.org/verify.\n" );
+        printf( "This tool only detects a possible credential block; it does not verify its signature or show that the image is unedited or AI-free.\n" );
+    }
+
+    if ( !aiEvidence.empty() )
+        printf( "An AI-capable tool in metadata does not establish that its generative-AI features were used.\n" );
+    if ( aiEvidence.empty() )
+        printf( "  No metadata indicating generative AI use was found.\n" );
+    printf( "Metadata absence cannot prove AI was not used; no signed provenance was validated.\n" );
+}
+
+bool ContainsAIIndicator( const BYTE * data, size_t length )
+{
+    static const char * indicators[] =
+    {
+        "trainedAlgorithmicMedia",
+        "algorithmicMedia",
+        "generative AI",
+        "generativeAI",
+        "AI-generated",
+        "AI generated",
+        "AI-assisted",
+        "AI assisted",
+        "c2pa",
+        "jumbf",
+        "contentcredentials",
+        "content credentials",
+        "Midjourney",
+        "Stable Diffusion",
+        "DALL-E",
+        "OpenAI",
+        "Runway",
+        "Ideogram",
+        "Leonardo AI",
+        "Generative Fill",
+        "Generative Expand",
+        "Topaz",
+        "Adobe Photoshop",
+        "Adobe Lightroom",
+        "Firefly",
+        "Luminar Neo",
+        "ON1 Photo RAW",
+        "Canva",
+        "Picsart",
+        "PhotoDirector"
+    };
+    for ( const char * indicator : indicators )
+        if ( ContainsInsensitive( data, length, indicator ) )
+            return true;
+    return false;
+}
+
+bool WriteSanitizedJPEG( const WCHAR * inputPath, const WCHAR * outputBase )
+{
+    WCHAR outputPath[ MAX_PATH + 1 ] = {};
+    const WCHAR * extension = PathFindExtension( inputPath );
+    if ( 0 != _wcsicmp( extension, L".jpg" ) && 0 != _wcsicmp( extension, L".jpeg" ) )
+    {
+        printf( "ERROR: -s currently supports JPEG input only; no output was written.\n" );
+        return false;
+    }
+    if ( _snwprintf_s( outputPath, _countof( outputPath ), _countof( outputPath ) - 1,
+                       L"%s%s", outputBase, extension ) < 0 )
+    {
+        printf( "ERROR: Sanitized output path is too long; no output was written.\n" );
+        return false;
+    }
+    if ( 0 == _wcsicmp( inputPath, outputPath ) )
+    {
+        printf( "ERROR: Sanitized output must not overwrite the input image.\n" );
+        return false;
+    }
+
+    FILE * inputFile = _wfopen( inputPath, L"rb" );
+    if ( !inputFile )
+    {
+        printf( "ERROR: Could not open JPEG input; no output was written.\n" );
+        return false;
+    }
+    if ( 0 != _fseeki64( inputFile, 0, SEEK_END ) )
+    {
+        fclose( inputFile );
+        printf( "ERROR: Could not seek in JPEG input; no output was written.\n" );
+        return false;
+    }
+    __int64 inputLength = _ftelli64( inputFile );
+    if ( inputLength < 4 || (unsigned __int64) inputLength > (unsigned __int64) SIZE_MAX ||
+         0 != _fseeki64( inputFile, 0, SEEK_SET ) )
+    {
+        fclose( inputFile );
+        printf( "ERROR: JPEG size is invalid or unsupported; no output was written.\n" );
+        return false;
+    }
+
+    vector<BYTE> input;
+    vector<BYTE> output;
+    try
+    {
+        input.resize( (size_t) inputLength );
+        if ( fread( input.data(), 1, input.size(), inputFile ) != input.size() )
+        {
+            fclose( inputFile );
+            printf( "ERROR: Could not read the complete JPEG; no output was written.\n" );
+            return false;
+        }
+        fclose( inputFile );
+        inputFile = NULL;
+
+        if ( 0xff != input[ 0 ] || 0xd8 != input[ 1 ] )
+        {
+            printf( "ERROR: Input does not have a JPEG start marker; no output was written.\n" );
+            return false;
+        }
+
+        output.reserve( input.size() );
+        output.push_back( input[ 0 ] );
+        output.push_back( input[ 1 ] );
+        size_t offset = 2;
+        size_t removedSegments = 0;
+        bool reachedEnd = false;
+
+        while ( offset < input.size() )
+        {
+            size_t markerStart = offset;
+            if ( 0xff != input[ offset ] )
+            {
+                printf( "ERROR: Invalid JPEG marker sequence; no output was written.\n" );
+                return false;
+            }
+            while ( offset < input.size() && 0xff == input[ offset ] )
+                offset++;
+            if ( offset >= input.size() )
+            {
+                printf( "ERROR: Truncated JPEG marker; no output was written.\n" );
+                return false;
+            }
+
+            BYTE marker = input[ offset++ ];
+            if ( 0xd9 == marker )
+            {
+                output.insert( output.end(), input.begin() + markerStart, input.begin() + offset );
+                output.insert( output.end(), input.begin() + offset, input.end() );
+                reachedEnd = true;
+                break;
+            }
+            if ( 0x01 == marker || ( marker >= 0xd0 && marker <= 0xd8 ) )
+            {
+                output.insert( output.end(), input.begin() + markerStart, input.begin() + offset );
+                continue;
+            }
+            if ( offset + 2 > input.size() )
+            {
+                printf( "ERROR: Truncated JPEG segment length; no output was written.\n" );
+                return false;
+            }
+
+            size_t segmentLength = ( (size_t) input[ offset ] << 8 ) | input[ offset + 1 ];
+            if ( segmentLength < 2 || segmentLength > input.size() - offset )
+            {
+                printf( "ERROR: Invalid JPEG segment length; no output was written.\n" );
+                return false;
+            }
+            size_t segmentEnd = offset + segmentLength;
+            const BYTE * payload = input.data() + offset + 2;
+            size_t payloadLength = segmentLength - 2;
+            bool isApplicationSegment = marker >= 0xe0 && marker <= 0xef;
+            bool isJUMBF = marker == 0xeb && payloadLength >= 8 &&
+                           'J' == payload[ 0 ] && 'P' == payload[ 1 ] &&
+                           0 == memcmp( payload + 4, "jumb", 4 );
+            bool isJUMBFContinuation = marker == 0xeb && payloadLength >= 2 &&
+                                       'J' == payload[ 0 ] && 'P' == payload[ 1 ];
+            bool removeSegment = isJUMBF || isJUMBFContinuation ||
+                                 ( ( isApplicationSegment || 0xfe == marker ) &&
+                                   ContainsAIIndicator( payload, payloadLength ) );
+            if ( removeSegment )
+                removedSegments++;
+            else
+                output.insert( output.end(), input.begin() + markerStart, input.begin() + segmentEnd );
+            offset = segmentEnd;
+
+            if ( 0xda == marker )
+            {
+                size_t scanStart = offset;
+                while ( offset + 1 < input.size() )
+                {
+                    if ( 0xff != input[ offset ] )
+                    {
+                        offset++;
+                        continue;
+                    }
+                    size_t markerCode = offset + 1;
+                    while ( markerCode < input.size() && 0xff == input[ markerCode ] )
+                        markerCode++;
+                    if ( markerCode >= input.size() )
+                        break;
+                    BYTE scanMarker = input[ markerCode ];
+                    if ( 0 == scanMarker || ( scanMarker >= 0xd0 && scanMarker <= 0xd7 ) )
+                    {
+                        offset = markerCode + 1;
+                        continue;
+                    }
+                    break;
+                }
+                output.insert( output.end(), input.begin() + scanStart, input.begin() + offset );
+            }
+        }
+
+        if ( !reachedEnd )
+        {
+            printf( "ERROR: JPEG end marker was not found; no output was written.\n" );
+            return false;
+        }
+
+        WCHAR outputDirectory[ MAX_PATH + 1 ] = {};
+        wcscpy_s( outputDirectory, outputPath );
+        if ( !PathRemoveFileSpec( outputDirectory ) )
+            GetCurrentDirectory( _countof( outputDirectory ), outputDirectory );
+        WCHAR temporaryPath[ MAX_PATH + 1 ] = {};
+        if ( 0 == GetTempFileName( outputDirectory, L"igm", 0, temporaryPath ) )
+        {
+            printf( "ERROR: Could not create a temporary output file; no output was written.\n" );
+            return false;
+        }
+
+        FILE * outputFile = _wfopen( temporaryPath, L"wb" );
+        if ( !outputFile )
+        {
+            DeleteFile( temporaryPath );
+            printf( "ERROR: Could not write sanitized JPEG; no output was written.\n" );
+            return false;
+        }
+        bool writeSucceeded = output.size() == fwrite( output.data(), 1, output.size(), outputFile );
+        if ( 0 != fflush( outputFile ) )
+            writeSucceeded = false;
+        if ( 0 != fclose( outputFile ) )
+            writeSucceeded = false;
+        if ( !writeSucceeded )
+        {
+            DeleteFile( temporaryPath );
+            printf( "ERROR: Could not finish writing sanitized JPEG; no output was written.\n" );
+            return false;
+        }
+        if ( !MoveFileEx( temporaryPath, outputPath, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH ) )
+        {
+            DeleteFile( temporaryPath );
+            printf( "ERROR: Could not move sanitized JPEG to the requested output path.\n" );
+            return false;
+        }
+
+        WCHAR successMessage[ MAX_PATH + 100 ] = {};
+        _snwprintf_s( successMessage, _countof( successMessage ), _countof( successMessage ) - 1,
+                      L"Sanitized JPEG written to %ws; removed %u metadata segment(s).\n",
+                      outputPath, (unsigned) removedSegments );
+        PrintImgenaiWide( successMessage );
+        return true;
+    }
+    catch ( const bad_alloc & )
+    {
+        if ( inputFile )
+            fclose( inputFile );
+        printf( "ERROR: Not enough memory to sanitize this JPEG; no output was written.\n" );
+        return false;
+    }
+}
+#endif
 
 int ParseOldJpg( DWORD startingOffset = 0, __int64 maxLength = 0 )
 {
@@ -7309,6 +7942,7 @@ int ParseOldJpg( DWORD startingOffset = 0, __int64 maxLength = 0 )
     const BYTE MARKER_APP0  = 0xe0;          // JFIF application segment
     const BYTE MARKER_APP1  = 0xe1;          // Exif or adobe segment
     const BYTE MARKER_APP2  = 0xe2;          // ICC_PROFILE
+    const BYTE MARKER_APP11 = 0xeb;          // JPEG JUMBF / Content Credentials
     const BYTE MARKER_PS3   = 0xed;          // Photoshop 3.08BIM
     const BYTE MARKER_APP14 = 0xee;          // Adobe  JPEG::Adobe directory
     const BYTE MARKER_COM   = 0xfe;          // comment
@@ -7676,6 +8310,14 @@ int ParseOldJpg( DWORD startingOffset = 0, __int64 maxLength = 0 )
                      0 == bytes[ identifierLength ] )
                     PrintXMPData( bytes.get() + identifierLength + 1, data_length - identifierLength - 1 );
             }
+        }
+        else if ( MARKER_APP11 == segment && data_length >= 8 )
+        {
+            BYTE signature[ 8 ] = {};
+            GetBytes( dataOffset, signature, sizeof signature );
+            if ( 'J' == signature[ 0 ] && 'P' == signature[ 1 ] &&
+                     0 == memcmp( signature + 4, "jumb", 4 ) )
+                    PrintC2PAManifestNotice( "JPEG" );
         }
         else if ( MARKER_DRI == segment )
         {
@@ -8775,6 +9417,10 @@ void EnumerateBoxes( HeifStream & hs, DWORD depth, MP4ParseState * m4a = NULL,
             DWORD version = hs.GetDWORD( offset, false );
 
             //printf( "%*s major brand: %s, minor version: %#x\n", indent, "", brand, version );
+        }
+        else if ( !strcmp( tag, "jumb" ) )
+        {
+            PrintC2PAManifestNotice( "ISO BMFF" );
         }
         else if ( !strcmp( tag, "pitm" ) )
         {
@@ -10652,7 +11298,11 @@ __int64 ParsePNG()
         if ( g_FullInformation )
             prf( "png chunk type: %.4s, len %u\n", type, length );
 
-        if ( 0 == memcmp( type, "IHDR", 4 ) )
+        if ( 0 == memcmp( type, "caBX", 4 ) )
+        {
+            PrintC2PAManifestNotice( "PNG" );
+        }
+        else if ( 0 == memcmp( type, "IHDR", 4 ) )
         {
             if ( sawIHDR || offset != 8 || length != 13 )
             {
@@ -14528,6 +15178,8 @@ void EnumerateWebP()
             prf( "  ICC profile: %u bytes\n", chunk.size );
         else if ( 0 == memcmp( chunk.CC, "XMP ", 4 ) )
             prf( "  XMP metadata: %u bytes\n", chunk.size );
+        else if ( 0 == memcmp( chunk.CC, "C2PA", 4 ) )
+            PrintC2PAManifestNotice( "WebP" );
         else if ( 0 == memcmp( chunk.CC, "ANIM", 4 ) )
         {
             if ( chunk.size < sizeof( struct WebPAnim ) )
@@ -15129,6 +15781,8 @@ void EnumerateJPEG2000()
             else if ( 2 == method )
                 prf( "JPEG 2000 ICC profile: %I64u bytes\n", payloadLength - 3 );
         }
+        else if ( 0 == memcmp( type, "jumb", 4 ) )
+            PrintC2PAManifestNotice( "JPEG 2000" );
         else if ( 0 == memcmp( type, "xml ", 4 ) )
             prf( "JPEG 2000 XML metadata: %I64u bytes\n", payloadLength );
         else if ( 0 == memcmp( type, "uuid", 4 ) && payloadLength >= 16 )
@@ -15253,6 +15907,8 @@ void EnumerateJXL()
             }
             prf( "JPEG XL codestream data: %I64u bytes\n", payloadLength );
         }
+        else if ( 0 == memcmp( type, "jumb", 4 ) )
+            PrintC2PAManifestNotice( "JPEG XL" );
         else if ( 0 == memcmp( type, "Exif", 4 ) )
         {
             prf( "JPEG XL EXIF metadata: %I64u bytes\n", payloadLength );
@@ -15282,6 +15938,9 @@ void EnumerateImageData( WCHAR const * pwc )
 
     if ( !g_pStream->Ok() )
     {
+#ifdef IMGENAI_ONLY
+        g_imgenaiInputError = true;
+#endif
         wprf( L"can't open file %ws\n", pwc );
         return;
     }
@@ -15792,6 +16451,9 @@ extern "C" int __cdecl wmain( int argc, WCHAR * argv[] )
     awcFilename[0] = 0;
     WCHAR awcEmbeddedImage[ MAX_PATH + 1 ];
     awcEmbeddedImage[0] = 0;
+#ifdef IMGENAI_ONLY
+    WCHAR awcSanitizeOutputBase[ MAX_PATH + 1 ] = {};
+#endif
 
     int iArg = 1;
     while ( iArg < argc )
@@ -15805,13 +16467,29 @@ extern "C" int __cdecl wmain( int argc, WCHAR * argv[] )
 
            if ( 'e' == a1 )
            {
+#ifdef IMGENAI_ONLY
+               Usage();
+#else
                if ( ':' != pwcArg[ 2 ] )
                    Usage();
 
                _wfullpath( awcEmbeddedImage, pwcArg + 3, _countof( awcEmbeddedImage ) );
+#endif
            }
            else if ( 'f' == a1 )
+#ifdef IMGENAI_ONLY
+               Usage();
+#else
                g_FullInformation = true;
+#endif
+#ifdef IMGENAI_ONLY
+           else if ( 's' == a1 )
+           {
+               if ( ':' != pwcArg[ 2 ] || 0 == pwcArg[ 3 ] ||
+                    0 == _wfullpath( awcSanitizeOutputBase, pwcArg + 3, _countof( awcSanitizeOutputBase ) ) )
+                   Usage();
+           }
+#endif
            else
                Usage();
         }
@@ -15834,6 +16512,19 @@ extern "C" int __cdecl wmain( int argc, WCHAR * argv[] )
         wprf( L"parsing input file %ws\n", awcFilename );
 
         EnumerateImageData( awcFilename );
+
+#ifndef IMGENAI_ONLY
+        if ( g_C2PAManifestDetected &&
+             ( 0 == _stricmp( g_acMake, "LEICA CAMERA AG" ) ||
+               0 == _stricmp( g_acMake, "Leica Camera AG" ) ) )
+        {
+            if ( 0 == _strnicmp( g_acModel, "M11-P", 5 ) )
+                prf( "Leica M11-P Content Credentials: Leica documents that captured images are signed to record provenance and modifications. Verify the credential at https://contentcredentials.org/verify\n" );
+            else
+                prf( "Leica camera with a C2PA/JUMBF marker detected. This marker is not signature verification or proof that the image is unedited or AI-free. Leica documents signed Content Credentials on the M11-P; verify any credential at https://contentcredentials.org/verify\n" );
+            prf( "id detects the marker only; it does not validate the signature or interpret credential assertions.\n" );
+        }
+#endif
 
         if ( ( 0 != g_Embedded_Image_Offset ) || ( 0 != g_Embedded_Image_Length ) )
         {
@@ -15907,8 +16598,23 @@ extern "C" int __cdecl wmain( int argc, WCHAR * argv[] )
     }
     catch( ... )
     {
+#ifdef IMGENAI_ONLY
+        g_imgenaiInputError = true;
+#endif
         prf( "caught exception\n" );
     }
 
+#ifdef IMGENAI_ONLY
+    if ( 0 != awcSanitizeOutputBase[ 0 ] )
+        printf( "Assessment below applies to the input image.\n" );
+    PrintImgenaiAssessment();
+    if ( g_imgenaiInputError )
+        return 2;
+    if ( 0 != awcSanitizeOutputBase[ 0 ] &&
+         !WriteSanitizedJPEG( awcFilename, awcSanitizeOutputBase ) )
+        return 2;
     return 0;
+#else
+    return 0;
+#endif
 } //wmain
