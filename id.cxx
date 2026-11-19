@@ -4,6 +4,7 @@
 #include <shlwapi.h>
 #include <dshow.h>
 #include <dmo.h>
+#include <xmllite.h>
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -45,6 +46,7 @@ using namespace std;
 #pragma comment( lib, "shlwapi.lib" )
 #pragma comment( lib, "ntdll.lib" )
 #pragma comment( lib, "strmiids.lib" )
+#pragma comment( lib, "xmllite.lib" )
 
 typedef unsigned __int64 QWORD;
 
@@ -265,8 +267,8 @@ void Usage()
     prf( "      id track.flac /e:track.png\n" ); 
     prf( "\n" );
     prf( "  notes:\n" );
-    prf( "      Most image formats are supported: CR2, NEF, RW2, DNG, PNG, TIFF, JPG, ARW, HEIC, HIF, CR3, BMP, ORF\n" );
-    prf( "      Some non-image formats are supported: FLAC, WAV, MP3, WMA, WMV\n" );
+    prf( "      Still-image formats include: JPG, TIFF, PNG, BMP, GIF, SVG, WebP, HEIF/HEIC, AVIF, JP2/J2K, JXL, and camera RAW\n" );
+    prf( "      Some non-image formats are supported: FLAC, WAV, MP3, M4A, MP4, MOV, M4V, WMA, WMV\n" );
     prf( "      Some image formats aren't supported yet: presumably many others\n" );
     prf( "      By default, just the first 256 bytes of binary data is displayed. Use -f for all data\n" );
     prf( "      Embedded images may be JPG, PNG, HIF, or some other format\n" );
@@ -8199,7 +8201,7 @@ class HeifStream
         }
 }; //HeifStream
 
-struct M4AParseState
+struct MP4ParseState
 {
     DWORD movieTimeScale = 0;
     ULONGLONG movieDuration = 0;
@@ -8208,7 +8210,17 @@ struct M4AParseState
     WORD channels = 0;
     WORD bitsPerSample = 0;
     bool audioTrack = false;
+    bool videoTrack = false;
+    bool videoFile = false;
     string audioFormat;
+    string videoFormat;
+    DWORD videoWidth = 0;
+    DWORD videoHeight = 0;
+    DWORD trackTimeScale = 0;
+    ULONGLONG trackDuration = 0;
+    ULONGLONG videoSampleCount = 0;
+    ULONGLONG videoSampleDuration = 0;
+    vector<string> metadataKeys;
     bool metadataHeaderPrinted = false;
 };
 
@@ -8226,6 +8238,13 @@ const char * M4AMetadataName( const char * tag )
         if ( 0 == strcmp( tag + 1, "too" ) ) return "Encoder";
         if ( 0 == strcmp( tag + 1, "grp" ) ) return "Grouping";
         if ( 0 == strcmp( tag + 1, "lyr" ) ) return "Lyrics";
+        if ( 0 == strcmp( tag + 1, "des" ) ) return "Description";
+        if ( 0 == strcmp( tag + 1, "mak" ) ) return "Make";
+        if ( 0 == strcmp( tag + 1, "mod" ) ) return "Model";
+        if ( 0 == strcmp( tag + 1, "swr" ) ) return "Software";
+        if ( 0 == strcmp( tag + 1, "xyz" ) ) return "Location";
+        if ( 0 == strcmp( tag + 1, "inf" ) ) return "Information";
+        if ( 0 == strcmp( tag + 1, "creationdate" ) ) return "Creation Date";
     }
     else
     {
@@ -8237,18 +8256,37 @@ const char * M4AMetadataName( const char * tag )
         if ( 0 == strcmp( tag, "tmpo" ) ) return "BPM";
         if ( 0 == strcmp( tag, "cpil" ) ) return "Compilation";
         if ( 0 == strcmp( tag, "pgap" ) ) return "Gapless Playback";
+        if ( 0 == strcmp( tag, "com.android.version" ) ) return "Android Version";
+        if ( 0 == strcmp( tag, "com.android.manufacturer" ) ) return "Manufacturer";
+        if ( 0 == strcmp( tag, "com.android.model" ) ) return "Model";
+        if ( 0 == strcmp( tag, "com.xiaomi.product.marketname" ) ) return "Market Name";
+        if ( 0 == strcmp( tag, "com.android.capture.fps" ) ) return "Capture Frame Rate";
+        if ( 0 == strcmp( tag, "com.video.file.type" ) ) return "Video File Type";
+        if ( 0 == strcmp( tag, "com.xiaomi.normal_video" ) ) return "Normal Video";
+        if ( 0 == strcmp( tag, "com.xiaomi.ai_audio" ) ) return "AI Audio";
+        if ( 0 == strcmp( tag, "xiaomi.exifInfo.videoinfo" ) ) return "Video Information";
+        if ( 0 == strcmp( tag, "com.xiaomi.camera.videoDebugInfo.firstFrameTimestamp" ) )
+            return "First Frame Timestamp";
+        if ( 0 == strcmp( tag, "com.xiaomi.hdr10" ) ) return "HDR10 Metadata";
+        if ( 0 == strcmp( tag, "com.apple.quicktime.location.ISO6709" ) ) return "Location";
+        if ( 0 == strcmp( tag, "com.apple.quicktime.make" ) ) return "Make";
+        if ( 0 == strcmp( tag, "com.apple.quicktime.model" ) ) return "Model";
+        if ( 0 == strcmp( tag, "com.apple.quicktime.software" ) ) return "Software";
+        if ( 0 == strcmp( tag, "com.apple.quicktime.title" ) ) return "Title";
+        if ( 0 == strcmp( tag, "com.apple.quicktime.description" ) ) return "Description";
     }
 
     return NULL;
 }
 
 void ParseM4AData( HeifStream & hs, __int64 & offset, ULONGLONG boxLength,
-                   M4AParseState & state, const char * itemTag )
+                   MP4ParseState & state, const char * itemTag )
 {
     ULONGLONG payloadLength = boxLength - 8;
     if ( payloadLength < 8 )
     {
-        prf( "invalid M4A metadata data box for %s\n", itemTag );
+        prf( "invalid %s metadata data box for %s\n",
+             state.videoFile ? "MP4" : "M4A", itemTag );
         return;
     }
 
@@ -8257,12 +8295,14 @@ void ParseM4AData( HeifStream & hs, __int64 & offset, ULONGLONG boxLength,
     payloadLength -= 8;
 
     const char * name = M4AMetadataName( itemTag );
+    if ( NULL == name && state.videoFile && itemTag && strlen( itemTag ) <= 128 )
+        name = itemTag;
     if ( NULL == name )
         return;
 
     if ( !state.metadataHeaderPrinted )
     {
-        prf( "M4A metadata:\n" );
+        prf( "%s metadata:\n", state.videoFile ? "MP4" : "M4A" );
         state.metadataHeaderPrinted = true;
     }
 
@@ -8324,14 +8364,32 @@ void ParseM4AData( HeifStream & hs, __int64 & offset, ULONGLONG boxLength,
         else
             prf( "  %-22s: could not decode text\n", name );
     }
+    else if ( 21 == dataType && payloadLength > 0 && payloadLength <= 8 )
+    {
+        ULONGLONG rawValue = hs.GetVariable( offset, (int) payloadLength );
+        LONGLONG value = (LONGLONG) rawValue;
+        if ( payloadLength < 8 &&
+             ( rawValue & ( 1ULL << ( (int) payloadLength * 8 - 1 ) ) ) )
+            value = (LONGLONG) ( rawValue | ( ~0ULL << ( (int) payloadLength * 8 ) ) );
+        prf( "  %-22s: %I64d\n", name, value );
+    }
+    else if ( 23 == dataType && payloadLength == sizeof( float ) )
+    {
+        DWORD bits = (DWORD) hs.GetVariable( offset, sizeof( DWORD ) );
+        float value;
+        memcpy( &value, &bits, sizeof value );
+        prf( "  %-22s: %.3f\n", name, value );
+    }
     else if ( payloadLength <= 4 && payloadLength > 0 )
     {
         ULONGLONG value = hs.GetVariable( offset, (int) payloadLength );
         prf( "  %-22s: %I64u\n", name, value );
     }
+    else if ( state.videoFile )
+        prf( "  %-22s: binary data (type %u, %I64u bytes)\n", name, dataType, payloadLength );
 }
 
-void PrintHeifPrimaryProperties()
+void PrintHeifPrimaryProperties( const char * imageFormat )
 {
     if ( 0xffffffff == g_Heif_Primary_ItemID || g_Heif_Primary_Properties.empty() )
         return;
@@ -8351,7 +8409,8 @@ void PrintHeifPrimaryProperties()
 
         if ( !printedDimensions && property.width && property.height )
         {
-            prf( "HEIF primary image dimensions: %u x %u\n", property.width, property.height );
+            prf( "%s primary image dimensions: %u x %u\n",
+                 imageFormat, property.width, property.height );
             printedDimensions = true;
         }
 
@@ -8388,9 +8447,9 @@ void PrintHeifPrimaryProperties()
     }
 } //PrintHeifPrimaryProperties
 
-// Heif and CR3 use ISO Base Media File Format ISO/IEC 14496-12. This function walks those files and pulls out data including Exif offsets
+// Walk ISO Base Media File Format containers to extract image, audio, and video metadata.
 
-void EnumerateBoxes( HeifStream & hs, DWORD depth, M4AParseState * m4a = NULL,
+void EnumerateBoxes( HeifStream & hs, DWORD depth, MP4ParseState * m4a = NULL,
                      bool insideIlst = false, const char * itemTag = NULL )
 {
     __int64 offset = 0;
@@ -8478,7 +8537,23 @@ void EnumerateBoxes( HeifStream & hs, DWORD depth, M4AParseState * m4a = NULL,
         if ( m4a && insideIlst )
         {
             if ( !strcmp( tag, "data" ) && itemTag )
-                ParseM4AData( hs, offset, boxLen, *m4a, itemTag );
+            {
+                string resolvedTag;
+                const char * dataTag = itemTag;
+                if ( !m4a->metadataKeys.empty() )
+                {
+                    DWORD keyIndex = ( (DWORD) (BYTE) itemTag[ 0 ] << 24 ) |
+                                     ( (DWORD) (BYTE) itemTag[ 1 ] << 16 ) |
+                                     ( (DWORD) (BYTE) itemTag[ 2 ] << 8 ) |
+                                     (BYTE) itemTag[ 3 ];
+                    if ( keyIndex > 0 && keyIndex <= m4a->metadataKeys.size() )
+                    {
+                        resolvedTag = m4a->metadataKeys[ keyIndex - 1 ];
+                        dataTag = resolvedTag.c_str();
+                    }
+                }
+                ParseM4AData( hs, offset, boxLen, *m4a, dataTag );
+            }
             else if ( strcmp( tag, "mean" ) && strcmp( tag, "name" ) )
             {
                 HeifStream hsChild( hs.Stream(), hs.Offset() + offset, boxLen - ( offset - boxOffset ) );
@@ -8488,7 +8563,7 @@ void EnumerateBoxes( HeifStream & hs, DWORD depth, M4AParseState * m4a = NULL,
         else if ( m4a && !strcmp( tag, "ftyp" ) )
         {
             if ( boxLen - headerLength < 8 )
-                prf( "incomplete M4A file type box\n" );
+                prf( "incomplete %s file type box\n", m4a->videoFile ? "MP4" : "M4A" );
             else
             {
                 char majorBrand[ 5 ] = {};
@@ -8497,13 +8572,14 @@ void EnumerateBoxes( HeifStream & hs, DWORD depth, M4AParseState * m4a = NULL,
                 for ( int i = 3; i >= 0 && ' ' == majorBrand[ i ]; i-- )
                     majorBrand[ i ] = 0;
                 DWORD minorVersion = hs.GetDWORD( offset, false );
-                prf( "M4A major brand: %s (minor version %u.%u.%u)\n", majorBrand,
+                prf( "%s major brand: %s (minor version %u.%u.%u)\n",
+                     m4a->videoFile ? "MP4" : "M4A", majorBrand,
                      ( minorVersion >> 16 ) & 0xff, ( minorVersion >> 8 ) & 0xff, minorVersion & 0xff );
 
                 ULONGLONG compatibleLength = boxLen - headerLength - 8;
                 if ( compatibleLength >= 4 && compatibleLength <= 1024 )
                 {
-                    prf( "M4A compatible brands:" );
+                    prf( "%s compatible brands:", m4a->videoFile ? "MP4" : "M4A" );
                     while ( compatibleLength >= 4 )
                     {
                         char compatibleBrand[ 5 ] = {};
@@ -8522,7 +8598,7 @@ void EnumerateBoxes( HeifStream & hs, DWORD depth, M4AParseState * m4a = NULL,
         else if ( m4a && !strcmp( tag, "mvhd" ) )
         {
             if ( boxLen - headerLength < 20 )
-                prf( "incomplete M4A movie header\n" );
+                prf( "incomplete %s movie header\n", m4a->videoFile ? "MP4" : "M4A" );
             else
             {
                 BYTE version = hs.GetBYTE( offset );
@@ -8542,7 +8618,8 @@ void EnumerateBoxes( HeifStream & hs, DWORD depth, M4AParseState * m4a = NULL,
                     m4a->movieDuration = hs.GetVariable( offset, 8 );
                 }
                 else
-                    prf( "unsupported M4A movie header version %u\n", version );
+                    prf( "unsupported %s movie header version %u\n",
+                         m4a->videoFile ? "MP4" : "M4A", version );
             }
         }
         else if ( m4a && !strcmp( tag, "mdat" ) )
@@ -8553,7 +8630,8 @@ void EnumerateBoxes( HeifStream & hs, DWORD depth, M4AParseState * m4a = NULL,
         {
             ULONGLONG contentLength = boxLen - headerLength;
             if ( contentLength < 8 )
-                prf( "incomplete M4A sample description box\n" );
+                prf( "incomplete %s sample description box\n",
+                     m4a->videoFile ? "MP4" : "M4A" );
             else
             {
                 hs.GetDWORD( offset, false );
@@ -8567,7 +8645,8 @@ void EnumerateBoxes( HeifStream & hs, DWORD depth, M4AParseState * m4a = NULL,
                         format[ i ] = (char) hs.GetBYTE( offset );
 
                     if ( entryLength < 36 || entryLength > contentLength - 8 )
-                        prf( "invalid M4A audio sample entry length %u\n", entryLength );
+                        prf( "invalid %s audio sample entry length %u\n",
+                             m4a->videoFile ? "MP4" : "M4A", entryLength );
                     else
                     {
                         hs.GetWORD( offset, false );
@@ -8584,13 +8663,101 @@ void EnumerateBoxes( HeifStream & hs, DWORD depth, M4AParseState * m4a = NULL,
                         m4a->sampleRate = hs.GetDWORD( offset, false ) >> 16;
                         m4a->audioFormat = format;
 
-                        prf( "M4A audio format: %s\n", format );
-                        prf( "M4A audio channels: %u\n", m4a->channels );
-                        prf( "M4A audio bits per sample: %u\n", m4a->bitsPerSample );
-                        prf( "M4A audio sample rate: %u Hz\n", m4a->sampleRate );
+                        prf( "%s audio format: %s\n", m4a->videoFile ? "MP4" : "M4A", format );
+                        prf( "%s audio channels: %u\n", m4a->videoFile ? "MP4" : "M4A", m4a->channels );
+                        prf( "%s audio bits per sample: %u\n", m4a->videoFile ? "MP4" : "M4A", m4a->bitsPerSample );
+                        prf( "%s audio sample rate: %u Hz\n", m4a->videoFile ? "MP4" : "M4A", m4a->sampleRate );
                     }
                     offset = entryOffset + entryLength;
                 }
+            }
+        }
+        else if ( m4a && m4a->videoTrack && !strcmp( tag, "stsd" ) )
+        {
+            ULONGLONG contentLength = boxLen - headerLength;
+            if ( contentLength < 8 )
+                prf( "incomplete MP4 video sample description box\n" );
+            else
+            {
+                hs.GetDWORD( offset, false );
+                DWORD entryCount = hs.GetDWORD( offset, false );
+                if ( entryCount && contentLength >= 16 )
+                {
+                    ULONGLONG entryOffset = offset;
+                    DWORD entryLength = hs.GetDWORD( offset, false );
+                    char format[ 5 ] = {};
+                    for ( int i = 0; i < 4; i++ )
+                        format[ i ] = (char) hs.GetBYTE( offset );
+
+                    if ( entryLength < 36 || entryLength > contentLength - 8 )
+                        prf( "invalid MP4 video sample entry length %u\n", entryLength );
+                    else
+                    {
+                        m4a->videoFormat = format;
+                        offset = (__int64) entryOffset + 32;
+                        m4a->videoWidth = hs.GetWORD( offset, false );
+                        m4a->videoHeight = hs.GetWORD( offset, false );
+                    }
+                }
+            }
+        }
+        else if ( m4a && m4a->videoTrack && !strcmp( tag, "stts" ) )
+        {
+            ULONGLONG contentLength = boxLen - headerLength;
+            if ( contentLength < 8 )
+                prf( "incomplete MP4 video time-to-sample box\n" );
+            else
+            {
+                hs.GetDWORD( offset, false );
+                DWORD entryCount = hs.GetDWORD( offset, false );
+                if ( entryCount > ( contentLength - 8 ) / 8 )
+                    prf( "invalid MP4 video time-to-sample entry count %u\n", entryCount );
+                else
+                {
+                    for ( DWORD i = 0; i < entryCount && hs.Valid(); i++ )
+                    {
+                        DWORD sampleCount = hs.GetDWORD( offset, false );
+                        DWORD sampleDuration = hs.GetDWORD( offset, false );
+                        if ( sampleCount > ULLONG_MAX - m4a->videoSampleCount ||
+                             ( sampleDuration &&
+                               sampleCount > ( ULLONG_MAX - m4a->videoSampleDuration ) / sampleDuration ) )
+                        {
+                            prf( "MP4 video timing values exceed supported range\n" );
+                            m4a->videoSampleCount = 0;
+                            m4a->videoSampleDuration = 0;
+                            break;
+                        }
+                        m4a->videoSampleCount += sampleCount;
+                        m4a->videoSampleDuration += (ULONGLONG) sampleCount * sampleDuration;
+                    }
+                }
+            }
+        }
+        else if ( m4a && !strcmp( tag, "mdhd" ) )
+        {
+            ULONGLONG contentLength = boxLen - headerLength;
+            if ( contentLength < 20 )
+                prf( "incomplete MP4 media header\n" );
+            else
+            {
+                BYTE version = hs.GetBYTE( offset );
+                hs.GetBYTE( offset ); hs.GetBYTE( offset ); hs.GetBYTE( offset );
+                if ( 0 == version && contentLength >= 24 )
+                {
+                    hs.GetDWORD( offset, false );
+                    hs.GetDWORD( offset, false );
+                    m4a->trackTimeScale = hs.GetDWORD( offset, false );
+                    m4a->trackDuration = hs.GetDWORD( offset, false );
+                }
+                else if ( 1 == version && contentLength >= 32 )
+                {
+                    hs.GetVariable( offset, 8 );
+                    hs.GetVariable( offset, 8 );
+                    m4a->trackTimeScale = hs.GetDWORD( offset, false );
+                    m4a->trackDuration = hs.GetVariable( offset, 8 );
+                }
+                else
+                    prf( "unsupported MP4 media header version %u\n", version );
             }
         }
         else if ( m4a && !strcmp( tag, "ilst" ) )
@@ -8622,9 +8789,27 @@ void EnumerateBoxes( HeifStream & hs, DWORD depth, M4AParseState * m4a = NULL,
         }
         else if ( !strcmp( tag, "meta" ) )
         {
-            DWORD data = hs.GetDWORD( offset, true );
+            __int64 childOffset = offset;
+            bool hasFullBoxHeader = true;
+            if ( boxLen - headerLength >= 8 )
+            {
+                DWORD firstBoxLength = hs.GetDWORD( offset, false );
+                DWORD firstBoxTag = hs.GetDWORD( offset, false );
+                bool printableTag = true;
+                for ( int i = 0; i < 4; i++ )
+                {
+                    BYTE c = (BYTE) ( firstBoxTag >> ( 24 - i * 8 ) );
+                    if ( c < 0x20 || c > 0x7e )
+                        printableTag = false;
+                }
+                hasFullBoxHeader = !( firstBoxLength >= 8 &&
+                                      firstBoxLength <= boxLen - headerLength &&
+                                      printableTag );
+            }
 
-            //printf( "%*s data (version and flags) %#x\n", indent, "", data );
+            offset = childOffset;
+            if ( hasFullBoxHeader )
+                hs.GetDWORD( offset, true );
 
             HeifStream hsChild( hs.Stream(), hs.Offset() + offset, boxLen - ( offset - boxOffset ) );
 
@@ -8633,7 +8818,7 @@ void EnumerateBoxes( HeifStream & hs, DWORD depth, M4AParseState * m4a = NULL,
         else if ( m4a && !strcmp( tag, "hdlr" ) )
         {
             if ( boxLen - headerLength < 12 )
-                prf( "incomplete M4A handler box\n" );
+                prf( "incomplete %s handler box\n", m4a->videoFile ? "MP4" : "M4A" );
             else
             {
                 hs.GetDWORD( offset, false );
@@ -8642,6 +8827,49 @@ void EnumerateBoxes( HeifStream & hs, DWORD depth, M4AParseState * m4a = NULL,
                 for ( int i = 0; i < 4; i++ )
                     handler[ i ] = (char) hs.GetBYTE( offset );
                 m4a->audioTrack = 0 == strcmp( handler, "soun" );
+                m4a->videoTrack = 0 == strcmp( handler, "vide" );
+            }
+        }
+        else if ( m4a && !strcmp( tag, "keys" ) )
+        {
+            ULONGLONG contentLength = boxLen - headerLength;
+            if ( contentLength < 8 )
+                prf( "incomplete MP4 metadata keys box\n" );
+            else
+            {
+                hs.GetDWORD( offset, false );
+                DWORD keyCount = hs.GetDWORD( offset, false );
+                if ( keyCount > ( contentLength - 8 ) / 8 || keyCount > 4096 )
+                    prf( "invalid MP4 metadata key count %u\n", keyCount );
+                else
+                {
+                    m4a->metadataKeys.clear();
+                    for ( DWORD i = 0; i < keyCount && hs.Valid(); i++ )
+                    {
+                        DWORD entryLength = hs.GetDWORD( offset, false );
+                        hs.GetDWORD( offset, false );
+                        if ( entryLength < 8 ||
+                             entryLength - 8 > boxLen - ( offset - boxOffset ) )
+                        {
+                            prf( "invalid MP4 metadata key entry length %u\n", entryLength );
+                            break;
+                        }
+
+                        DWORD keyLength = entryLength - 8;
+                        if ( keyLength > 4096 )
+                        {
+                            prf( "MP4 metadata key is too long (%u bytes)\n", keyLength );
+                            break;
+                        }
+
+                        vector<char> keyBytes( (size_t) keyLength + 1, 0 );
+                        hs.GetBytes( offset, keyBytes.data(), (int) keyLength );
+                        if ( !hs.Valid() )
+                            break;
+                        m4a->metadataKeys.push_back( keyBytes.data() );
+                        offset += keyLength;
+                    }
+                }
             }
         }
         else if ( !strcmp( tag, "iinf" ) )
@@ -9040,11 +9268,58 @@ void EnumerateBoxes( HeifStream & hs, DWORD depth, M4AParseState * m4a = NULL,
         {
             HeifStream hsChild( hs.Stream(), hs.Offset() + offset, boxLen - ( offset - boxOffset ) );
             bool wasAudioTrack = m4a ? m4a->audioTrack : false;
+            bool wasVideoTrack = m4a ? m4a->videoTrack : false;
+            DWORD wasVideoWidth = m4a ? m4a->videoWidth : 0;
+            DWORD wasVideoHeight = m4a ? m4a->videoHeight : 0;
+            DWORD wasTrackTimeScale = m4a ? m4a->trackTimeScale : 0;
+            ULONGLONG wasTrackDuration = m4a ? m4a->trackDuration : 0;
+            ULONGLONG wasVideoSampleCount = m4a ? m4a->videoSampleCount : 0;
+            ULONGLONG wasVideoSampleDuration = m4a ? m4a->videoSampleDuration : 0;
+            string wasVideoFormat = m4a ? m4a->videoFormat : string();
             if ( m4a )
+            {
                 m4a->audioTrack = false;
+                m4a->videoTrack = false;
+                m4a->videoWidth = 0;
+                m4a->videoHeight = 0;
+                m4a->trackTimeScale = 0;
+                m4a->trackDuration = 0;
+                m4a->videoSampleCount = 0;
+                m4a->videoSampleDuration = 0;
+                m4a->videoFormat.clear();
+            }
             EnumerateBoxes( hsChild, depth + 1, m4a );
             if ( m4a )
+            {
+                if ( m4a->videoTrack )
+                {
+                    prf( "MP4 video codec: %s\n",
+                         m4a->videoFormat.empty() ? "unknown" : m4a->videoFormat.c_str() );
+                    if ( m4a->videoWidth && m4a->videoHeight )
+                        prf( "MP4 video dimensions: %u x %u\n", m4a->videoWidth, m4a->videoHeight );
+                    if ( m4a->trackTimeScale && m4a->trackDuration )
+                    {
+                        double duration = (double) m4a->trackDuration / m4a->trackTimeScale;
+                        prf( "MP4 video track duration: %.3lf seconds\n", duration );
+                    }
+                    if ( m4a->videoSampleCount && m4a->videoSampleDuration &&
+                         m4a->trackTimeScale )
+                    {
+                        double frameRate = (double) m4a->videoSampleCount * m4a->trackTimeScale /
+                                           m4a->videoSampleDuration;
+                        prf( "MP4 video frame rate: %.3lf fps\n", frameRate );
+                    }
+                }
                 m4a->audioTrack = wasAudioTrack;
+                m4a->videoTrack = wasVideoTrack;
+                m4a->videoWidth = wasVideoWidth;
+                m4a->videoHeight = wasVideoHeight;
+                m4a->trackTimeScale = wasTrackTimeScale;
+                m4a->trackDuration = wasTrackDuration;
+                m4a->videoSampleCount = wasVideoSampleCount;
+                m4a->videoSampleDuration = wasVideoSampleDuration;
+                m4a->videoFormat = wasVideoFormat;
+            }
         }
         else if ( !strcmp( tag, "mdia" ) ) // Canon .CR3 metadata
         {
@@ -9094,7 +9369,7 @@ void EnumerateBoxes( HeifStream & hs, DWORD depth, M4AParseState * m4a = NULL,
     } while ( true );
 } //EnumerateBoxes
 
-void EnumerateHeif( CStream * pStream )
+void EnumerateHeif( CStream * pStream, const char * imageFormat = "HEIF" )
 {
     g_Heif_Exif_ItemID = 0xffffffff;
     g_Heif_Exif_Offset = 0;
@@ -9109,17 +9384,18 @@ void EnumerateHeif( CStream * pStream )
     HeifStream hs( pStream, 0, length );
 
     EnumerateBoxes( hs, 0 );
-    PrintHeifPrimaryProperties();
+    PrintHeifPrimaryProperties( imageFormat );
 
     if ( g_FullInformation )
         prf( "Heif EXIF info: id %d, offset %I64d, length %I64d\n", g_Heif_Exif_ItemID, g_Heif_Exif_Offset, g_Heif_Exif_Length );
 } //EnumerateHeif
 
-void EnumerateM4A( CStream * pStream )
+void EnumerateMediaFile( CStream * pStream, const char * mimeType, bool videoFile )
 {
-    prf( "mimetype:                             audio/mp4\n" );
+    prf( "mimetype:                             %s\n", mimeType );
 
-    M4AParseState state;
+    MP4ParseState state;
+    state.videoFile = videoFile;
     HeifStream hs( pStream, 0, pStream->Length() );
     EnumerateBoxes( hs, 0, &state );
 
@@ -9129,21 +9405,22 @@ void EnumerateM4A( CStream * pStream )
         ULONGLONG remainder = state.movieDuration % state.movieTimeScale;
         if ( remainder >= state.movieTimeScale / 2 + state.movieTimeScale % 2 )
             seconds++;
-        prf( "M4A duration: %I64u:%02I64u:%02I64u\n",
+        prf( "%s duration: %I64u:%02I64u:%02I64u\n", videoFile ? "MP4" : "M4A",
              seconds / 3600, ( seconds / 60 ) % 60, seconds % 60 );
         if ( state.mediaDataBytes > 0 )
         {
             double averageBitrate = (double) state.mediaDataBytes * 8.0 /
                                     ( (double) state.movieDuration / state.movieTimeScale ) / 1000.0;
-            prf( "M4A average audio bitrate: %.1lf kbps\n", averageBitrate );
+            prf( videoFile ? "MP4 average bitrate: %.1lf kbps\n" :
+                             "M4A average audio bitrate: %.1lf kbps\n", averageBitrate );
         }
     }
     else
-        prf( "M4A movie duration is unavailable\n" );
+        prf( "%s movie duration is unavailable\n", videoFile ? "MP4" : "M4A" );
 
     if ( state.mediaDataBytes )
-        prf( "M4A media data size: %I64u bytes\n", state.mediaDataBytes );
-} //EnumerateM4A
+        prf( "%s media data size: %I64u bytes\n", videoFile ? "MP4" : "M4A", state.mediaDataBytes );
+} //EnumerateMediaFile
 
 const char * GetOrientation( int o )
 {
@@ -14299,6 +14576,705 @@ void EnumerateWebP()
         prf( "animation frames: %u\n", frameCount );
 } //EnumerateWebP
 
+void EnumerateIFD0( int depth, __int64 IFDOffset, __int64 headerBase,
+                    bool littleEndian, WCHAR * pwcExt );
+
+bool ParseEmbeddedExifTiff( __int64 offset, ULONGLONG length, WCHAR * extension )
+{
+    if ( length < 8 || length > (ULONGLONG) LLONG_MAX ||
+         !IsFileRangeValid( offset, (__int64) length ) )
+        return false;
+
+    ULONGLONG tiffOffset = GetDWORD( offset, false );
+    if ( tiffOffset > length - 4 )
+        return false;
+    __int64 tiffHeader = offset + 4 + (__int64) tiffOffset;
+    if ( tiffHeader > LLONG_MAX - 8 || !IsFileRangeValid( tiffHeader, 8 ) )
+        return false;
+
+    char exifPrefix[ 6 ] = {};
+    GetBytes( tiffHeader, exifPrefix, sizeof exifPrefix );
+    if ( 0 == memcmp( exifPrefix, "Exif\0\0", sizeof exifPrefix ) )
+        tiffHeader += sizeof exifPrefix;
+    if ( !IsFileRangeValid( tiffHeader, 8 ) )
+        return false;
+
+    WORD byteOrder = GetWORD( tiffHeader, false );
+    bool littleEndian;
+    if ( 0x4949 == byteOrder )
+        littleEndian = true;
+    else if ( 0x4d4d == byteOrder )
+        littleEndian = false;
+    else
+        return false;
+
+    if ( 42 != GetWORD( tiffHeader + 2, littleEndian ) )
+        return false;
+    DWORD ifdOffset = GetDWORD( tiffHeader + 4, littleEndian );
+    if ( ifdOffset > LLONG_MAX - tiffHeader ||
+         !IsFileRangeValid( tiffHeader + ifdOffset, 2 ) )
+        return false;
+
+    prf( "EXIF metadata:\n" );
+    EnumerateIFD0( 0, ifdOffset, tiffHeader, littleEndian, extension );
+    return true;
+}
+
+bool EnumerateJPEG2000Codestream( __int64 offset, __int64 length )
+{
+    __int64 end = offset + length;
+    __int64 markerOffset = offset;
+    bool sawImageHeader = false;
+    while ( markerOffset < end )
+    {
+        if ( markerOffset > end - 2 || !IsFileRangeValid( markerOffset, 2 ) ||
+             0xff != GetBYTE( markerOffset ) )
+        {
+            prf( "invalid JPEG 2000 codestream marker at offset %I64d\n", markerOffset );
+            return sawImageHeader;
+        }
+
+        while ( markerOffset < end && 0xff == GetBYTE( markerOffset ) )
+            markerOffset++;
+        if ( markerOffset >= end )
+            break;
+        BYTE marker = GetBYTE( markerOffset++ );
+
+        if ( 0x4f == marker )
+            continue;
+        if ( 0x93 == marker )
+        {
+            prf( "JPEG 2000 codestream data: %I64d bytes\n", end - markerOffset );
+            return sawImageHeader;
+        }
+        if ( 0xd9 == marker )
+            break;
+        if ( 0x92 == marker || ( marker >= 0xd0 && marker <= 0xd7 ) )
+            continue;
+
+        if ( markerOffset > end - 2 || !IsFileRangeValid( markerOffset, 2 ) )
+            break;
+        WORD segmentLength = GetWORD( markerOffset, false );
+        if ( segmentLength < 2 || segmentLength > end - markerOffset )
+        {
+            prf( "invalid JPEG 2000 marker segment length %u\n", segmentLength );
+            return sawImageHeader;
+        }
+
+        if ( 0x51 == marker && segmentLength >= 38 )
+        {
+            DWORD imageWidth = GetDWORD( markerOffset + 4, false );
+            DWORD imageHeight = GetDWORD( markerOffset + 8, false );
+            DWORD originX = GetDWORD( markerOffset + 12, false );
+            DWORD originY = GetDWORD( markerOffset + 16, false );
+            WORD components = GetWORD( markerOffset + 36, false );
+            if ( imageWidth < originX || imageHeight < originY ||
+                 segmentLength < 38 + (ULONGLONG) components * 3 )
+            {
+                prf( "invalid JPEG 2000 image and tile dimensions\n" );
+                return false;
+            }
+
+            prf( "JPEG 2000 dimensions: %u x %u\n",
+                 imageWidth - originX, imageHeight - originY );
+            prf( "JPEG 2000 components: %u\n", components );
+            BYTE maxBitDepth = 0;
+            for ( WORD component = 0; component < components; component++ )
+            {
+                BYTE componentDepth = ( GetBYTE( markerOffset + 38 + component * 3 ) & 0x7f ) + 1;
+                if ( componentDepth > maxBitDepth )
+                    maxBitDepth = componentDepth;
+            }
+            if ( maxBitDepth )
+                prf( "JPEG 2000 bit depth: %u\n", maxBitDepth );
+            sawImageHeader = true;
+        }
+
+        markerOffset += segmentLength;
+    }
+
+    if ( !sawImageHeader )
+        prf( "JPEG 2000 image size marker was not found\n" );
+    return sawImageHeader;
+}
+
+void EnumerateGIF()
+{
+    __int64 length = GetStreamLength();
+    if ( !IsFileRangeValid( 0, 13 ) )
+    {
+        prf( "GIF header is truncated\n" );
+        return;
+    }
+
+    char header[ 13 ] = {};
+    GetBytes( 0, header, sizeof header );
+    if ( 0 != memcmp( header, "GIF87a", 6 ) && 0 != memcmp( header, "GIF89a", 6 ) )
+    {
+        prf( "invalid GIF signature\n" );
+        return;
+    }
+
+    DWORD width = (BYTE) header[ 6 ] | ( (DWORD) (BYTE) header[ 7 ] << 8 );
+    DWORD height = (BYTE) header[ 8 ] | ( (DWORD) (BYTE) header[ 9 ] << 8 );
+    BYTE packed = (BYTE) header[ 10 ];
+    prf( "mimetype:                             image/gif\n" );
+    prf( "GIF version: %c%c%c\n", header[ 3 ], header[ 4 ], header[ 5 ] );
+    prf( "GIF dimensions: %u x %u\n", width, height );
+    prf( "GIF color resolution: %u bits\n", ( ( packed >> 4 ) & 7 ) + 1 );
+    prf( "GIF background color index: %u\n", (BYTE) header[ 11 ] );
+    prf( "GIF pixel aspect ratio: %u\n", (BYTE) header[ 12 ] );
+
+    __int64 offset = 13;
+    if ( packed & 0x80 )
+        offset += 3 * ( 1 << ( ( packed & 7 ) + 1 ) );
+    if ( offset > length )
+    {
+        prf( "truncated GIF global color table\n" );
+        return;
+    }
+
+    DWORD frames = 0;
+    while ( offset < length )
+    {
+        BYTE marker = GetBYTE( offset++ );
+        if ( 0x3b == marker )
+        {
+            prf( "GIF frames: %u\n", frames );
+            return;
+        }
+        if ( 0x21 == marker )
+        {
+            if ( !IsFileRangeValid( offset, 1 ) )
+                break;
+            BYTE label = GetBYTE( offset++ );
+            if ( 0xf9 == label )
+            {
+                if ( !IsFileRangeValid( offset, 6 ) || 4 != GetBYTE( offset ) )
+                {
+                    prf( "invalid or truncated GIF graphics control extension\n" );
+                    return;
+                }
+                BYTE control = GetBYTE( offset + 1 );
+                WORD delay = GetWORD( offset + 2, true );
+                prf( "GIF frame delay: %u ms\n", delay * 10 );
+                prf( "GIF transparent color: %s\n", control & 1 ? "yes" : "no" );
+                offset += 6;
+                continue;
+            }
+
+            bool isComment = ( 0xfe == label );
+            bool isApplication = ( 0xff == label );
+            if ( isApplication )
+            {
+                if ( !IsFileRangeValid( offset, 1 ) )
+                    break;
+                BYTE blockLength = GetBYTE( offset++ );
+                if ( blockLength > 0 && !IsFileRangeValid( offset, blockLength ) )
+                    break;
+                if ( blockLength )
+                {
+                    char application[ 256 ] = {};
+                    GetBytes( offset, application, blockLength );
+                    prf( "GIF application extension: %s\n", application );
+                    offset += blockLength;
+                }
+            }
+
+            vector<char> comment;
+            bool terminated = false;
+            while ( IsFileRangeValid( offset, 1 ) )
+            {
+                BYTE blockLength = GetBYTE( offset++ );
+                if ( 0 == blockLength )
+                {
+                    terminated = true;
+                    break;
+                }
+                if ( !IsFileRangeValid( offset, blockLength ) )
+                    break;
+                if ( isComment && comment.size() < 4096 )
+                {
+                    size_t keep = min( (size_t) blockLength, 4096 - comment.size() );
+                    size_t start = comment.size();
+                    comment.resize( start + keep );
+                    GetBytes( offset, comment.data() + start, (int) keep );
+                }
+                offset += blockLength;
+            }
+            if ( !terminated )
+            {
+                prf( "truncated GIF extension data\n" );
+                return;
+            }
+            if ( isComment && !comment.empty() )
+            {
+                for ( size_t i = 0; i < comment.size(); i++ )
+                    if ( (BYTE) comment[ i ] < 0x20 && '\t' != comment[ i ] &&
+                         '\r' != comment[ i ] && '\n' != comment[ i ] )
+                        comment[ i ] = '?';
+                comment.push_back( 0 );
+                prf( "GIF comment: %s\n", comment.data() );
+            }
+            continue;
+        }
+        if ( 0x2c == marker )
+        {
+            if ( !IsFileRangeValid( offset, 9 ) )
+                break;
+            DWORD left = GetWORD( offset, true );
+            DWORD top = GetWORD( offset + 2, true );
+            DWORD frameWidth = GetWORD( offset + 4, true );
+            DWORD frameHeight = GetWORD( offset + 6, true );
+            BYTE imagePacked = GetBYTE( offset + 8 );
+            offset += 9;
+            if ( imagePacked & 0x80 )
+                offset += 3 * ( 1 << ( ( imagePacked & 7 ) + 1 ) );
+            if ( !IsFileRangeValid( offset, 1 ) )
+                break;
+            offset++;
+            frames++;
+            prf( "GIF frame %u: %u x %u at %u,%u\n",
+                 frames, frameWidth, frameHeight, left, top );
+            bool terminated = false;
+            while ( IsFileRangeValid( offset, 1 ) )
+            {
+                BYTE blockLength = GetBYTE( offset++ );
+                if ( 0 == blockLength )
+                {
+                    terminated = true;
+                    break;
+                }
+                if ( !IsFileRangeValid( offset, blockLength ) )
+                    break;
+                offset += blockLength;
+            }
+            if ( !terminated )
+            {
+                prf( "truncated GIF image data\n" );
+                return;
+            }
+            continue;
+        }
+        prf( "unrecognized GIF block marker %#x at offset %I64d\n", marker, offset - 1 );
+        return;
+    }
+    prf( "GIF data is truncated before the trailer\n" );
+}
+
+void EnumerateSVG()
+{
+    __int64 length = GetStreamLength();
+    if ( length <= 0 || length > 16 * 1024 * 1024 )
+    {
+        prf( "SVG XML size is invalid or exceeds 16 MB\n" );
+        return;
+    }
+
+    vector<BYTE> xml( (size_t) length );
+    if ( !g_pStream->Seek( 0 ) || g_pStream->Read( xml.data(), (ULONG) xml.size() ) != xml.size() )
+    {
+        prf( "could not read SVG XML data\n" );
+        return;
+    }
+
+    HRESULT initResult = CoInitializeEx( NULL, COINIT_APARTMENTTHREADED );
+    bool uninitializeCom = SUCCEEDED( initResult );
+    if ( FAILED( initResult ) && RPC_E_CHANGED_MODE != initResult )
+    {
+        prf( "could not initialize XML parser (HRESULT %#lx)\n", initResult );
+        return;
+    }
+
+    IXmlReader * reader = NULL;
+    HRESULT hr = CreateXmlReader( __uuidof( IXmlReader ), (void **) &reader, NULL );
+    if ( FAILED( hr ) )
+    {
+        if ( uninitializeCom )
+            CoUninitialize();
+        prf( "could not create SVG XML reader (HRESULT %#lx)\n", hr );
+        return;
+    }
+
+    IStream * input = SHCreateMemStream( xml.data(), (UINT) xml.size() );
+    if ( NULL == input )
+    {
+        reader->Release();
+        if ( uninitializeCom )
+            CoUninitialize();
+        prf( "could not create SVG input stream\n" );
+        return;
+    }
+
+    hr = reader->SetProperty( XmlReaderProperty_DtdProcessing, DtdProcessing_Prohibit );
+    if ( SUCCEEDED( hr ) )
+        hr = reader->SetInput( input );
+    prf( "mimetype:                             image/svg+xml\n" );
+
+    wstring width, height, viewBox, title, description;
+    bool readingTitle = false, readingDescription = false;
+    bool sawSvgRoot = false;
+    XmlNodeType nodeType;
+    while ( SUCCEEDED( hr ) && S_OK == ( hr = reader->Read( &nodeType ) ) )
+    {
+        if ( XmlNodeType_Element == nodeType )
+        {
+            LPCWSTR localName = NULL;
+            if ( FAILED( reader->GetLocalName( &localName, NULL ) ) || NULL == localName )
+                continue;
+            if ( 0 == _wcsicmp( localName, L"svg" ) )
+            {
+                sawSvgRoot = true;
+                LPCWSTR value = NULL;
+                if ( SUCCEEDED( reader->MoveToAttributeByName( L"width", NULL ) ) &&
+                     SUCCEEDED( reader->GetValue( &value, NULL ) ) && value )
+                    width = value;
+                if ( SUCCEEDED( reader->MoveToAttributeByName( L"height", NULL ) ) &&
+                     SUCCEEDED( reader->GetValue( &value, NULL ) ) && value )
+                    height = value;
+                if ( SUCCEEDED( reader->MoveToAttributeByName( L"viewBox", NULL ) ) &&
+                     SUCCEEDED( reader->GetValue( &value, NULL ) ) && value )
+                    viewBox = value;
+                reader->MoveToElement();
+            }
+            readingTitle = 0 == _wcsicmp( localName, L"title" );
+            readingDescription = 0 == _wcsicmp( localName, L"desc" );
+        }
+        else if ( XmlNodeType_EndElement == nodeType )
+        {
+            LPCWSTR localName = NULL;
+            if ( SUCCEEDED( reader->GetLocalName( &localName, NULL ) ) && localName )
+            {
+                if ( 0 == _wcsicmp( localName, L"title" ) )
+                    readingTitle = false;
+                else if ( 0 == _wcsicmp( localName, L"desc" ) )
+                    readingDescription = false;
+            }
+        }
+        else if ( XmlNodeType_Text == nodeType || XmlNodeType_CDATA == nodeType )
+        {
+            LPCWSTR value = NULL;
+            if ( SUCCEEDED( reader->GetValue( &value, NULL ) ) && value )
+            {
+                if ( readingTitle && title.empty() )
+                    title = value;
+                else if ( readingDescription && description.empty() )
+                    description = value;
+            }
+        }
+    }
+
+    if ( FAILED( hr ) )
+        prf( "invalid SVG XML (HRESULT %#lx)\n", hr );
+    else if ( !sawSvgRoot )
+        prf( "SVG XML does not contain an svg root element\n" );
+    else
+    {
+        if ( !width.empty() )
+            wprf( L"SVG width: %ls\n", width.c_str() );
+        if ( !height.empty() )
+            wprf( L"SVG height: %ls\n", height.c_str() );
+        if ( !viewBox.empty() )
+            wprf( L"SVG viewBox: %ls\n", viewBox.c_str() );
+        if ( !title.empty() )
+            wprf( L"SVG title: %ls\n", title.c_str() );
+        if ( !description.empty() )
+            wprf( L"SVG description: %ls\n", description.c_str() );
+    }
+
+    input->Release();
+    reader->Release();
+    if ( uninitializeCom )
+        CoUninitialize();
+}
+
+void EnumerateJPEG2000()
+{
+    __int64 length = GetStreamLength();
+    if ( IsFileRangeValid( 0, 2 ) &&
+         0xff == GetBYTE( 0 ) && 0x4f == GetBYTE( 1 ) )
+    {
+        prf( "mimetype:                             image/j2k\n" );
+        prf( "JPEG 2000 raw codestream: %I64d bytes\n", length );
+        EnumerateJPEG2000Codestream( 0, length );
+        return;
+    }
+
+    if ( !IsFileRangeValid( 0, 12 ) )
+    {
+        prf( "JPEG 2000 file header is truncated\n" );
+        return;
+    }
+    char signature[ 12 ] = {};
+    GetBytes( 0, signature, sizeof signature );
+    if ( 12 != GetDWORD( 0, false ) ||
+         0x6a502020 != GetDWORD( 4, false ) ||
+         0x0d0a870a != GetDWORD( 8, false ) )
+    {
+        prf( "invalid JPEG 2000 signature box\n" );
+        return;
+    }
+    prf( "mimetype:                             image/jp2\n" );
+
+    bool sawImageHeader = false;
+    __int64 exifOffset = 0;
+    ULONGLONG exifLength = 0;
+    __int64 offset = 0;
+    while ( offset < length )
+    {
+        if ( !IsFileRangeValid( offset, 8 ) )
+        {
+            prf( "truncated JPEG 2000 box header at offset %I64d\n", offset );
+            return;
+        }
+        ULONGLONG boxLength = GetDWORD( offset, false );
+        char type[ 5 ] = {};
+        GetBytes( offset + 4, type, 4 );
+        __int64 headerLength = 8;
+        if ( 1 == boxLength )
+        {
+            if ( !IsFileRangeValid( offset, 16 ) )
+            {
+                prf( "truncated extended JPEG 2000 box header\n" );
+                return;
+            }
+            boxLength = GetULONGLONG( offset + 8, false );
+            headerLength = 16;
+        }
+        else if ( 0 == boxLength )
+            boxLength = length - offset;
+        if ( boxLength < (ULONGLONG) headerLength ||
+             boxLength > (ULONGLONG) ( length - offset ) )
+        {
+            prf( "invalid JPEG 2000 %.4s box length %I64u\n", type, boxLength );
+            return;
+        }
+
+        __int64 payload = offset + headerLength;
+        ULONGLONG payloadLength = boxLength - headerLength;
+        if ( 0 == memcmp( type, "ftyp", 4 ) && payloadLength >= 8 )
+        {
+            char brand[ 5 ] = {};
+            GetBytes( payload, brand, 4 );
+            prf( "JPEG 2000 file type: %s\n", brand );
+        }
+        else if ( 0 == memcmp( type, "jp2h", 4 ) )
+        {
+            __int64 childOffset = payload;
+            __int64 boxEnd = offset + (__int64) boxLength;
+            while ( childOffset < boxEnd )
+            {
+                if ( childOffset > boxEnd - 8 )
+                {
+                    prf( "truncated JPEG 2000 image header sub-box\n" );
+                    return;
+                }
+                DWORD childLength = GetDWORD( childOffset, false );
+                char childType[ 5 ] = {};
+                GetBytes( childOffset + 4, childType, 4 );
+                if ( childLength < 8 || childLength > (DWORD) ( boxEnd - childOffset ) )
+                {
+                    prf( "invalid JPEG 2000 %.4s sub-box length %u\n", childType, childLength );
+                    return;
+                }
+                __int64 childPayload = childOffset + 8;
+                DWORD childPayloadLength = childLength - 8;
+                if ( 0 == memcmp( childType, "ihdr", 4 ) && childPayloadLength >= 14 )
+                {
+                    DWORD imageHeight = GetDWORD( childPayload, false );
+                    DWORD imageWidth = GetDWORD( childPayload + 4, false );
+                    WORD components = GetWORD( childPayload + 8, false );
+                    BYTE bitsPerComponent = GetBYTE( childPayload + 10 );
+                    BYTE compression = GetBYTE( childPayload + 11 );
+                    prf( "JPEG 2000 dimensions: %u x %u\n", imageWidth, imageHeight );
+                    prf( "JPEG 2000 components: %u\n", components );
+                    if ( 0xff != bitsPerComponent )
+                        prf( "JPEG 2000 bit depth: %u\n", ( bitsPerComponent & 0x7f ) + 1 );
+                    prf( "JPEG 2000 compression type: %u\n", compression );
+                    sawImageHeader = true;
+                }
+                else if ( 0 == memcmp( childType, "colr", 4 ) && childPayloadLength >= 3 )
+                {
+                    BYTE method = GetBYTE( childPayload );
+                    prf( "JPEG 2000 color specification method: %u\n", method );
+                    if ( 1 == method && childPayloadLength >= 7 )
+                        prf( "JPEG 2000 enumerated color space: %u\n",
+                             GetDWORD( childPayload + 3, false ) );
+                    else if ( 2 == method )
+                        prf( "JPEG 2000 ICC profile: %u bytes\n", childPayloadLength - 3 );
+                }
+                childOffset += childLength;
+            }
+        }
+        else if ( 0 == memcmp( type, "ihdr", 4 ) && payloadLength >= 14 )
+        {
+            DWORD imageHeight = GetDWORD( payload, false );
+            DWORD imageWidth = GetDWORD( payload + 4, false );
+            WORD components = GetWORD( payload + 8, false );
+            BYTE bitsPerComponent = GetBYTE( payload + 10 );
+            BYTE compression = GetBYTE( payload + 11 );
+            prf( "JPEG 2000 dimensions: %u x %u\n", imageWidth, imageHeight );
+            prf( "JPEG 2000 components: %u\n", components );
+            if ( 0xff != bitsPerComponent )
+                prf( "JPEG 2000 bit depth: %u\n", ( bitsPerComponent & 0x7f ) + 1 );
+            prf( "JPEG 2000 compression type: %u\n", compression );
+            sawImageHeader = true;
+        }
+        else if ( 0 == memcmp( type, "colr", 4 ) && payloadLength >= 3 )
+        {
+            BYTE method = GetBYTE( payload );
+            prf( "JPEG 2000 color specification method: %u\n", method );
+            if ( 1 == method && payloadLength >= 7 )
+                prf( "JPEG 2000 enumerated color space: %u\n", GetDWORD( payload + 3, false ) );
+            else if ( 2 == method )
+                prf( "JPEG 2000 ICC profile: %I64u bytes\n", payloadLength - 3 );
+        }
+        else if ( 0 == memcmp( type, "xml ", 4 ) )
+            prf( "JPEG 2000 XML metadata: %I64u bytes\n", payloadLength );
+        else if ( 0 == memcmp( type, "uuid", 4 ) && payloadLength >= 16 )
+        {
+            static const BYTE exifUUID[ 16 ] =
+                { 0xb1, 0x4b, 0xf8, 0xbd, 0x08, 0x3d, 0x4b, 0x43,
+                  0xa5, 0xae, 0x8c, 0xd7, 0xd5, 0xa6, 0xce, 0x03 };
+            BYTE uuid[ 16 ] = {};
+            GetBytes( payload, uuid, sizeof uuid );
+            if ( 0 == memcmp( uuid, exifUUID, sizeof uuid ) )
+            {
+                exifOffset = payload + 16;
+                exifLength = payloadLength - 16;
+                prf( "JPEG 2000 EXIF metadata: %I64u bytes\n", exifLength );
+            }
+            else
+                prf( "JPEG 2000 UUID metadata: %I64u bytes\n", payloadLength - 16 );
+        }
+        else if ( 0 == memcmp( type, "jp2c", 4 ) )
+            prf( "JPEG 2000 codestream: %I64u bytes\n", payloadLength );
+
+        offset += (__int64) boxLength;
+    }
+    if ( !sawImageHeader )
+        prf( "JPEG 2000 image header box is not present\n" );
+    WCHAR extension[] = L".jp2";
+    if ( exifOffset && !ParseEmbeddedExifTiff( exifOffset, exifLength, extension ) )
+        prf( "JPEG 2000 EXIF metadata does not contain a valid TIFF header\n" );
+}
+
+void EnumerateJXL()
+{
+    __int64 length = GetStreamLength();
+    __int64 exifOffset = 0;
+    ULONGLONG exifLength = 0;
+    prf( "mimetype:                             image/jxl\n" );
+    if ( !IsFileRangeValid( 0, 2 ) )
+    {
+        prf( "JPEG XL codestream is truncated\n" );
+        return;
+    }
+    if ( 0xff == GetBYTE( 0 ) && 0x0a == GetBYTE( 1 ) )
+    {
+        prf( "JPEG XL codestream signature: present\n" );
+        prf( "JPEG XL codestream size: %I64d bytes\n", length );
+        return;
+    }
+
+    static const BYTE containerSignature[ 12 ] =
+        { 0x00, 0x00, 0x00, 0x0c, 'J', 'X', 'L', ' ', 0x0d, 0x0a, 0x87, 0x0a };
+    BYTE signature[ sizeof containerSignature ] = {};
+    if ( !IsFileRangeValid( 0, sizeof signature ) )
+    {
+        prf( "invalid JPEG XL container signature\n" );
+        return;
+    }
+    GetBytes( 0, signature, sizeof signature );
+    if ( 0 != memcmp( signature, containerSignature, sizeof signature ) )
+    {
+        prf( "unrecognized JPEG XL codestream or container\n" );
+        return;
+    }
+
+    bool sawCodestream = false;
+    __int64 offset = sizeof containerSignature;
+    while ( offset < length )
+    {
+        if ( !IsFileRangeValid( offset, 8 ) )
+        {
+            prf( "truncated JPEG XL box header at offset %I64d\n", offset );
+            return;
+        }
+        ULONGLONG boxLength = GetDWORD( offset, false );
+        char type[ 5 ] = {};
+        GetBytes( offset + 4, type, 4 );
+        __int64 headerLength = 8;
+        if ( 1 == boxLength )
+        {
+            if ( !IsFileRangeValid( offset, 16 ) )
+            {
+                prf( "truncated extended JPEG XL box header\n" );
+                return;
+            }
+            boxLength = GetULONGLONG( offset + 8, false );
+            headerLength = 16;
+        }
+        else if ( 0 == boxLength )
+            boxLength = length - offset;
+        if ( boxLength < (ULONGLONG) headerLength ||
+             boxLength > (ULONGLONG) ( length - offset ) )
+        {
+            prf( "invalid JPEG XL %.4s box length %I64u\n", type, boxLength );
+            return;
+        }
+
+        __int64 payload = offset + headerLength;
+        ULONGLONG payloadLength = boxLength - headerLength;
+        if ( 0 == memcmp( type, "ftyp", 4 ) && payloadLength >= 8 )
+        {
+            char brand[ 5 ] = {};
+            GetBytes( payload, brand, 4 );
+            prf( "JPEG XL file type: %s\n", brand );
+        }
+        else if ( 0 == memcmp( type, "jxlc", 4 ) || 0 == memcmp( type, "jxlp", 4 ) )
+        {
+            __int64 codestream = payload;
+            if ( 0 == memcmp( type, "jxlp", 4 ) )
+            {
+                if ( payloadLength < 4 )
+                {
+                    prf( "truncated JPEG XL partial codestream box\n" );
+                    return;
+                }
+                codestream += 4;
+                payloadLength -= 4;
+            }
+            if ( payloadLength >= 2 && 0xff == GetBYTE( codestream ) &&
+                 0x0a == GetBYTE( codestream + 1 ) )
+            {
+                prf( "JPEG XL codestream signature: present\n" );
+                sawCodestream = true;
+            }
+            prf( "JPEG XL codestream data: %I64u bytes\n", payloadLength );
+        }
+        else if ( 0 == memcmp( type, "Exif", 4 ) )
+        {
+            prf( "JPEG XL EXIF metadata: %I64u bytes\n", payloadLength );
+            exifOffset = payload;
+            exifLength = payloadLength;
+        }
+        else if ( 0 == memcmp( type, "xml ", 4 ) )
+            prf( "JPEG XL XML metadata: %I64u bytes\n", payloadLength );
+        else if ( 0 == memcmp( type, "jbrd", 4 ) )
+            prf( "JPEG XL JPEG reconstruction data: %I64u bytes\n", payloadLength );
+        else if ( 0 == memcmp( type, "brob", 4 ) )
+            prf( "JPEG XL compressed metadata box: %I64u bytes\n", payloadLength );
+
+        offset += (__int64) boxLength;
+    }
+    if ( !sawCodestream )
+        prf( "JPEG XL codestream signature was not found\n" );
+    WCHAR extension[] = L".jxl";
+    if ( exifOffset && !ParseEmbeddedExifTiff( exifOffset, exifLength, extension ) )
+        prf( "JPEG XL EXIF metadata does not contain a valid TIFF header\n" );
+}
+
 void EnumerateImageData( WCHAR const * pwc )
 {
     g_pStream = new CStream( pwc );
@@ -14315,15 +15291,33 @@ void EnumerateImageData( WCHAR const * pwc )
     DWORD heifOffsetBase = 0;
 
     if ( !wcsicmp( pwcExt, L".heic" ) ||          // Apple iOS photos
-         !wcsicmp( pwcExt, L".hif" ) )            // Canon HEIF photos
+         !wcsicmp( pwcExt, L".heif" ) ||
+         !wcsicmp( pwcExt, L".hif" ) ||
+         !wcsicmp( pwcExt, L".avif" ) )
     {
         // enumeration of the heif file is just to find the EXIF data offset, reflected in the g_Heif_Exif_* variables
 
-        EnumerateHeif( g_pStream );
+        bool isAvif = !wcsicmp( pwcExt, L".avif" );
+        bool isHeic = !wcsicmp( pwcExt, L".heic" );
+        if ( g_pStream->Length() <= 0 )
+        {
+            if ( isHeic )
+                prf( "can't find Exif data in this heif (.heic/.hif) file\n" );
+            else
+                prf( "can't read from the file\n" );
+            return;
+        }
+        if ( !isHeic )
+            prf( "mimetype:                             %s\n",
+                 isAvif ? "image/avif" : "image/heif" );
+        EnumerateHeif( g_pStream, isAvif ? "AVIF" : "HEIF" );
 
         if ( 0 == g_Heif_Exif_Offset )
         {
-            prf( "can't find Exif data in this heif (.heic/.hif) file\n" );
+            if ( isHeic )
+                prf( "can't find Exif data in this heif (.heic/.hif) file\n" );
+            else
+                prf( "no Exif data found in this %s file\n", isAvif ? "AVIF" : "HEIF" );
             return;
         }
 
@@ -14332,15 +15326,16 @@ void EnumerateImageData( WCHAR const * pwc )
              g_Heif_Exif_Offset > g_pStream->Length() ||
              g_Heif_Exif_Length > g_pStream->Length() - g_Heif_Exif_Offset )
         {
-            prf( "invalid Exif item extent in this heif (.heic/.hif) file\n" );
+            prf( "invalid Exif item extent in this %s file\n", isAvif ? "AVIF" : "HEIF" );
             return;
         }
 
-        prf( "mimetype:                             image/heic\n" );
+        if ( isHeic )
+            prf( "mimetype:                             image/heic\n" );
         DWORD o = GetDWORD( g_Heif_Exif_Offset, false );
         if ( o < 6 || o > (ULONGLONG) g_Heif_Exif_Length - 12 )
         {
-            prf( "invalid Exif TIFF-header offset in this heif (.heic/.hif) file\n" );
+            prf( "invalid Exif TIFF-header offset in this %s file\n", isAvif ? "AVIF" : "HEIF" );
             return;
         }
 
@@ -14349,7 +15344,7 @@ void EnumerateImageData( WCHAR const * pwc )
         GetBytes( g_Heif_Exif_Offset + 4, exifIdentifier, sizeof exifIdentifier );
         if ( 0 != memcmp( exifIdentifier, "Exif\0\0", sizeof exifIdentifier ) )
         {
-            prf( "invalid Exif item signature in this heif (.heic/.hif) file\n" );
+            prf( "invalid Exif item signature in this %s file\n", isAvif ? "AVIF" : "HEIF" );
             return;
         }
 
@@ -14384,6 +15379,26 @@ void EnumerateImageData( WCHAR const * pwc )
         if ( 0 == g_WebP_Exif_Offset )
             return;
     }
+    else if ( !wcsicmp( pwcExt, L".gif" ) )
+    {
+        EnumerateGIF();
+        return;
+    }
+    else if ( !wcsicmp( pwcExt, L".svg" ) )
+    {
+        EnumerateSVG();
+        return;
+    }
+    else if ( !wcsicmp( pwcExt, L".jp2" ) || !wcsicmp( pwcExt, L".j2k" ) )
+    {
+        EnumerateJPEG2000();
+        return;
+    }
+    else if ( !wcsicmp( pwcExt, L".jxl" ) )
+    {
+        EnumerateJXL();
+        return;
+    }
     else if ( !wcsicmp( pwcExt, L".wma" ) || !wcsicmp( pwcExt, L".wmv" ) )
     {
         ParseAsf( !wcsicmp( pwcExt, L".wmv" ) ?
@@ -14397,7 +15412,16 @@ void EnumerateImageData( WCHAR const * pwc )
     }
     else if ( !wcsicmp( pwcExt, L".m4a" ) )
     {
-    EnumerateM4A( g_pStream );
+        EnumerateMediaFile( g_pStream, "audio/mp4", false );
+        return;
+    }
+    else if ( !wcsicmp( pwcExt, L".mp4" ) ||
+              !wcsicmp( pwcExt, L".m4v" ) ||
+              !wcsicmp( pwcExt, L".mov" ) )
+    {
+        const char * mimeType = !wcsicmp( pwcExt, L".mov" ) ? "video/quicktime" :
+                                !wcsicmp( pwcExt, L".m4v" ) ? "video/x-m4v" : "video/mp4";
+        EnumerateMediaFile( g_pStream, mimeType, true );
         return;
     }
     else if ( !wcsicmp( pwcExt, L".ico" ) || !wcsicmp( pwcExt, L".cur" ) )
