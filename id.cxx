@@ -31,6 +31,8 @@ string g_imgenaiParserOutput;
 bool g_imgenaiInputError = false;
 vector<wstring> g_imgenaiSourceTypes;
 vector<wstring> g_imgenaiDeclarations;
+vector<wstring> g_imgenaiRemoteManifests;
+vector<wstring> g_imgenaiUnparsedXmp;
 #endif
 
 /*
@@ -84,6 +86,16 @@ vector<HeifProperty> g_Heif_Properties;
 vector<DWORD> g_Heif_Primary_Properties;
 bool g_Heif_ReadingProperties = false;
 __int64 g_Heif_Idat_Offset = 0;
+struct HeifItemLocation
+{
+    DWORD itemID = 0;
+    BYTE constructionMethod = 0;
+    WORD dataReferenceIndex = 0;
+    bool valid = true;
+    vector<pair<ULONGLONG, ULONGLONG>> extents; // offset (including base offset), length
+};
+vector<DWORD> g_Heif_XMP_ItemIDs;
+vector<HeifItemLocation> g_Heif_Item_Locations;
 __int64 g_Canon_CR3_Exif_IFD0           = 0;
 __int64 g_Canon_CR3_Exif_Exif_IFD       = 0;
 __int64 g_Canon_CR3_Exif_Makernotes_IFD = 0;
@@ -5998,6 +6010,60 @@ bool GetFlash( short x, char * ac, int len )
     return true;
 } //GetFlash
 
+bool CheckGeneratorSettingsText( const char * source, const BYTE * value, size_t length );
+bool ContainsBytes( const BYTE * data, size_t length, const char * text, bool ignoreCase = false );
+
+// EXIF UserComment starts with an 8-byte character code: "ASCII\0\0\0", "UNICODE\0" (UTF-16),
+// "JIS\0\0\0\0\0", or all zeros (undefined). Returns UTF-8 text with control characters as spaces.
+string DecodeExifUserComment( const vector<BYTE> & raw, bool littleEndian )
+{
+    string text;
+    if ( raw.size() >= 8 && 0 == memcmp( raw.data(), "UNICODE\0", 8 ) )
+    {
+        size_t units = ( raw.size() - 8 ) / 2;
+        const BYTE * p = raw.data() + 8;
+        // The byte order should follow the TIFF header, but writers such as piexif (used by
+        // Stable Diffusion WebUI) always write big-endian. Infer it from where the zero bytes of
+        // ASCII-range characters fall, then fall back to the TIFF byte order.
+        size_t evenZeros = 0, oddZeros = 0;
+        for ( size_t i = 0; i < min( units, (size_t) 256 ); i++ )
+        {
+            evenZeros += ( 0 == p[ i * 2 ] && 0 != p[ i * 2 + 1 ] );
+            oddZeros += ( 0 != p[ i * 2 ] && 0 == p[ i * 2 + 1 ] );
+        }
+        bool bigEndian = evenZeros > oddZeros || ( evenZeros == oddZeros && !littleEndian );
+        if ( bigEndian && units >= 1 && 0xfe == p[ 0 ] && 0xff == p[ 1 ] ) { p += 2; units--; }
+        else if ( !bigEndian && units >= 1 && 0xff == p[ 0 ] && 0xfe == p[ 1 ] ) { p += 2; units--; }
+        wstring wide;
+        wide.reserve( units );
+        for ( size_t i = 0; i < units; i++ )
+        {
+            WCHAR c = bigEndian ? (WCHAR) ( ( p[ i * 2 ] << 8 ) | p[ i * 2 + 1 ] )
+                                : (WCHAR) ( ( p[ i * 2 + 1 ] << 8 ) | p[ i * 2 ] );
+            if ( 0 == c )
+                break;
+            wide += ( c < 0x20 ) ? L' ' : c;
+        }
+        int bytes = WideCharToMultiByte( CP_UTF8, 0, wide.c_str(), (int) wide.size(), NULL, 0, NULL, NULL );
+        if ( bytes > 0 )
+        {
+            text.resize( bytes );
+            WideCharToMultiByte( CP_UTF8, 0, wide.c_str(), (int) wide.size(), &text[ 0 ], bytes, NULL, NULL );
+        }
+        return text;
+    }
+
+    size_t start = raw.size() >= 8 ? 8 : 0;
+    if ( raw.size() >= 8 && 0 != raw[ 0 ] && 0 != memcmp( raw.data(), "ASCII\0\0\0", 8 ) &&
+         0 != memcmp( raw.data(), "JIS\0\0\0\0\0", 8 ) )
+        start = 0; // no recognized character code; some writers omit it
+    for ( size_t i = start; i < raw.size() && 0 != raw[ i ]; i++ )
+        text += ( raw[ i ] < 0x20 ) ? ' ' : (char) raw[ i ];
+    while ( !text.empty() && ' ' == text.back() )
+        text.pop_back();
+    return text;
+}
+
 void EnumerateExifTags( int depth, __int64 IFDOffset, __int64 headerBase, bool littleEndian )
 {
     DWORD XResolutionNum = 0;
@@ -6237,8 +6303,13 @@ void EnumerateExifTags( int depth, __int64 IFDOffset, __int64 headerBase, bool l
             else if ( 37510 == head.id )
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
-                GetString( stringOffset + headerBase, acBuffer, _countof( acBuffer ), head.count );
-                prf( "exif User Comment:                  %s\n", acBuffer );
+                vector<BYTE> raw( min( head.count, (DWORD) 256 * 1024 ) );
+                if ( !raw.empty() )
+                    GetBytes( stringOffset + headerBase, raw.data(), (int) raw.size() );
+                string comment = DecodeExifUserComment( raw, littleEndian );
+                prf( "exif User Comment:                  %.*s%s\n", (int) min( comment.size(), (size_t) 200 ),
+                     comment.c_str(), comment.size() > 200 ? "..." : "" );
+                CheckGeneratorSettingsText( "EXIF UserComment", (const BYTE *) comment.data(), comment.size() );
             }
             else if ( 37520 == head.id && 2 == head.type )
             {
@@ -7378,7 +7449,13 @@ struct ImgenaiXmpEvidence
 {
     vector<wstring> sourceTypes;
     vector<wstring> declarations;
+    vector<wstring> remoteManifests;  // dcterms:provenance URLs of remote C2PA manifests
+    vector<wstring> unparsedMentions; // AI terms found by text search in XMP that could not be fully parsed
+    vector<string> softwareGenerators; // generators named by xmp:CreatorTool or stEvt:softwareAgent
 };
+
+const char * FindGeneratorName( const BYTE * text, size_t length );
+char FindAigcLabel( const BYTE * value, size_t length );
 
 ImgenaiXmpEvidence ReadImgenaiXmp( const char * data, size_t length )
 {
@@ -7395,6 +7472,7 @@ ImgenaiXmpEvidence ReadImgenaiXmp( const char * data, size_t length )
 
     const WCHAR iptc[] = L"http://iptc.org/std/Iptc4xmpExt/2008-02-29/";
     const WCHAR photoshop[] = L"http://ns.adobe.com/photoshop/1.0/";
+    const WCHAR dcterms[] = L"http://purl.org/dc/terms/";
     const WCHAR rdf[] = L"http://www.w3.org/1999/02/22-rdf-syntax-ns#";
     auto property = [&]( const WCHAR * ns, const WCHAR * name ) -> int
     {
@@ -7407,7 +7485,18 @@ ImgenaiXmpEvidence ReadImgenaiXmp( const char * data, size_t length )
             if ( 0 == wcscmp( name, L"AIPromptWriterName" ) ) return 6;
         }
         if ( 0 == wcscmp( ns, photoshop ) && 0 == wcscmp( name, L"Credit" ) ) return 4;
+        if ( 0 == wcscmp( ns, dcterms ) && 0 == wcscmp( name, L"provenance" ) ) return 7;
+        if ( 0 == wcscmp( ns, L"http://ns.adobe.com/xap/1.0/" ) && 0 == wcscmp( name, L"CreatorTool" ) ) return 8;
+        if ( 0 == wcscmp( ns, L"http://ns.adobe.com/xap/1.0/sType/ResourceEvent#" ) &&
+             0 == wcscmp( name, L"softwareAgent" ) ) return 8;
+        // China's TC260-PG-20259A XMP carrier for the GB 45438-2025 implicit AIGC label
+        if ( 0 == wcscmp( ns, L"http://www.tc260.org.cn/ns/AIGC/1.0/" ) && 0 == wcscmp( name, L"AIGC" ) ) return 9;
         return 0;
+    };
+    auto isContainer = [&]( const WCHAR * ns, const WCHAR * name )
+    {
+        return 0 == wcscmp( ns, rdf ) && ( 0 == wcscmp( name, L"Alt" ) || 0 == wcscmp( name, L"Bag" ) ||
+                                           0 == wcscmp( name, L"Seq" ) || 0 == wcscmp( name, L"li" ) );
     };
     auto record = [&]( int field, const WCHAR * text )
     {
@@ -7425,24 +7514,48 @@ ImgenaiXmpEvidence ReadImgenaiXmp( const char * data, size_t length )
             evidence.declarations.push_back( L"IPTC AI System Used" );
         else if ( field == 3 )
             evidence.declarations.push_back( L"IPTC AI Prompt Information" );
-        else if ( field == 4 && value == L"Made with Google AI" )
+        // Google Photos credits: "Made with Google AI" for generated images and
+        // "Edited with Google AI" for generative edits such as Magic Editor.
+        else if ( field == 4 && ( value == L"Made with Google AI" || value == L"Edited with Google AI" ) )
             evidence.declarations.push_back( value );
         else if ( field == 5 )
             evidence.declarations.push_back( L"IPTC AI System Version Used" );
         else if ( field == 6 )
             evidence.declarations.push_back( L"IPTC AI Prompt Writer Name" );
+        else if ( field == 7 )
+        {
+            replace_if( value.begin(), value.end(), []( WCHAR c ) { return c < 0x20; }, L' ' );
+            evidence.remoteManifests.push_back( value );
+        }
+        else if ( field == 8 || field == 9 )
+        {
+            int bytes = WideCharToMultiByte( CP_UTF8, 0, value.c_str(), (int) value.size(), NULL, 0, NULL, NULL );
+            string utf8( max( bytes, 0 ), '\0' );
+            if ( bytes > 0 )
+                WideCharToMultiByte( CP_UTF8, 0, value.c_str(), (int) value.size(), &utf8[ 0 ], bytes, NULL, NULL );
+            if ( field == 8 )
+            {
+                if ( const char * generator = FindGeneratorName( (const BYTE *) utf8.data(), utf8.size() ) )
+                    evidence.softwareGenerators.push_back( generator );
+            }
+            else if ( '1' == FindAigcLabel( (const BYTE *) utf8.data(), utf8.size() ) )
+                evidence.declarations.push_back( L"XMP TC260:AIGC: GB 45438-2025 AIGC label 1 (AI-generated)" );
+        }
     };
 
     XmlNodeType node;
     HRESULT status;
-    int pending = 0;
+    int pending = 0;      // property whose text value is being read
+    UINT pendingDepth = 0; // depth of that property's element
     while ( S_OK == ( status = reader->Read( &node ) ) )
     {
         const WCHAR * value = NULL;
+        UINT depth = 0;
+        reader->GetDepth( &depth );
         if ( pending && ( node == XmlNodeType_Text || node == XmlNodeType_CDATA ) &&
              SUCCEEDED( reader->GetValue( &value, NULL ) ) )
             record( pending, value );
-        if ( node == XmlNodeType_EndElement )
+        if ( node == XmlNodeType_EndElement && depth <= pendingDepth )
             pending = 0;
         if ( node != XmlNodeType_Element )
             continue;
@@ -7450,8 +7563,13 @@ ImgenaiXmpEvidence ReadImgenaiXmp( const char * data, size_t length )
         const WCHAR * ns = NULL;
         reader->GetLocalName( &name, NULL );
         reader->GetNamespaceUri( &ns, NULL );
-        pending = property( ns, name );
         bool empty = reader->IsEmptyElement();
+        // A value wrapped in rdf:Alt, rdf:Bag or rdf:Seq items still belongs to the property.
+        if ( !pending || depth <= pendingDepth || !isContainer( ns, name ) )
+        {
+            pending = property( ns, name );
+            pendingDepth = depth;
+        }
         if ( S_OK == reader->MoveToFirstAttribute() )
         {
             do
@@ -7466,17 +7584,44 @@ ImgenaiXmpEvidence ReadImgenaiXmp( const char * data, size_t length )
             } while ( S_OK == reader->MoveToNextAttribute() );
             reader->MoveToElement();
         }
-        if ( empty )
+        if ( empty && depth <= pendingDepth )
             pending = 0;
     }
-    return FAILED( status ) ? ImgenaiXmpEvidence{} : evidence;
+
+    // Keep what was read before a parse error. If the packet is malformed, also report AI
+    // terms found by plain text search; these aren't namespace-checked, so they are listed
+    // separately rather than as declarations.
+    if ( FAILED( status ) )
+    {
+        static const char * terms[] =
+        {
+            "trainedAlgorithmicMedia", "compositeWithTrainedAlgorithmicMedia", "AISystemUsed",
+            "AIPromptInformation", "Made with Google AI", "Edited with Google AI"
+        };
+        for ( const char * term : terms )
+            if ( ContainsBytes( (const BYTE *) data, length, term ) )
+                evidence.unparsedMentions.push_back( wstring( term, term + strlen( term ) ) );
+    }
+    return evidence;
 }
 
+// Accepts the IPTC NewsCodes URI with http or https and an optional trailing slash, or the
+// bare code. Codes are case-sensitive in the vocabulary, so they are compared exactly.
 bool IsGenerativeSourceType( const wstring & value )
 {
-    static const wstring prefix = L"http://cv.iptc.org/newscodes/digitalsourcetype/";
-    return value == prefix + L"trainedAlgorithmicMedia" ||
-           value == prefix + L"compositeWithTrainedAlgorithmicMedia";
+    wstring code = value;
+    while ( !code.empty() && L'/' == code.back() )
+        code.pop_back();
+    size_t slash = code.rfind( L'/' );
+    if ( wstring::npos != slash )
+    {
+        wstring prefix = code.substr( 0, slash + 1 );
+        if ( 0 != _wcsicmp( prefix.c_str(), L"http://cv.iptc.org/newscodes/digitalsourcetype/" ) &&
+             0 != _wcsicmp( prefix.c_str(), L"https://cv.iptc.org/newscodes/digitalsourcetype/" ) )
+            return false;
+        code = code.substr( slash + 1 );
+    }
+    return code == L"trainedAlgorithmicMedia" || code == L"compositeWithTrainedAlgorithmicMedia";
 }
 #endif
 
@@ -7486,6 +7631,12 @@ void PrintDigitalSourceType( const char * data, size_t length )
     ImgenaiXmpEvidence evidence = ReadImgenaiXmp( data, length );
     g_imgenaiSourceTypes.insert( g_imgenaiSourceTypes.end(), evidence.sourceTypes.begin(), evidence.sourceTypes.end() );
     g_imgenaiDeclarations.insert( g_imgenaiDeclarations.end(), evidence.declarations.begin(), evidence.declarations.end() );
+    for ( const wstring & url : evidence.remoteManifests )
+        if ( find( g_imgenaiRemoteManifests.begin(), g_imgenaiRemoteManifests.end(), url ) == g_imgenaiRemoteManifests.end() )
+            g_imgenaiRemoteManifests.push_back( url );
+    for ( const wstring & term : evidence.unparsedMentions )
+        if ( find( g_imgenaiUnparsedXmp.begin(), g_imgenaiUnparsedXmp.end(), term ) == g_imgenaiUnparsedXmp.end() )
+            g_imgenaiUnparsedXmp.push_back( term );
 #else
     string xmp( data, length );
     const char * names[] = { "DigitalSourceType", "digitalSourceType" };
@@ -7505,6 +7656,9 @@ void PrintDigitalSourceType( const char * data, size_t length )
             size_t tagEnd = xmp.find( '>', nameOffset );
             if ( string::npos == tagStart || string::npos == tagEnd )
                 continue;
+            if ( tagStart + 1 < xmp.size() &&
+                 ( '/' == xmp[ tagStart + 1 ] || '!' == xmp[ tagStart + 1 ] || '?' == xmp[ tagStart + 1 ] ) )
+                continue; // closing tag, comment, or processing instruction
 
             size_t valueStart = string::npos;
             size_t valueEnd = string::npos;
@@ -7561,6 +7715,10 @@ void PrintDigitalSourceType( const char * data, size_t length )
                 continue;
 
             string value = xmp.substr( valueStart, valueEnd - valueStart );
+            size_t first = value.find_first_not_of( " \t\r\n" );
+            if ( string::npos == first )
+                continue;
+            value = value.substr( first, value.find_last_not_of( " \t\r\n" ) - first + 1 );
             if ( find( values.begin(), values.end(), value ) != values.end() )
                 continue;
             values.push_back( value );
@@ -7587,6 +7745,10 @@ void PrintXMPData( const char * pcIn, size_t dataLength = 0 )
 {
     if ( 0 == dataLength )
         dataLength = strlen( pcIn );
+    while ( dataLength && 0 == pcIn[ dataLength - 1 ] ) // padding would make the XML parser fail
+        dataLength--;
+    if ( 0 == dataLength )
+        return;
 
     prf( "XMP metadata:\n" );
     PrintXMPField( pcIn, dataLength, "xmp:Rating", "Rating" );
@@ -7602,6 +7764,8 @@ void PrintXMPData( const char * pcIn, size_t dataLength = 0 )
     PrintXMPField( pcIn, dataLength, "dc:description", "Description" );
     PrintXMPField( pcIn, dataLength, "dc:creator", "Creator" );
     PrintXMPField( pcIn, dataLength, "dc:rights", "Rights" );
+    PrintXMPField( pcIn, dataLength, "photoshop:Credit", "Credit" );
+    PrintXMPField( pcIn, dataLength, "dcterms:provenance", "C2PA remote manifest" );
     PrintDigitalSourceType( pcIn, dataLength );
 } //PrintXMPData
 
@@ -7612,7 +7776,7 @@ void PrintC2PAManifestNotice( const char * container )
 #endif
     prf( "%s: C2PA/JUMBF data block detected; Content Credentials may be present\n",
          container );
-    prf( "  Assertions and signature are not decoded or validated by id\n" );
+    prf( "  The signature is not validated; assertion text is only searched for generative AI markers\n" );
     prf( "  Note: a manifest indicates provenance data, not by itself that AI was used\n" );
 }
 
@@ -7624,9 +7788,10 @@ bool StartsJpegC2paStore( const BYTE * data, size_t length )
         0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71
     };
 
-    // APP11 starts with the identifier, instance number, and packet sequence.
-    if ( length < 16 || memcmp( data, "JP", 2 ) != 0 ||
-         memcmp( data + 4, "\0\0\0\1", 4 ) != 0 || memcmp( data + 12, "jumb", 4 ) != 0 )
+    // APP11 starts with the identifier, instance number, and packet sequence. The sequence
+    // is not checked: JPEG XT starts at 1, but Microsoft's C2PA writer uses 0. The jumd
+    // box with the C2PA store UUID below identifies the first packet of a store.
+    if ( length < 16 || memcmp( data, "JP", 2 ) != 0 || memcmp( data + 12, "jumb", 4 ) != 0 )
         return false;
     const size_t description = memcmp( data + 8, "\0\0\0\1", 4 ) == 0 ? 24 : 16;
     if ( length < description + 8 || memcmp( data + description + 4, "jumd", 4 ) != 0 )
@@ -7634,6 +7799,571 @@ bool StartsJpegC2paStore( const BYTE * data, size_t length )
     const size_t uuidOffset = description + ( memcmp( data + description, "\0\0\0\1", 4 ) == 0 ? 16 : 8 );
     return length >= uuidOffset + sizeof storeType &&
            memcmp( data + uuidOffset, storeType, sizeof storeType ) == 0;
+}
+
+// Upper bound for metadata blocks (C2PA stores, XMP packets) read into memory for text scanning.
+const unsigned __int64 MaxMetadataScanBytes = 64 * 1024 * 1024;
+
+bool ReadStreamRange( CStream * stream, __int64 offset, unsigned __int64 length, vector<BYTE> & data )
+{
+    data.clear();
+    if ( NULL == stream || offset < 0 || length > MaxMetadataScanBytes || offset > stream->Length() ||
+         length > (unsigned __int64) ( stream->Length() - offset ) )
+        return false;
+    data.resize( (size_t) length );
+    return 0 == length ||
+           ( stream->Seek( offset ) && stream->Read( data.data(), (ULONG) length ) == (ULONG) length );
+}
+
+bool ContainsBytes( const BYTE * data, size_t length, const char * text, bool ignoreCase )
+{
+    size_t textLength = strlen( text );
+    if ( 0 == textLength || textLength > length )
+        return false;
+    if ( !ignoreCase )
+        return data + length != search( data, data + length, text, text + textLength,
+                                        []( BYTE a, char b ) { return a == (BYTE) b; } );
+    for ( size_t i = 0; i <= length - textLength; i++ )
+        if ( 0 == _strnicmp( (const char *) data + i, text, textLength ) )
+            return true;
+    return false;
+}
+
+// Records metadata that a generator wrote about its own output. source and finding are ASCII.
+void ReportGenerativeMetadata( const char * source, const char * finding )
+{
+    prf( "  AI generator metadata: %s: %s\n", source, finding );
+#ifdef IMGENAI_ONLY
+    string text = string( source ) + ": " + finding;
+    wstring value( text.begin(), text.end() );
+    if ( find( g_imgenaiDeclarations.begin(), g_imgenaiDeclarations.end(), value ) == g_imgenaiDeclarations.end() )
+        g_imgenaiDeclarations.push_back( value );
+#endif
+}
+
+// C2PA manifests are CBOR, so assertion values such as digitalSourceType URIs and
+// claim-generator names are stored as plain UTF-8 strings. This finds them without
+// validating the signature; c2patool (-c in imgenai) is needed for that.
+void ScanC2paManifestText( const BYTE * data, size_t length )
+{
+    static const struct { const char * text; const char * finding; } markers[] =
+    {
+        { "digitalsourcetype/trainedAlgorithmicMedia", "digitalSourceType trainedAlgorithmicMedia" },
+        { "digitalsourcetype/compositeWithTrainedAlgorithmicMedia", "digitalSourceType compositeWithTrainedAlgorithmicMedia" },
+        { "Adobe Firefly", "generator Adobe Firefly" },
+        { "Adobe_Firefly", "generator Adobe Firefly" },
+        { "ChatGPT", "generator ChatGPT" },
+        { "OpenAI", "generator OpenAI" },
+        { "DALL-E", "generator DALL-E" },
+        { "DALL\xc2\xb7" "E", "generator DALL-E" },
+        { "Microsoft_Responsible_AI", "generator Microsoft Responsible AI" },
+        { "Image Creator from Designer", "generator Image Creator from Designer" },
+        { "Bing Image Creator", "generator Bing Image Creator" },
+        { "Midjourney", "generator Midjourney" },
+        { "Stable Diffusion", "generator Stable Diffusion" },
+    };
+
+    vector<const char *> reported;
+    for ( const auto & marker : markers )
+    {
+        if ( find_if( reported.begin(), reported.end(),
+                      [&]( const char * f ) { return 0 == strcmp( f, marker.finding ); } ) != reported.end() )
+            continue;
+        if ( ContainsBytes( data, length, marker.text ) )
+        {
+            reported.push_back( marker.finding );
+            ReportGenerativeMetadata( "C2PA manifest (signature not verified)", marker.finding );
+        }
+    }
+}
+
+void ScanC2paStreamRange( CStream * stream, __int64 offset, unsigned __int64 length )
+{
+    vector<BYTE> data;
+    if ( ReadStreamRange( stream, offset, length, data ) )
+        ScanC2paManifestText( data.data(), data.size() );
+    else
+        prf( "  C2PA data could not be read for assertion scanning (%I64u bytes)\n", length );
+}
+
+// Parses an XML box or chunk as XMP when it contains RDF (other XML, such as GML, is skipped).
+void PrintXMPFromStream( __int64 offset, unsigned __int64 length, CStream * stream = NULL )
+{
+    vector<BYTE> xml;
+    if ( !ReadStreamRange( stream ? stream : g_pStream, offset, length, xml ) )
+    {
+        prf( "  (XML metadata could not be read)\n" );
+        return;
+    }
+    if ( ContainsBytes( xml.data(), xml.size(), "http://www.w3.org/1999/02/22-rdf-syntax-ns#" ) )
+        PrintXMPData( (const char *) xml.data(), xml.size() );
+}
+
+// Case-insensitive match of name in text. The match must not continue a word: the preceding
+// character can't be a letter or digit, and the next can't be a lowercase letter or digit, so
+// "Canva" doesn't match "Canvas" while "Topaz" still matches "TopazPhotoAI".
+bool ContainsName( const BYTE * text, size_t length, const char * name )
+{
+    size_t nameLength = strlen( name );
+    for ( size_t i = 0; nameLength && i + nameLength <= length; i++ )
+    {
+        if ( 0 != _strnicmp( (const char *) text + i, name, nameLength ) )
+            continue;
+        if ( i > 0 && isalnum( text[ i - 1 ] ) )
+            continue;
+        if ( i + nameLength < length && ( islower( text[ i + nameLength ] ) || isdigit( text[ i + nameLength ] ) ) )
+            continue;
+        return true;
+    }
+    return false;
+}
+
+// Products that only produce generated images, so naming one in a software field means the
+// image came from generative AI. Editors with optional generative features are listed separately.
+const char * FindGeneratorName( const BYTE * text, size_t length )
+{
+    static const char * generators[] =
+    {
+        "Adobe Firefly", "Firefly", "Midjourney", "DALL-E", "DALL\xc2\xb7" "E", "OpenAI", "ChatGPT",
+        "Stable Diffusion", "ComfyUI", "InvokeAI", "NovelAI", "Fooocus", "Leonardo.Ai", "Ideogram",
+        "Google Imagen", "Google Gemini", "Bing Image Creator", "Image Creator from Designer", "Draw Things"
+    };
+    for ( const char * generator : generators )
+        if ( ContainsName( text, length, generator ) )
+            return generator;
+    return NULL;
+}
+
+// Generation settings in free text: PNG parameters/prompt/Comment and EXIF UserComment.
+bool CheckGeneratorSettingsText( const char * source, const BYTE * value, size_t length )
+{
+    if ( ContainsBytes( value, length, "Steps: " ) &&
+         ( ContainsBytes( value, length, "Sampler: " ) || ContainsBytes( value, length, "Seed: " ) ||
+           ContainsBytes( value, length, "CFG scale: " ) ) )
+        ReportGenerativeMetadata( source, "Stable Diffusion WebUI generation settings" );
+    else if ( ContainsBytes( value, length, "\"class_type\"" ) && ContainsBytes( value, length, "\"inputs\"" ) )
+        ReportGenerativeMetadata( source, "ComfyUI prompt graph" );
+    else if ( ContainsBytes( value, length, "\"use_stable_diffusion_model\"" ) )
+        ReportGenerativeMetadata( source, "Easy Diffusion generation settings" );
+    else if ( ContainsBytes( value, length, "\"seed\"" ) &&
+              ( ContainsBytes( value, length, "\"sampler\"" ) || ContainsBytes( value, length, "\"sampler_name\"" ) ) &&
+              ( ContainsBytes( value, length, "\"steps\"" ) || ContainsBytes( value, length, "\"num_inference_steps\"" ) ) )
+        ReportGenerativeMetadata( source, "diffusion generation settings (JSON, as NovelAI and Fooocus write)" );
+    else
+        return false;
+    return true;
+}
+
+// China's GB 45438-2025 implicit AIGC label: JSON with "Label": "1" (AI-generated), "2" (possibly
+// generated) or "3" (suspected). Only label 1 is a declaration. Returns the label digit, or 0.
+char FindAigcLabel( const BYTE * value, size_t length )
+{
+    static const char key[] = "\"Label\"";
+    const BYTE * end = value + length;
+    const BYTE * p = search( value, end, key, key + sizeof key - 1, []( BYTE a, char b ) { return a == (BYTE) b; } );
+    if ( p == end )
+        return 0;
+    for ( p += sizeof key - 1; p < end && ( ' ' == *p || ':' == *p || '"' == *p ); p++ )
+        ;
+    return ( p < end && *p >= '1' && *p <= '3' ) ? (char) *p : 0;
+}
+
+void CheckAigcLabel( const char * source, const BYTE * value, size_t length )
+{
+    char label = FindAigcLabel( value, length );
+    if ( '1' == label )
+        ReportGenerativeMetadata( source, "GB 45438-2025 AIGC label 1 (AI-generated)" );
+    else if ( label )
+        prf( "  AIGC label %c (possibly or suspected AI-generated): %s\n", label, source );
+}
+
+// EXIF Make/Model as ComfyUI writes them for WebP and AVIF: "workflow:{...}" and "prompt:{...}".
+void CheckComfyUIExifField( const char * field, const char * value )
+{
+    if ( 0 == strncmp( value, "workflow:{", 10 ) || 0 == strncmp( value, "prompt:{", 8 ) )
+    {
+        char source[ 40 ];
+        sprintf_s( source, "EXIF %s", field );
+        ReportGenerativeMetadata( source, "ComfyUI workflow or prompt graph" );
+    }
+}
+
+// zlib (RFC 1950/1951) decompression for PNG zTXt and compressed iTXt, after Mark Adler's puff.
+class Inflater
+{
+    const BYTE * in;
+    size_t inLength, pos = 0;
+    unsigned bitBuffer = 0;
+    int bitCount = 0;
+    vector<BYTE> & out;
+    size_t maxOut;
+    bool failed = false;
+
+    struct Huffman { short count[ 16 ]; short symbol[ 320 ]; };
+
+    int Bits( int need )
+    {
+        unsigned long value = bitBuffer;
+        while ( bitCount < need )
+        {
+            if ( pos >= inLength ) { failed = true; return 0; }
+            value |= (unsigned long) in[ pos++ ] << bitCount;
+            bitCount += 8;
+        }
+        bitBuffer = (unsigned) ( value >> need );
+        bitCount -= need;
+        return (int) ( value & ( ( 1UL << need ) - 1 ) );
+    }
+
+    static int Construct( Huffman & h, const short * lengths, int n )
+    {
+        short offsets[ 16 ];
+        memset( h.count, 0, sizeof h.count );
+        for ( int symbol = 0; symbol < n; symbol++ )
+            h.count[ lengths[ symbol ] ]++;
+        if ( h.count[ 0 ] == n )
+            return 0;
+        int left = 1;
+        for ( int len = 1; len < 16; len++ )
+        {
+            left <<= 1;
+            left -= h.count[ len ];
+            if ( left < 0 )
+                return left; // over-subscribed
+        }
+        offsets[ 1 ] = 0;
+        for ( int len = 1; len < 15; len++ )
+            offsets[ len + 1 ] = offsets[ len ] + h.count[ len ];
+        for ( int symbol = 0; symbol < n; symbol++ )
+            if ( lengths[ symbol ] )
+                h.symbol[ offsets[ lengths[ symbol ] ]++ ] = (short) symbol;
+        return left; // 0 when complete
+    }
+
+    int Decode( const Huffman & h )
+    {
+        int code = 0, first = 0, index = 0;
+        for ( int len = 1; len < 16; len++ )
+        {
+            code |= Bits( 1 );
+            if ( failed )
+                return -1;
+            int count = h.count[ len ];
+            if ( code - count < first )
+                return h.symbol[ index + ( code - first ) ];
+            index += count;
+            first = ( first + count ) << 1;
+            code <<= 1;
+        }
+        return -1;
+    }
+
+    bool Put( BYTE b )
+    {
+        if ( out.size() >= maxOut )
+            return false;
+        out.push_back( b );
+        return true;
+    }
+
+    bool Codes( const Huffman & lengthCode, const Huffman & distanceCode )
+    {
+        static const short lengthBase[ 29 ] = { 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31,
+                                                35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258 };
+        static const short lengthExtra[ 29 ] = { 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2,
+                                                 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0 };
+        static const short distanceBase[ 30 ] = { 1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193,
+                                                  257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145,
+                                                  8193, 12289, 16385, 24577 };
+        static const short distanceExtra[ 30 ] = { 0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6,
+                                                   7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13 };
+        for ( ;; )
+        {
+            int symbol = Decode( lengthCode );
+            if ( symbol < 0 )
+                return false;
+            if ( symbol < 256 )
+            {
+                if ( !Put( (BYTE) symbol ) )
+                    return false;
+            }
+            else if ( 256 == symbol )
+                return true;
+            else
+            {
+                symbol -= 257;
+                if ( symbol >= 29 )
+                    return false;
+                int length = lengthBase[ symbol ] + Bits( lengthExtra[ symbol ] );
+                symbol = Decode( distanceCode );
+                if ( symbol < 0 || symbol >= 30 )
+                    return false;
+                size_t distance = distanceBase[ symbol ] + Bits( distanceExtra[ symbol ] );
+                if ( failed || distance > out.size() )
+                    return false;
+                while ( length-- )
+                    if ( !Put( out[ out.size() - distance ] ) )
+                        return false;
+            }
+        }
+    }
+
+    bool Stored()
+    {
+        bitBuffer = 0;
+        bitCount = 0;
+        if ( pos + 4 > inLength )
+            return false;
+        unsigned length = in[ pos ] | ( in[ pos + 1 ] << 8 );
+        unsigned complement = in[ pos + 2 ] | ( in[ pos + 3 ] << 8 );
+        pos += 4;
+        if ( length != ( ~complement & 0xffff ) || length > inLength - pos )
+            return false;
+        for ( unsigned i = 0; i < length; i++ )
+            if ( !Put( in[ pos++ ] ) )
+                return false;
+        return true;
+    }
+
+    bool Fixed()
+    {
+        static Huffman lengthCode, distanceCode;
+        static bool built = false;
+        if ( !built )
+        {
+            short lengths[ 288 ];
+            int symbol = 0;
+            for ( ; symbol < 144; symbol++ ) lengths[ symbol ] = 8;
+            for ( ; symbol < 256; symbol++ ) lengths[ symbol ] = 9;
+            for ( ; symbol < 280; symbol++ ) lengths[ symbol ] = 7;
+            for ( ; symbol < 288; symbol++ ) lengths[ symbol ] = 8;
+            Construct( lengthCode, lengths, 288 );
+            for ( symbol = 0; symbol < 30; symbol++ ) lengths[ symbol ] = 5;
+            Construct( distanceCode, lengths, 30 );
+            built = true;
+        }
+        return Codes( lengthCode, distanceCode );
+    }
+
+    bool Dynamic()
+    {
+        static const short order[ 19 ] = { 16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15 };
+        short lengths[ 320 ] = {};
+        int lengthCount = Bits( 5 ) + 257;
+        int distanceCount = Bits( 5 ) + 1;
+        int codeCount = Bits( 4 ) + 4;
+        if ( failed || lengthCount > 286 || distanceCount > 30 )
+            return false;
+        for ( int i = 0; i < codeCount; i++ )
+            lengths[ order[ i ] ] = (short) Bits( 3 );
+        Huffman lengthCode, distanceCode;
+        if ( failed || 0 != Construct( lengthCode, lengths, 19 ) )
+            return false;
+        int index = 0;
+        while ( index < lengthCount + distanceCount )
+        {
+            int symbol = Decode( lengthCode );
+            if ( symbol < 0 )
+                return false;
+            if ( symbol < 16 )
+            {
+                lengths[ index++ ] = (short) symbol;
+                continue;
+            }
+            short repeated = 0;
+            if ( 16 == symbol )
+            {
+                if ( 0 == index )
+                    return false;
+                repeated = lengths[ index - 1 ];
+                symbol = 3 + Bits( 2 );
+            }
+            else if ( 17 == symbol )
+                symbol = 3 + Bits( 3 );
+            else
+                symbol = 11 + Bits( 7 );
+            if ( failed || index + symbol > lengthCount + distanceCount )
+                return false;
+            while ( symbol-- )
+                lengths[ index++ ] = repeated;
+        }
+        if ( 0 == lengths[ 256 ] )
+            return false;
+        int error = Construct( lengthCode, lengths, lengthCount );
+        if ( error < 0 || ( error > 0 && lengthCount - lengthCode.count[ 0 ] != 1 ) )
+            return false;
+        error = Construct( distanceCode, lengths + lengthCount, distanceCount );
+        if ( error < 0 || ( error > 0 && distanceCount - distanceCode.count[ 0 ] != 1 ) )
+            return false;
+        return Codes( lengthCode, distanceCode );
+    }
+
+public:
+    Inflater( const BYTE * data, size_t length, vector<BYTE> & output, size_t limit )
+        : in( data ), inLength( length ), out( output ), maxOut( limit ) {}
+
+    bool Run()
+    {
+        // zlib header: deflate, no preset dictionary, valid check bits
+        if ( inLength < 2 || 8 != ( in[ 0 ] & 0x0f ) || 0 != ( ( in[ 0 ] << 8 ) | in[ 1 ] ) % 31 || ( in[ 1 ] & 0x20 ) )
+            return false;
+        pos = 2;
+        int last;
+        do
+        {
+            last = Bits( 1 );
+            int type = Bits( 2 );
+            if ( failed )
+                return false;
+            bool ok = 0 == type ? Stored() : 1 == type ? Fixed() : 2 == type ? Dynamic() : false;
+            if ( !ok )
+                return false;
+        } while ( !last );
+        return true;
+    }
+};
+
+bool InflateZlib( const BYTE * data, size_t length, vector<BYTE> & output, size_t limit = 16 * 1024 * 1024 )
+{
+    output.clear();
+    return Inflater( data, length, output, limit ).Run();
+}
+
+// PNG text chunks written by image generators. valueKnown is false for compressed values,
+// in which case only checks based on the keyword are applied.
+void CheckPngGeneratorText( const string & key, const BYTE * value, size_t length, bool valueKnown )
+{
+    char source[ 120 ];
+    sprintf_s( source, "PNG text '%.80s'", key.c_str() );
+
+    if ( key == "invokeai_metadata" || key == "invokeai_graph" || key == "sd-metadata" || key == "Dream" )
+    {
+        ReportGenerativeMetadata( source, "InvokeAI generation settings" );
+        return;
+    }
+    if ( key == "fooocus_scheme" )
+    {
+        ReportGenerativeMetadata( source, "Fooocus generation settings" );
+        return;
+    }
+    if ( key == "use_stable_diffusion_model" )
+    {
+        ReportGenerativeMetadata( source, "Easy Diffusion generation settings" );
+        return;
+    }
+    if ( !valueKnown )
+        return;
+
+    if ( key == "AIGC" )
+    {
+        CheckAigcLabel( source, value, length );
+        return;
+    }
+
+    if ( key == "parameters" || key == "prompt" || key == "Comment" )
+    {
+        if ( CheckGeneratorSettingsText( source, value, length ) )
+            return;
+        if ( key == "parameters" && ContainsBytes( value, length, "Fooocus", true ) )
+            ReportGenerativeMetadata( source, "Fooocus generation settings" );
+    }
+    else if ( key == "workflow" && ContainsBytes( value, length, "\"nodes\"" ) &&
+              ContainsBytes( value, length, "\"links\"" ) )
+        ReportGenerativeMetadata( source, "ComfyUI workflow" );
+    else if ( key == "Description" && ContainsBytes( value, length, "Job ID: " ) )
+        ReportGenerativeMetadata( source, "Midjourney job description" );
+    else if ( key == "Source" )
+    {
+        // Software is checked by the imgenai assessment together with other software fields.
+        const char * generator = FindGeneratorName( value, length );
+        if ( generator )
+        {
+            char finding[ 80 ];
+            sprintf_s( finding, "names %s", generator );
+            ReportGenerativeMetadata( source, finding );
+        }
+    }
+}
+
+string PNGPrintableText( const BYTE * bytes, size_t length );
+
+// A PNG text value after any decompression: XMP, the Software line used by the imgenai
+// assessment, and the generator checks.
+void HandlePngTextValue( const string & key, const BYTE * value, size_t length )
+{
+    if ( key == "XML:com.adobe.xmp" )
+    {
+        PrintXMPData( (const char *) value, length );
+        return;
+    }
+#ifdef IMGENAI_ONLY
+    if ( key == "Software" )
+        prf( "PNG Software: %s\n", PNGPrintableText( value, length ).c_str() );
+#endif
+    CheckPngGeneratorText( key, value, length, true );
+}
+
+// JPEG Extended XMP (XMP part 3): APP1 "http://ns.adobe.com/xmp/extension/\0", a 32-character
+// GUID, the full packet length, this chunk's offset, then the chunk bytes.
+static const char g_xmpExtensionIdentifier[] = "http://ns.adobe.com/xmp/extension/";
+
+struct JpegExtendedXmpChunk
+{
+    string guid;
+    DWORD fullLength = 0;
+    DWORD chunkOffset = 0;
+    const BYTE * data = NULL;
+    size_t length = 0;
+};
+
+struct JpegExtendedXmpPacket
+{
+    string guid;
+    vector<BYTE> data;
+    size_t received = 0;
+    bool invalid = false;
+
+    bool Complete() const { return !invalid && !data.empty() && received >= data.size(); }
+};
+
+bool ParseJpegExtendedXmp( const BYTE * payload, size_t length, JpegExtendedXmpChunk & chunk )
+{
+    const size_t idLength = sizeof g_xmpExtensionIdentifier; // includes the terminating NUL
+    if ( length < idLength + 40 || 0 != memcmp( payload, g_xmpExtensionIdentifier, idLength ) )
+        return false;
+    const BYTE * p = payload + idLength;
+    chunk.guid.assign( (const char *) p, 32 );
+    chunk.fullLength = ( (DWORD) p[ 32 ] << 24 ) | ( (DWORD) p[ 33 ] << 16 ) | ( (DWORD) p[ 34 ] << 8 ) | p[ 35 ];
+    chunk.chunkOffset = ( (DWORD) p[ 36 ] << 24 ) | ( (DWORD) p[ 37 ] << 16 ) | ( (DWORD) p[ 38 ] << 8 ) | p[ 39 ];
+    chunk.data = p + 40;
+    chunk.length = length - idLength - 40;
+    return true;
+}
+
+void AddJpegExtendedXmpChunk( vector<JpegExtendedXmpPacket> & packets, const JpegExtendedXmpChunk & chunk )
+{
+    auto packet = find_if( packets.begin(), packets.end(),
+                           [&]( const JpegExtendedXmpPacket & p ) { return p.guid == chunk.guid; } );
+    if ( packet == packets.end() )
+    {
+        packets.push_back( JpegExtendedXmpPacket() );
+        packet = packets.end() - 1;
+        packet->guid = chunk.guid;
+        if ( 0 == chunk.fullLength || chunk.fullLength > MaxMetadataScanBytes )
+            packet->invalid = true;
+        else
+            packet->data.resize( chunk.fullLength );
+    }
+    if ( packet->invalid )
+        return;
+    if ( chunk.fullLength != packet->data.size() || chunk.chunkOffset > packet->data.size() ||
+         chunk.length > packet->data.size() - chunk.chunkOffset )
+    {
+        packet->invalid = true;
+        return;
+    }
+    memcpy( packet->data.data() + chunk.chunkOffset, chunk.data, chunk.length );
+    packet->received += chunk.length;
 }
 
 #ifdef IMGENAI_ONLY
@@ -7658,33 +8388,70 @@ bool ContainsInsensitive( const BYTE * data, size_t length, const char * text )
     return false;
 }
 
-bool IsKnownGenerativeAITool( const string & value )
+enum EditorClass { NotAnEditor, EditorPredatesGenerativeAI, AICapableEditor };
+
+// Classifies a software string. Adobe products are gated by the first version with a
+// generative feature; if the version can't be parsed the editor is treated as AI-capable.
+//   Photoshop 22.0 (Oct 2020): Neural Filters, GAN-based (Generative Fill arrived in 24.6/25.0)
+//   Lightroom Classic 13.3, Lightroom 7.3, Camera Raw 16.3 (May 2024): Generative Remove
+//   Photoshop CS/CC and the pre-Classic "Adobe Photoshop Lightroom" 1-6 have none.
+EditorClass ClassifyEditor( const string & value )
 {
-    static const char * names[] =
+    auto after = [&]( const char * name ) -> size_t
     {
-        "Topaz",
-        "Adobe Photoshop",
-        "Adobe Lightroom",
-        "Adobe Firefly",
-        "Firefly",
-        "Luminar Neo",
-        "ON1 Photo RAW",
-        "Canva",
-        "Picsart",
-        "PhotoDirector",
-        "Adobe Camera Raw",
-        "ACDSee Photo Studio",
-        "Affinity",
-        "Google Photos",
-        "Google Gemini",
-        "Samsung Photo Assist"
+        size_t length = strlen( name );
+        for ( size_t i = 0; i + length <= value.size(); i++ )
+            if ( 0 == _strnicmp( value.c_str() + i, name, length ) )
+                return i + length;
+        return string::npos;
+    };
+    auto skipSpaces = [&]( size_t p )
+    {
+        while ( p < value.size() && ' ' == value[ p ] )
+            p++;
+        return p;
+    };
+    auto gate = [&]( size_t p, int minMajor, int minMinor ) -> EditorClass
+    {
+        p = skipSpaces( p );
+        if ( p >= value.size() || !isdigit( (unsigned char) value[ p ] ) )
+            return AICapableEditor;
+        int major = atoi( value.c_str() + p );
+        int minor = 0;
+        while ( p < value.size() && isdigit( (unsigned char) value[ p ] ) )
+            p++;
+        if ( p + 1 < value.size() && '.' == value[ p ] && isdigit( (unsigned char) value[ p + 1 ] ) )
+            minor = atoi( value.c_str() + p + 1 );
+        bool capable = major > minMajor || ( major == minMajor && minor >= minMinor );
+        return capable ? AICapableEditor : EditorPredatesGenerativeAI;
     };
 
-    for ( const char * name : names )
-        for ( size_t i = 0; i + strlen( name ) <= value.size(); i++ )
-            if ( 0 == _strnicmp( value.c_str() + i, name, strlen( name ) ) )
-                return true;
-    return false;
+    size_t p;
+    if ( string::npos != ( p = after( "Lightroom Classic" ) ) )
+        return gate( p, 13, 3 );
+    if ( string::npos != after( "Adobe Photoshop Lightroom" ) )
+        return EditorPredatesGenerativeAI;
+    if ( string::npos != ( p = after( "Adobe Lightroom" ) ) )
+        return gate( p, 7, 3 );
+    if ( string::npos != ( p = after( "Camera Raw" ) ) )
+        return gate( p, 16, 3 );
+    if ( string::npos != ( p = after( "Adobe Photoshop" ) ) )
+    {
+        p = skipSpaces( p );
+        if ( 0 == value.compare( p, 2, "CS" ) || 0 == value.compare( p, 2, "CC" ) )
+            return EditorPredatesGenerativeAI;
+        return gate( p, 22, 0 ); // Elements, Express and unparsed strings stay AI-capable
+    }
+
+    static const char * editors[] =
+    {
+        "Topaz", "Luminar Neo", "ON1 Photo RAW", "Canva", "Picsart", "PhotoDirector",
+        "ACDSee Photo Studio", "Affinity", "Google Photos", "Samsung Photo Assist"
+    };
+    for ( const char * editor : editors )
+        if ( ContainsName( (const BYTE *) value.data(), value.size(), editor ) )
+            return AICapableEditor;
+    return NotAnEditor;
 }
 
 bool PrintImgenaiCredentials( const WCHAR * imagePath, const WCHAR * credentialSettings )
@@ -7731,8 +8498,7 @@ bool PrintImgenaiCredentials( const WCHAR * imagePath, const WCHAR * credentialS
 void PrintImgenaiAssessment()
 {
     vector<string> aiEvidence;
-    bool declaredAI = !g_imgenaiDeclarations.empty() ||
-                      any_of( g_imgenaiSourceTypes.begin(), g_imgenaiSourceTypes.end(), IsGenerativeSourceType );
+    vector<string> olderEditors;
     vector<string> otherEvidence;
     string cameraMake;
     string cameraModel;
@@ -7756,23 +8522,47 @@ void PrintImgenaiAssessment()
         if ( line.empty() )
             continue;
 
-        bool isAiEvidence = false;
-        if ( 0 == line.find( "History Software Agent:" ) ||
-                  0 == line.find( "CreatorTool" ) ||
-                  0 == line.find( "C2PA SoftwareAgent" ) ||
-                  0 == line.find( "Software:" ) ||
-                  0 == line.find( "ProcessingSoftware:" ) )
-            isAiEvidence = IsKnownGenerativeAITool( line );
+        EditorClass editor = NotAnEditor;
+        size_t colon = line.find( ':' );
+        if ( string::npos != colon &&
+             ( 0 == line.find( "History Software Agent:" ) ||
+               0 == line.find( "CreatorTool" ) ||
+               0 == line.find( "C2PA SoftwareAgent" ) ||
+               0 == line.find( "Software:" ) ||
+               0 == line.find( "PNG Software:" ) ||
+               0 == line.find( "ProcessingSoftware:" ) ) )
+        {
+            string value = line.substr( colon + 1 );
+            const char * generator = FindGeneratorName( (const BYTE *) value.data(), value.size() );
+            if ( generator )
+            {
+                string field = line.substr( 0, colon );
+                while ( !field.empty() && ' ' == field.back() )
+                    field.pop_back();
+                string text = field + " names " + generator;
+                wstring declaration( text.begin(), text.end() );
+                if ( find( g_imgenaiDeclarations.begin(), g_imgenaiDeclarations.end(), declaration ) ==
+                     g_imgenaiDeclarations.end() )
+                    g_imgenaiDeclarations.push_back( declaration );
+                continue;
+            }
+            editor = ClassifyEditor( value );
+        }
 
         if ( 0 == line.find( "Make:" ) )
             cameraMake = line.substr( strlen( "Make:" ) );
         else if ( 0 == line.find( "Model:" ) )
             cameraModel = line.substr( strlen( "Model:" ) );
 
-        if ( isAiEvidence )
+        if ( AICapableEditor == editor )
         {
             if ( find( aiEvidence.begin(), aiEvidence.end(), line ) == aiEvidence.end() )
                 aiEvidence.push_back( line );
+        }
+        else if ( EditorPredatesGenerativeAI == editor )
+        {
+            if ( find( olderEditors.begin(), olderEditors.end(), line ) == olderEditors.end() )
+                olderEditors.push_back( line );
         }
         else if ( string::npos != line.find( "C2PA/JUMBF data block detected" ) )
         {
@@ -7797,6 +8587,8 @@ void PrintImgenaiAssessment()
     if ( modelStart )
         cameraModel.erase( 0, modelStart );
 
+    bool declaredAI = !g_imgenaiDeclarations.empty() ||
+                      any_of( g_imgenaiSourceTypes.begin(), g_imgenaiSourceTypes.end(), IsGenerativeSourceType );
     if ( declaredAI )
         printf( "RESULT: Metadata declares generative AI use.\n" );
     else if ( !aiEvidence.empty() )
@@ -7804,7 +8596,8 @@ void PrintImgenaiAssessment()
     else
         printf( "RESULT: Metadata cannot determine whether generative AI was used.\n" );
 
-    if ( !aiEvidence.empty() || !otherEvidence.empty() || !g_imgenaiSourceTypes.empty() || declaredAI )
+    if ( !aiEvidence.empty() || !olderEditors.empty() || !otherEvidence.empty() || !g_imgenaiSourceTypes.empty() ||
+         !g_imgenaiRemoteManifests.empty() || !g_imgenaiUnparsedXmp.empty() || declaredAI )
         printf( "Metadata evidence:\n" );
     for ( const wstring & value : g_imgenaiSourceTypes )
         PrintImgenaiWide( ( L"  DigitalSourceType: " + value + L"\n" ).c_str() );
@@ -7812,8 +8605,19 @@ void PrintImgenaiAssessment()
         PrintImgenaiWide( ( L"  Generative AI declaration: " + value + L"\n" ).c_str() );
     for ( const string & line : aiEvidence )
         printf( "  %s\n", line.c_str() );
+    for ( const string & line : olderEditors )
+        printf( "  Editor version predates its generative features: %s\n", line.c_str() );
+    for ( const wstring & value : g_imgenaiUnparsedXmp )
+        PrintImgenaiWide( ( L"  Malformed XMP mentions: " + value + L"\n" ).c_str() );
+    for ( const wstring & value : g_imgenaiRemoteManifests )
+        PrintImgenaiWide( ( L"  Remote Content Credentials referenced: " + value + L"\n" ).c_str() );
     for ( const string & line : otherEvidence )
         printf( "  %s\n", line.c_str() );
+
+    if ( !g_imgenaiUnparsedXmp.empty() )
+        printf( "An XMP packet could not be parsed completely; terms found in it by text search are not structured declarations.\n" );
+    if ( !g_imgenaiRemoteManifests.empty() )
+        printf( "A remote C2PA manifest is referenced but not fetched. Use -c with a settings file that allows remote manifest fetching to validate it.\n" );
 
     if ( hasC2PABlock && string::npos != cameraMake.find( "LEICA" ) )
     {
@@ -7834,15 +8638,84 @@ void PrintImgenaiAssessment()
     printf( "Metadata alone cannot rule out generative AI use.\n" );
 }
 
+bool IsGenerativeXmpText( const char * data, size_t length )
+{
+    while ( length && 0 == data[ length - 1 ] )
+        length--;
+    const ImgenaiXmpEvidence evidence = ReadImgenaiXmp( data, length );
+    return !evidence.declarations.empty() || !evidence.unparsedMentions.empty() ||
+           !evidence.softwareGenerators.empty() ||
+           any_of( evidence.sourceTypes.begin(), evidence.sourceTypes.end(), IsGenerativeSourceType );
+}
+
 bool HasGenerativeXmp( const BYTE * payload, size_t length )
 {
     static const char identifier[] = "http://ns.adobe.com/xap/1.0/";
     if ( length <= sizeof identifier || memcmp( payload, identifier, sizeof identifier ) != 0 )
         return false;
-    const ImgenaiXmpEvidence evidence =
-        ReadImgenaiXmp( (const char *) payload + sizeof identifier, length - sizeof identifier );
-    return !evidence.declarations.empty() ||
-           any_of( evidence.sourceTypes.begin(), evidence.sourceTypes.end(), IsGenerativeSourceType );
+    return IsGenerativeXmpText( (const char *) payload + sizeof identifier, length - sizeof identifier );
+}
+
+// Adds the xmpNote:HasExtendedXMP GUID named by a standard XMP packet, if any.
+void AddReferencedExtendedXmpGuid( const BYTE * payload, size_t length, vector<string> & guids )
+{
+    static const char name[] = "HasExtendedXMP";
+    const BYTE * end = payload + length;
+    const BYTE * hit = search( payload, end, name, name + sizeof name - 1,
+                               []( BYTE a, char b ) { return a == (BYTE) b; } );
+    if ( hit == end )
+        return;
+    const BYTE * limit = min( end, hit + 96 );
+    for ( const BYTE * p = hit + sizeof name - 1; p + 32 <= limit; p++ )
+    {
+        if ( !all_of( p, p + 32, []( BYTE c ) { return 0 != isxdigit( c ); } ) )
+            continue;
+        string guid( (const char *) p, 32 );
+        if ( find( guids.begin(), guids.end(), guid ) == guids.end() )
+            guids.push_back( guid );
+        return;
+    }
+}
+
+// Finds Extended XMP GUIDs to remove: packets that are generative themselves, or that
+// belong to a standard packet that will be removed. Extended XMP precedes the first scan.
+vector<string> FindGenerativeExtendedXmp( const vector<BYTE> & input )
+{
+    vector<JpegExtendedXmpPacket> packets;
+    vector<string> guids;
+    size_t offset = 2;
+    while ( offset < input.size() && 0xff == input[ offset ] )
+    {
+        while ( offset < input.size() && 0xff == input[ offset ] )
+            offset++;
+        if ( offset >= input.size() )
+            break;
+        BYTE marker = input[ offset++ ];
+        if ( 0xd9 == marker || 0xda == marker )
+            break;
+        if ( 0x01 == marker || ( marker >= 0xd0 && marker <= 0xd8 ) )
+            continue;
+        if ( offset + 2 > input.size() )
+            break;
+        size_t segmentLength = ( (size_t) input[ offset ] << 8 ) | input[ offset + 1 ];
+        if ( segmentLength < 2 || segmentLength > input.size() - offset )
+            break;
+        const BYTE * payload = input.data() + offset + 2;
+        size_t payloadLength = segmentLength - 2;
+        JpegExtendedXmpChunk chunk;
+        if ( 0xe1 == marker && ParseJpegExtendedXmp( payload, payloadLength, chunk ) )
+            AddJpegExtendedXmpChunk( packets, chunk );
+        else if ( 0xe1 == marker && HasGenerativeXmp( payload, payloadLength ) )
+            AddReferencedExtendedXmpGuid( payload, payloadLength, guids );
+        offset += segmentLength;
+    }
+
+    for ( const JpegExtendedXmpPacket & packet : packets )
+        if ( packet.Complete() &&
+             IsGenerativeXmpText( (const char *) packet.data.data(), packet.data.size() ) &&
+             find( guids.begin(), guids.end(), packet.guid ) == guids.end() )
+            guids.push_back( packet.guid );
+    return guids;
 }
 
 bool WriteSanitizedJPEG( const WCHAR * inputPath, const WCHAR * outputBase )
@@ -7914,6 +8787,7 @@ bool WriteSanitizedJPEG( const WCHAR * inputPath, const WCHAR * outputBase )
         size_t removedSegments = 0;
         bool reachedEnd = false;
         vector<WORD> c2paInstances;
+        const vector<string> extendedXmpToRemove = FindGenerativeExtendedXmp( input );
 
         while ( offset < input.size() )
         {
@@ -7973,6 +8847,10 @@ bool WriteSanitizedJPEG( const WCHAR * inputPath, const WCHAR * outputBase )
                 isC2pa = find( c2paInstances.begin(), c2paInstances.end(), instance ) != c2paInstances.end();
             }
             bool removeSegment = isC2pa || ( marker == 0xe1 && HasGenerativeXmp( payload, payloadLength ) );
+            JpegExtendedXmpChunk extendedChunk;
+            if ( !removeSegment && marker == 0xe1 && ParseJpegExtendedXmp( payload, payloadLength, extendedChunk ) )
+                removeSegment = find( extendedXmpToRemove.begin(), extendedXmpToRemove.end(),
+                                      extendedChunk.guid ) != extendedXmpToRemove.end();
             if ( removeSegment )
                 removedSegments++;
             else
@@ -8082,6 +8960,8 @@ int ParseOldJpg( DWORD startingOffset = 0, __int64 maxLength = 0 )
     vector<vector<BYTE>> iccChunks;
     BYTE iccSegmentCount = 0;
     bool invalidICC = false;
+    vector<JpegExtendedXmpPacket> extendedXmp;
+    vector<pair<WORD, vector<BYTE>>> c2paStores; // APP11 instance number and reassembled JUMBF payload
 
     const BYTE MARKER_EOI   = 0xd9;          // end of image
     const BYTE MARKER_SOS   = 0xda;          // start of scan
@@ -8171,6 +9051,10 @@ int ParseOldJpg( DWORD startingOffset = 0, __int64 maxLength = 0 )
         }
         else if ( MARKER_COM == segment )
         {
+            vector<BYTE> commentBytes( data_length );
+            if ( data_length )
+                GetBytes( dataOffset, commentBytes.data(), (int) data_length );
+            CheckGeneratorSettingsText( "JPEG comment", commentBytes.data(), commentBytes.size() );
             prf( "comment:                           " );
             for ( size_t i = 0; i < data_length; i++ )
             {
@@ -8453,19 +9337,40 @@ int ParseOldJpg( DWORD startingOffset = 0, __int64 maxLength = 0 )
                 bytes[ data_length ] = 0;
                 const char xmpIdentifier[] = "http://ns.adobe.com/xap/1.0/";
                 size_t identifierLength = sizeof( xmpIdentifier ) - 1;
+                JpegExtendedXmpChunk extendedChunk;
                 if ( data_length > identifierLength &&
                      0 == memcmp( bytes.get(), xmpIdentifier, identifierLength ) &&
                      0 == bytes[ identifierLength ] )
                     PrintXMPData( bytes.get() + identifierLength + 1, data_length - identifierLength - 1 );
+                else if ( ParseJpegExtendedXmp( (const BYTE *) bytes.get(), data_length, extendedChunk ) )
+                    AddJpegExtendedXmpChunk( extendedXmp, extendedChunk );
             }
         }
         else if ( MARKER_APP11 == segment && data_length >= 16 )
         {
-            BYTE header[ 56 ] = {};
-            const size_t length = min( (size_t) data_length, sizeof header );
-            GetBytes( dataOffset, header, (int) length );
-            if ( StartsJpegC2paStore( header, length ) )
-                PrintC2PAManifestNotice( "JPEG" );
+            vector<BYTE> payload( data_length );
+            GetBytes( dataOffset, payload.data(), (int) data_length );
+            if ( 0 == memcmp( payload.data(), "JP", 2 ) && 0 == memcmp( payload.data() + 12, "jumb", 4 ) )
+            {
+                WORD instance = ( (WORD) payload[ 2 ] << 8 ) | payload[ 3 ];
+                // Each segment repeats the JUMBF box header (LBox, TBox and optional XLBox).
+                size_t header = 0 == memcmp( payload.data() + 8, "\0\0\0\1", 4 ) ? 24 : 16;
+                auto store = find_if( c2paStores.begin(), c2paStores.end(),
+                                      [&]( const pair<WORD, vector<BYTE>> & s ) { return s.first == instance; } );
+                if ( StartsJpegC2paStore( payload.data(), payload.size() ) )
+                {
+                    PrintC2PAManifestNotice( "JPEG" );
+                    if ( store == c2paStores.end() )
+                    {
+                        c2paStores.push_back( make_pair( instance, vector<BYTE>() ) );
+                        store = c2paStores.end() - 1;
+                    }
+                    store->second.clear();
+                }
+                if ( store != c2paStores.end() && header < payload.size() &&
+                     store->second.size() + payload.size() <= MaxMetadataScanBytes )
+                    store->second.insert( store->second.end(), payload.begin() + header, payload.end() );
+            }
         }
         else if ( MARKER_DRI == segment )
         {
@@ -8525,6 +9430,20 @@ int ParseOldJpg( DWORD startingOffset = 0, __int64 maxLength = 0 )
         else
             prf( "incomplete ICC_PROFILE sequence: found fewer than %d chunks\n", iccSegmentCount );
     }
+
+    for ( const JpegExtendedXmpPacket & packet : extendedXmp )
+    {
+        if ( packet.Complete() )
+        {
+            prf( "extended XMP packet %s: %zu bytes\n", packet.guid.c_str(), packet.data.size() );
+            PrintXMPData( (const char *) packet.data.data(), packet.data.size() );
+        }
+        else
+            prf( "incomplete or invalid extended XMP packet %s\n", packet.guid.c_str() );
+    }
+
+    for ( const auto & store : c2paStores )
+        ScanC2paManifestText( store.second.data(), store.second.size() );
 
     return exifOffset;
 } //ParseOldJpg
@@ -9569,6 +10488,7 @@ void EnumerateBoxes( HeifStream & hs, DWORD depth, MP4ParseState * m4a = NULL,
         else if ( !strcmp( tag, "jumb" ) )
         {
             PrintC2PAManifestNotice( "ISO BMFF" );
+            ScanC2paStreamRange( hs.Stream(), hs.Offset() + offset, boxLen - ( offset - boxOffset ) );
         }
         else if ( !strcmp( tag, "pitm" ) )
         {
@@ -9748,6 +10668,23 @@ void EnumerateBoxes( HeifStream & hs, DWORD depth, MP4ParseState * m4a = NULL,
 
                 if ( !strcmp( itemType, "Exif" ) )
                     g_Heif_Exif_ItemID = itemID;
+                else if ( !strcmp( itemType, "mime" ) )
+                {
+                    // item_name, then content_type, both null-terminated
+                    string strings[ 2 ];
+                    for ( string & text : strings )
+                    {
+                        while ( hs.CanRead( offset, 1 ) && text.size() < 256 )
+                        {
+                            BYTE ch = hs.GetBYTE( offset );
+                            if ( 0 == ch )
+                                break;
+                            text += (char) ch;
+                        }
+                    }
+                    if ( strings[ 1 ] == "application/rdf+xml" )
+                        g_Heif_XMP_ItemIDs.push_back( itemID );
+                }
             }
         }
         else if ( !strcmp( tag, "iloc" ) )
@@ -9782,6 +10719,10 @@ void EnumerateBoxes( HeifStream & hs, DWORD depth, MP4ParseState * m4a = NULL,
                     WORD extentCount = hs.GetWORD( offset, false );
                     ULONGLONG extentOffset = 0;
                     ULONGLONG extentLength = 0;
+                    HeifItemLocation location;
+                    location.itemID = (DWORD) itemID;
+                    location.constructionMethod = constructionMethod;
+                    location.dataReferenceIndex = dataReferenceIndex;
 
                     for ( WORD e = 0; e < extentCount && hs.Valid(); e++ )
                     {
@@ -9796,7 +10737,13 @@ void EnumerateBoxes( HeifStream & hs, DWORD depth, MP4ParseState * m4a = NULL,
                             extentOffset = currentExtentOffset;
                             extentLength = currentExtentLength;
                         }
+                        if ( baseOffset > ULLONG_MAX - currentExtentOffset )
+                            location.valid = false;
+                        else
+                            location.extents.push_back( make_pair( baseOffset + currentExtentOffset, currentExtentLength ) );
                     }
+                    // iloc can precede iinf, so XMP items are resolved after all boxes are read.
+                    g_Heif_Item_Locations.push_back( location );
 
                     if ( itemID == g_Heif_Exif_ItemID )
                     {
@@ -9994,6 +10941,13 @@ void EnumerateBoxes( HeifStream & hs, DWORD depth, MP4ParseState * m4a = NULL,
                 EnumerateBoxes( hsChild, depth + 1, m4a );
             }
 
+            if ( !strcmp( "d8fec3d61b0e483c92975828877ec481", acGUID ) )
+            {
+                // C2PA manifest store in ISO BMFF (HEIF, AVIF, MP4): purpose string, offset, then JUMBF
+                PrintC2PAManifestNotice( "ISO BMFF" );
+                ScanC2paStreamRange( hs.Stream(), hs.Offset() + offset, boxLen - ( offset - boxOffset ) );
+            }
+
             if ( !strcmp( "be7acfcb97a942e89c71999491e3afac", acGUID ) )
             {
                 // prf( "found cr3 xmp data box\n" );
@@ -10173,12 +11127,79 @@ void EnumerateHeif( CStream * pStream, const char * imageFormat = "HEIF" )
     g_Heif_Primary_Properties.clear();
     g_Heif_ReadingProperties = false;
     g_Heif_Idat_Offset = 0;
+    g_Heif_XMP_ItemIDs.clear();
+    g_Heif_Item_Locations.clear();
 
     __int64 length = pStream->Length();
     HeifStream hs( pStream, 0, length );
 
     EnumerateBoxes( hs, 0 );
     PrintHeifPrimaryProperties( imageFormat );
+
+    // The iloc handler only finds the Exif item when iinf came first; libavif writes iloc first.
+    if ( 0 == g_Heif_Exif_Offset && 0xffffffff != g_Heif_Exif_ItemID )
+    {
+        auto location = find_if( g_Heif_Item_Locations.begin(), g_Heif_Item_Locations.end(),
+                                 [&]( const HeifItemLocation & l ) { return l.itemID == g_Heif_Exif_ItemID; } );
+        if ( location != g_Heif_Item_Locations.end() && location->valid && 1 == location->extents.size() &&
+             0 == location->dataReferenceIndex && location->constructionMethod <= 1 &&
+             location->extents[ 0 ].second >= 4 )
+        {
+            ULONGLONG exifOffset = location->extents[ 0 ].first;
+            bool ok = true;
+            if ( 1 == location->constructionMethod )
+            {
+                ok = g_Heif_Idat_Offset > 0 && exifOffset <= ULLONG_MAX - (ULONGLONG) g_Heif_Idat_Offset;
+                exifOffset += ok ? (ULONGLONG) g_Heif_Idat_Offset : 0;
+            }
+            ULONGLONG exifLength = location->extents[ 0 ].second;
+            if ( ok && exifOffset <= (ULONGLONG) pStream->Length() &&
+                 exifLength <= (ULONGLONG) pStream->Length() - exifOffset )
+            {
+                g_Heif_Exif_Offset = (__int64) exifOffset;
+                g_Heif_Exif_Length = (__int64) exifLength;
+            }
+        }
+    }
+
+    for ( DWORD itemID : g_Heif_XMP_ItemIDs )
+    {
+        auto location = find_if( g_Heif_Item_Locations.begin(), g_Heif_Item_Locations.end(),
+                                 [&]( const HeifItemLocation & l ) { return l.itemID == itemID; } );
+        if ( location == g_Heif_Item_Locations.end() )
+            continue;
+        if ( !location->valid || location->dataReferenceIndex != 0 || location->constructionMethod > 1 ||
+             ( location->constructionMethod == 1 && g_Heif_Idat_Offset <= 0 ) )
+        {
+            prf( "%s XMP item %u has an unsupported location\n", imageFormat, itemID );
+            continue;
+        }
+
+        vector<BYTE> xmp;
+        bool ok = !location->extents.empty();
+        for ( const auto & extent : location->extents )
+        {
+            ULONGLONG extentOffset = extent.first;
+            if ( location->constructionMethod == 1 )
+                extentOffset += (ULONGLONG) g_Heif_Idat_Offset;
+            vector<BYTE> part;
+            if ( 0 == extent.second || extentOffset > (ULONGLONG) LLONG_MAX ||
+                 xmp.size() + extent.second > MaxMetadataScanBytes ||
+                 !ReadStreamRange( pStream, (__int64) extentOffset, extent.second, part ) )
+            {
+                ok = false;
+                break;
+            }
+            xmp.insert( xmp.end(), part.begin(), part.end() );
+        }
+        if ( !ok )
+        {
+            prf( "%s XMP item %u could not be read\n", imageFormat, itemID );
+            continue;
+        }
+        prf( "%s XMP item %u: %zu bytes\n", imageFormat, itemID, xmp.size() );
+        PrintXMPData( (const char *) xmp.data(), xmp.size() );
+    }
 
     if ( g_FullInformation )
         prf( "Heif EXIF info: id %d, offset %I64d, length %I64d\n", g_Heif_Exif_ItemID, g_Heif_Exif_Offset, g_Heif_Exif_Length );
@@ -10390,12 +11411,14 @@ void EnumerateIFD0( int depth, __int64 IFDOffset, __int64 headerBase, bool littl
                 GetString( stringOffset + headerBase, g_acMake, _countof( g_acMake ), head.count );
 
                 prf( "Make:                                 %s\n", g_acMake );
+                CheckComfyUIExifField( "Make", g_acMake );
             }
             else if ( 272 == head.id && 2 == head.type )
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, g_acModel, _countof( g_acModel ), head.count );
                 prf( "Model:                                %s\n", g_acModel );
+                CheckComfyUIExifField( "Model", g_acModel );
 
                 WCHAR awcModel[ 100 ];
                 mbstowcs( awcModel, g_acModel, _countof( awcModel ) );
@@ -11422,11 +12445,10 @@ __int64 ParsePNG()
                 return 0;
             }
         }
-        if ( type[ 2 ] >= 'a' && type[ 2 ] <= 'z' )
-        {
-            prf( "invalid lowercase reserved bit in PNG chunk type %.4s\n", type );
-            return 0;
-        }
+        // The spec says to treat a chunk with the reserved bit set as unrecognized, not to reject
+        // the file. ComfyUI's animated PNG node writes "comf" chunks this way.
+        if ( type[ 2 ] >= 'a' && type[ 2 ] <= 'z' && 0 != memcmp( type, "comf", 4 ) )
+            prf( "lowercase reserved bit in PNG chunk type %.4s\n", type );
 
         if ( (ULONGLONG) length > (ULONGLONG) ( fileLength - offset - 12 ) )
         {
@@ -11449,6 +12471,24 @@ __int64 ParsePNG()
         if ( 0 == memcmp( type, "caBX", 4 ) )
         {
             PrintC2PAManifestNotice( "PNG" );
+            ScanC2paStreamRange( g_pStream, dataOffset, length );
+        }
+        else if ( 0 == memcmp( type, "comf", 4 ) )
+        {
+            // ComfyUI SaveAnimatedPNG: keyword, NUL, JSON (prompt or workflow)
+            vector<BYTE> data;
+            if ( PNGReadTextChunk( dataOffset, length, data ) )
+            {
+                auto keyEnd = find( data.begin(), data.end(), 0 );
+                if ( keyEnd != data.end() )
+                {
+                    string key( data.begin(), keyEnd );
+                    size_t valueOffset = (size_t) ( keyEnd - data.begin() ) + 1;
+                    prf( "ComfyUI comf chunk: %s, %zu bytes\n", PNGPrintableText( (const BYTE *) key.data(), key.size() ).c_str(),
+                         data.size() - valueOffset );
+                    CheckPngGeneratorText( key, data.data() + valueOffset, data.size() - valueOffset, true );
+                }
+            }
         }
         else if ( 0 == memcmp( type, "IHDR", 4 ) )
         {
@@ -11626,6 +12666,7 @@ __int64 ParsePNG()
                             string value = PNGPrintableText( data.data() + keyLength + 1,
                                                              data.size() - keyLength - 1 );
                             prf( "text key:                             %s, value: %s\n", key.c_str(), value.c_str() );
+                            HandlePngTextValue( key, data.data() + keyLength + 1, data.size() - keyLength - 1 );
                         }
                         else if ( 0 == memcmp( type, "zTXt", 4 ) )
                         {
@@ -11633,9 +12674,23 @@ __int64 ParsePNG()
                             if ( methodOffset >= data.size() )
                                 prf( "malformed PNG zTXt chunk for key %s\n", key.c_str() );
                             else
+                            {
                                 prf( "compressed text key:                  %s, compression method %u, compressed value %u bytes\n",
                                      key.c_str(), data[ methodOffset ],
                                      (DWORD) ( data.size() - methodOffset - 1 ) );
+                                vector<BYTE> text;
+                                if ( 0 == data[ methodOffset ] &&
+                                     InflateZlib( data.data() + methodOffset + 1, data.size() - methodOffset - 1, text ) )
+                                {
+                                    prf( "  decompressed value: %s\n", PNGPrintableText( text.data(), text.size() ).c_str() );
+                                    HandlePngTextValue( key, text.data(), text.size() );
+                                }
+                                else
+                                {
+                                    prf( "  compressed value could not be decompressed\n" );
+                                    CheckPngGeneratorText( key, NULL, 0, false );
+                                }
+                            }
                         }
                         else
                         {
@@ -11665,15 +12720,27 @@ __int64 ParsePNG()
                                         if ( compressionFlag > 1 || compressionMethod != 0 )
                                             prf( "invalid PNG iTXt compression fields for key %s\n", key.c_str() );
                                         else if ( compressionFlag )
+                                        {
                                             prf( "compressed international text:       %s, language %s, %u compressed bytes\n",
                                                  key.c_str(), language.c_str(), (DWORD) ( data.size() - cursor ) );
+                                            vector<BYTE> text;
+                                            if ( InflateZlib( data.data() + cursor, data.size() - cursor, text ) )
+                                            {
+                                                prf( "  decompressed value: %s\n", PNGPrintableText( text.data(), text.size() ).c_str() );
+                                                HandlePngTextValue( key, text.data(), text.size() );
+                                            }
+                                            else
+                                            {
+                                                prf( "  compressed value could not be decompressed\n" );
+                                                CheckPngGeneratorText( key, NULL, 0, false );
+                                            }
+                                        }
                                         else
                                         {
                                             string value = PNGPrintableText( data.data() + cursor, data.size() - cursor );
                                             prf( "international text:                   %s, language %s, translated key %s, value: %s\n",
                                                  key.c_str(), language.c_str(), translated.c_str(), value.c_str() );
-                                            if ( 0 == key.compare( "XML:com.adobe.xmp" ) )
-                                                PrintXMPData( (const char *) data.data() + cursor, data.size() - cursor );
+                                            HandlePngTextValue( key, data.data() + cursor, data.size() - cursor );
                                         }
                                     }
                                 }
@@ -15325,9 +16392,19 @@ void EnumerateWebP()
         else if ( 0 == memcmp( chunk.CC, "ICCP", 4 ) )
             prf( "  ICC profile: %u bytes\n", chunk.size );
         else if ( 0 == memcmp( chunk.CC, "XMP ", 4 ) )
+        {
             prf( "  XMP metadata: %u bytes\n", chunk.size );
+            vector<BYTE> xmp;
+            if ( ReadStreamRange( g_pStream, dataOffset, chunk.size, xmp ) )
+                PrintXMPData( (const char *) xmp.data(), xmp.size() );
+            else
+                prf( "  (warning: XMP chunk could not be read)\n" );
+        }
         else if ( 0 == memcmp( chunk.CC, "C2PA", 4 ) )
+        {
             PrintC2PAManifestNotice( "WebP" );
+            ScanC2paStreamRange( g_pStream, dataOffset, chunk.size );
+        }
         else if ( 0 == memcmp( chunk.CC, "ANIM", 4 ) )
         {
             if ( chunk.size < sizeof( struct WebPAnim ) )
@@ -15386,9 +16463,16 @@ bool ParseEmbeddedExifTiff( __int64 offset, ULONGLONG length, WCHAR * extension 
         return false;
 
     ULONGLONG tiffOffset = GetDWORD( offset, false );
-    if ( tiffOffset > length - 4 )
-        return false;
-    __int64 tiffHeader = offset + 4 + (__int64) tiffOffset;
+    __int64 tiffHeader = 0;
+    DWORD firstBytes = GetDWORD( offset, false );
+    if ( 0x49492a00 == firstBytes || 0x4d4d002a == firstBytes )
+        tiffHeader = offset; // raw TIFF without the 4-byte offset the spec requires (pillow-jxl)
+    else
+    {
+        if ( tiffOffset > length - 4 )
+            return false;
+        tiffHeader = offset + 4 + (__int64) tiffOffset;
+    }
     if ( tiffHeader > LLONG_MAX - 8 || !IsFileRangeValid( tiffHeader, 8 ) )
         return false;
 
@@ -15613,6 +16697,7 @@ void EnumerateGIF()
                     if ( (BYTE) comment[ i ] < 0x20 && '\t' != comment[ i ] &&
                          '\r' != comment[ i ] && '\n' != comment[ i ] )
                         comment[ i ] = '?';
+                CheckGeneratorSettingsText( "GIF comment", (const BYTE *) comment.data(), comment.size() );
                 comment.push_back( 0 );
                 prf( "GIF comment: %s\n", comment.data() );
             }
@@ -15930,14 +17015,23 @@ void EnumerateJPEG2000()
                 prf( "JPEG 2000 ICC profile: %I64u bytes\n", payloadLength - 3 );
         }
         else if ( 0 == memcmp( type, "jumb", 4 ) )
+        {
             PrintC2PAManifestNotice( "JPEG 2000" );
+            ScanC2paStreamRange( g_pStream, payload, payloadLength );
+        }
         else if ( 0 == memcmp( type, "xml ", 4 ) )
+        {
             prf( "JPEG 2000 XML metadata: %I64u bytes\n", payloadLength );
+            PrintXMPFromStream( payload, payloadLength );
+        }
         else if ( 0 == memcmp( type, "uuid", 4 ) && payloadLength >= 16 )
         {
             static const BYTE exifUUID[ 16 ] =
                 { 0xb1, 0x4b, 0xf8, 0xbd, 0x08, 0x3d, 0x4b, 0x43,
                   0xa5, 0xae, 0x8c, 0xd7, 0xd5, 0xa6, 0xce, 0x03 };
+            static const BYTE xmpUUID[ 16 ] =
+                { 0xbe, 0x7a, 0xcf, 0xcb, 0x97, 0xa9, 0x42, 0xe8,
+                  0x9c, 0x71, 0x99, 0x94, 0x91, 0xe3, 0xaf, 0xac };
             BYTE uuid[ 16 ] = {};
             GetBytes( payload, uuid, sizeof uuid );
             if ( 0 == memcmp( uuid, exifUUID, sizeof uuid ) )
@@ -15945,6 +17039,11 @@ void EnumerateJPEG2000()
                 exifOffset = payload + 16;
                 exifLength = payloadLength - 16;
                 prf( "JPEG 2000 EXIF metadata: %I64u bytes\n", exifLength );
+            }
+            else if ( 0 == memcmp( uuid, xmpUUID, sizeof uuid ) )
+            {
+                prf( "JPEG 2000 XMP metadata: %I64u bytes\n", payloadLength - 16 );
+                PrintXMPFromStream( payload + 16, payloadLength - 16 );
             }
             else
                 prf( "JPEG 2000 UUID metadata: %I64u bytes\n", payloadLength - 16 );
@@ -16056,7 +17155,10 @@ void EnumerateJXL()
             prf( "JPEG XL codestream data: %I64u bytes\n", payloadLength );
         }
         else if ( 0 == memcmp( type, "jumb", 4 ) )
+        {
             PrintC2PAManifestNotice( "JPEG XL" );
+            ScanC2paStreamRange( g_pStream, payload, payloadLength );
+        }
         else if ( 0 == memcmp( type, "Exif", 4 ) )
         {
             prf( "JPEG XL EXIF metadata: %I64u bytes\n", payloadLength );
@@ -16064,7 +17166,10 @@ void EnumerateJXL()
             exifLength = payloadLength;
         }
         else if ( 0 == memcmp( type, "xml ", 4 ) )
+        {
             prf( "JPEG XL XML metadata: %I64u bytes\n", payloadLength );
+            PrintXMPFromStream( payload, payloadLength );
+        }
         else if ( 0 == memcmp( type, "jbrd", 4 ) )
             prf( "JPEG XL JPEG reconstruction data: %I64u bytes\n", payloadLength );
         else if ( 0 == memcmp( type, "brob", 4 ) )
@@ -16140,16 +17245,17 @@ void EnumerateImageData( WCHAR const * pwc )
         if ( isHeic )
             prf( "mimetype:                             image/heic\n" );
         DWORD o = GetDWORD( g_Heif_Exif_Offset, false );
-        if ( o < 6 || o > (ULONGLONG) g_Heif_Exif_Length - 12 )
+        if ( o > (ULONGLONG) g_Heif_Exif_Length - 12 )
         {
             prf( "invalid Exif TIFF-header offset in this %s file\n", isAvif ? "AVIF" : "HEIF" );
             return;
         }
 
+        // exif_tiff_header_offset is usually 6, skipping "Exif\0\0", but libavif and others
+        // write 0 with the TIFF header immediately after the offset field.
         heifOffsetBase = o + g_Heif_Exif_Offset + 4;
-        char exifIdentifier[ 6 ];
-        GetBytes( g_Heif_Exif_Offset + 4, exifIdentifier, sizeof exifIdentifier );
-        if ( 0 != memcmp( exifIdentifier, "Exif\0\0", sizeof exifIdentifier ) )
+        DWORD tiffStart = GetDWORD( heifOffsetBase, true );
+        if ( 0x002a4949 != tiffStart && 0x2a004d4d != tiffStart )
         {
             prf( "invalid Exif item signature in this %s file\n", isAvif ? "AVIF" : "HEIF" );
             return;
@@ -16245,6 +17351,11 @@ void EnumerateImageData( WCHAR const * pwc )
         prf( "can't read from the file\n" );
         return;
     }
+
+    // The read above continues from wherever EnumerateWebP left the stream, which only happened to
+    // be "Exif" for some files. Select the WebP branch below whenever an EXIF chunk was found.
+    if ( !wcsicmp( pwcExt, L".webp" ) && 0 != g_WebP_Exif_Offset )
+        header = 0x66697845;
 
     if ( g_FullInformation )
         prf( "header %#x\n", header );
@@ -16466,8 +17577,13 @@ void EnumerateImageData( WCHAR const * pwc )
             return;
         }
 
-        headerBase = g_WebP_Exif_Offset + 6; // headerBase should point at the first endian byte (e.g. 0x49)
+        // headerBase should point at the first endian byte (e.g. 0x49). The WebP spec puts the TIFF
+        // header first, but many writers keep the JPEG "Exif\0\0" prefix; Pillow drops it for stills.
+        char exifPrefix[ 6 ] = {};
+        GetBytes( g_WebP_Exif_Offset, exifPrefix, sizeof exifPrefix );
+        headerBase = g_WebP_Exif_Offset + ( 0 == memcmp( exifPrefix, "Exif\0\0", 6 ) ? 6 : 0 );
         startingOffset = headerBase + 4; // the first dword to read with the idf offset is 4 beyond that
+        littleEndian = ( 0x4949 == GetWORD( headerBase, false ) ); // Pillow writes big-endian TIFF
     }
     
     if ( 0x4d4d == ( header & 0xffff ) ) // NEF
