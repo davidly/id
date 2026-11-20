@@ -20,6 +20,7 @@
 #include <string>
 #include <memory>
 #include <vector>
+#include <algorithm>
 
 #include "djl_strm.hxx"
 
@@ -28,6 +29,8 @@ using namespace std;
 #ifdef IMGENAI_ONLY
 string g_imgenaiParserOutput;
 bool g_imgenaiInputError = false;
+vector<wstring> g_imgenaiSourceTypes;
+vector<wstring> g_imgenaiDeclarations;
 #endif
 
 /*
@@ -272,9 +275,10 @@ void wprf( const WCHAR * format, ... )
 void Usage()
 {
 #ifdef IMGENAI_ONLY
-    printf( "usage: imgenai [-s:<outputfile>] [image]\n" );
+    printf( "usage: imgenai [-s:<outputbase>] [-c:<settings.toml>] image\n" );
     printf( "  Assess whether image metadata indicates generative AI may have been used.\n" );
-    printf( "  -s:<outputfile>  Write a JPEG copy with AI-related metadata and C2PA/JUMBF removed.\n" );
+    printf( "  -s:<outputbase>  Write a JPEG copy without recognized AI XMP or C2PA segments.\n" );
+    printf( "  -c:<settings.toml>  Run c2patool.exe beside imgenai.exe.\n" );
     exit( 1 );
 #else
     prf( "usage: id [-e:name.jpg] [-f] [filename]\n" );
@@ -7369,8 +7373,120 @@ void PrintXMPHistorySoftwareAgents( const char * data, size_t length )
         prf( "  History note: Topaz is recorded in edit history; this does not establish that its generative-AI features were used\n" );
 }
 
+#ifdef IMGENAI_ONLY
+struct ImgenaiXmpEvidence
+{
+    vector<wstring> sourceTypes;
+    vector<wstring> declarations;
+};
+
+ImgenaiXmpEvidence ReadImgenaiXmp( const char * data, size_t length )
+{
+    ImgenaiXmpEvidence evidence;
+    IXmlReader * reader = NULL;
+    if ( FAILED( CreateXmlReader( __uuidof( IXmlReader ), (void **) &reader, NULL ) ) )
+        return evidence;
+    auto release = []( IUnknown * value ) { value->Release(); };
+    unique_ptr<IXmlReader, decltype( release )> readerOwner( reader, release );
+    unique_ptr<IStream, decltype( release )> input( SHCreateMemStream( (const BYTE *) data, (UINT) length ), release );
+    if ( !input || FAILED( reader->SetProperty( XmlReaderProperty_DtdProcessing, DtdProcessing_Prohibit ) ) ||
+         FAILED( reader->SetInput( input.get() ) ) )
+        return evidence;
+
+    const WCHAR iptc[] = L"http://iptc.org/std/Iptc4xmpExt/2008-02-29/";
+    const WCHAR photoshop[] = L"http://ns.adobe.com/photoshop/1.0/";
+    const WCHAR rdf[] = L"http://www.w3.org/1999/02/22-rdf-syntax-ns#";
+    auto property = [&]( const WCHAR * ns, const WCHAR * name ) -> int
+    {
+        if ( 0 == wcscmp( ns, iptc ) )
+        {
+            if ( 0 == wcscmp( name, L"DigitalSourceType" ) ) return 1;
+            if ( 0 == wcscmp( name, L"AISystemUsed" ) ) return 2;
+            if ( 0 == wcscmp( name, L"AIPromptInformation" ) ) return 3;
+            if ( 0 == wcscmp( name, L"AISystemVersionUsed" ) ) return 5;
+            if ( 0 == wcscmp( name, L"AIPromptWriterName" ) ) return 6;
+        }
+        if ( 0 == wcscmp( ns, photoshop ) && 0 == wcscmp( name, L"Credit" ) ) return 4;
+        return 0;
+    };
+    auto record = [&]( int field, const WCHAR * text )
+    {
+        wstring value( text );
+        size_t first = value.find_first_not_of( L" \t\r\n" );
+        if ( first == wstring::npos )
+            return;
+        value = value.substr( first, value.find_last_not_of( L" \t\r\n" ) - first + 1 );
+        if ( field == 1 )
+        {
+            replace_if( value.begin(), value.end(), []( WCHAR c ) { return c < 0x20; }, L' ' );
+            evidence.sourceTypes.push_back( value );
+        }
+        else if ( field == 2 )
+            evidence.declarations.push_back( L"IPTC AI System Used" );
+        else if ( field == 3 )
+            evidence.declarations.push_back( L"IPTC AI Prompt Information" );
+        else if ( field == 4 && value == L"Made with Google AI" )
+            evidence.declarations.push_back( value );
+        else if ( field == 5 )
+            evidence.declarations.push_back( L"IPTC AI System Version Used" );
+        else if ( field == 6 )
+            evidence.declarations.push_back( L"IPTC AI Prompt Writer Name" );
+    };
+
+    XmlNodeType node;
+    HRESULT status;
+    int pending = 0;
+    while ( S_OK == ( status = reader->Read( &node ) ) )
+    {
+        const WCHAR * value = NULL;
+        if ( pending && ( node == XmlNodeType_Text || node == XmlNodeType_CDATA ) &&
+             SUCCEEDED( reader->GetValue( &value, NULL ) ) )
+            record( pending, value );
+        if ( node == XmlNodeType_EndElement )
+            pending = 0;
+        if ( node != XmlNodeType_Element )
+            continue;
+        const WCHAR * name = NULL;
+        const WCHAR * ns = NULL;
+        reader->GetLocalName( &name, NULL );
+        reader->GetNamespaceUri( &ns, NULL );
+        pending = property( ns, name );
+        bool empty = reader->IsEmptyElement();
+        if ( S_OK == reader->MoveToFirstAttribute() )
+        {
+            do
+            {
+                reader->GetLocalName( &name, NULL );
+                reader->GetNamespaceUri( &ns, NULL );
+                int field = property( ns, name );
+                if ( pending && 0 == wcscmp( ns, rdf ) && 0 == wcscmp( name, L"resource" ) )
+                    field = pending;
+                if ( field && SUCCEEDED( reader->GetValue( &value, NULL ) ) )
+                    record( field, value );
+            } while ( S_OK == reader->MoveToNextAttribute() );
+            reader->MoveToElement();
+        }
+        if ( empty )
+            pending = 0;
+    }
+    return FAILED( status ) ? ImgenaiXmpEvidence{} : evidence;
+}
+
+bool IsGenerativeSourceType( const wstring & value )
+{
+    static const wstring prefix = L"http://cv.iptc.org/newscodes/digitalsourcetype/";
+    return value == prefix + L"trainedAlgorithmicMedia" ||
+           value == prefix + L"compositeWithTrainedAlgorithmicMedia";
+}
+#endif
+
 void PrintDigitalSourceType( const char * data, size_t length )
 {
+#ifdef IMGENAI_ONLY
+    ImgenaiXmpEvidence evidence = ReadImgenaiXmp( data, length );
+    g_imgenaiSourceTypes.insert( g_imgenaiSourceTypes.end(), evidence.sourceTypes.begin(), evidence.sourceTypes.end() );
+    g_imgenaiDeclarations.insert( g_imgenaiDeclarations.end(), evidence.declarations.begin(), evidence.declarations.end() );
+#else
     string xmp( data, length );
     const char * names[] = { "DigitalSourceType", "digitalSourceType" };
     vector<string> values;
@@ -7464,16 +7580,7 @@ void PrintDigitalSourceType( const char * data, size_t length )
         }
     }
 
-    const char firefly[] = "firefly";
-    for ( size_t i = 0; i + sizeof firefly - 1 <= xmp.size(); i++ )
-    {
-        if ( 0 == _strnicmp( xmp.data() + i, firefly, sizeof firefly - 1 ) )
-        {
-            prf( "  AI tool mention:       %.*s (tool metadata; the specific AI operation is not stated)\n",
-                 (int) min( sizeof firefly - 1, (size_t) 200 ), xmp.data() + i );
-            break;
-        }
-    }
+#endif
 }
 
 void PrintXMPData( const char * pcIn, size_t dataLength = 0 )
@@ -7507,6 +7614,26 @@ void PrintC2PAManifestNotice( const char * container )
          container );
     prf( "  Assertions and signature are not decoded or validated by id\n" );
     prf( "  Note: a manifest indicates provenance data, not by itself that AI was used\n" );
+}
+
+bool StartsJpegC2paStore( const BYTE * data, size_t length )
+{
+    static const BYTE storeType[] =
+    {
+        0x63, 0x32, 0x70, 0x61, 0x00, 0x11, 0x00, 0x10,
+        0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71
+    };
+
+    // APP11 starts with the identifier, instance number, and packet sequence.
+    if ( length < 16 || memcmp( data, "JP", 2 ) != 0 ||
+         memcmp( data + 4, "\0\0\0\1", 4 ) != 0 || memcmp( data + 12, "jumb", 4 ) != 0 )
+        return false;
+    const size_t description = memcmp( data + 8, "\0\0\0\1", 4 ) == 0 ? 24 : 16;
+    if ( length < description + 8 || memcmp( data + description + 4, "jumd", 4 ) != 0 )
+        return false;
+    const size_t uuidOffset = description + ( memcmp( data + description, "\0\0\0\1", 4 ) == 0 ? 16 : 8 );
+    return length >= uuidOffset + sizeof storeType &&
+           memcmp( data + uuidOffset, storeType, sizeof storeType ) == 0;
 }
 
 #ifdef IMGENAI_ONLY
@@ -7544,7 +7671,13 @@ bool IsKnownGenerativeAITool( const string & value )
         "ON1 Photo RAW",
         "Canva",
         "Picsart",
-        "PhotoDirector"
+        "PhotoDirector",
+        "Adobe Camera Raw",
+        "ACDSee Photo Studio",
+        "Affinity",
+        "Google Photos",
+        "Google Gemini",
+        "Samsung Photo Assist"
     };
 
     for ( const char * name : names )
@@ -7554,9 +7687,52 @@ bool IsKnownGenerativeAITool( const string & value )
     return false;
 }
 
+bool PrintImgenaiCredentials( const WCHAR * imagePath, const WCHAR * credentialSettings )
+{
+    WCHAR verifier[ MAX_PATH + 1 ] = {};
+    DWORD length = GetModuleFileName( NULL, verifier, _countof( verifier ) );
+    if ( length == 0 || length >= _countof( verifier ) ||
+         !PathRemoveFileSpec( verifier ) || !PathAppend( verifier, L"c2patool.exe" ) ||
+         !PathFileExists( verifier ) )
+    {
+        printf( "ERROR: Install c2patool.exe next to imgenai.exe to use -c.\n" );
+        return false;
+    }
+    if ( !PathFileExists( credentialSettings ) || PathIsDirectory( credentialSettings ) )
+    {
+        printf( "ERROR: The C2PA settings file was not found.\n" );
+        return false;
+    }
+
+    wstring command = L"\"" + wstring( verifier ) + L"\" \"" + imagePath +
+                      L"\" --settings \"" + credentialSettings + L"\"";
+    vector<WCHAR> arguments( command.begin(), command.end() );
+    arguments.push_back( 0 );
+    STARTUPINFO startup = {};
+    startup.cb = sizeof startup;
+    PROCESS_INFORMATION process = {};
+    printf( "C2PA validation report for the input image:\n" );
+    fflush( stdout );
+    if ( !CreateProcess( verifier, arguments.data(), NULL, NULL, TRUE, 0, NULL, NULL, &startup, &process ) )
+    {
+        printf( "ERROR: Could not launch c2patool.exe (%lu).\n", GetLastError() );
+        return false;
+    }
+    CloseHandle( process.hThread );
+    DWORD exitCode = 1;
+    bool success = WAIT_OBJECT_0 == WaitForSingleObject( process.hProcess, INFINITE ) &&
+                   GetExitCodeProcess( process.hProcess, &exitCode ) && exitCode == 0;
+    CloseHandle( process.hProcess );
+    if ( !success )
+        printf( "C2PA report unavailable; c2patool did not complete successfully.\n" );
+    return success;
+}
+
 void PrintImgenaiAssessment()
 {
     vector<string> aiEvidence;
+    bool declaredAI = !g_imgenaiDeclarations.empty() ||
+                      any_of( g_imgenaiSourceTypes.begin(), g_imgenaiSourceTypes.end(), IsGenerativeSourceType );
     vector<string> otherEvidence;
     string cameraMake;
     string cameraModel;
@@ -7581,21 +7757,7 @@ void PrintImgenaiAssessment()
             continue;
 
         bool isAiEvidence = false;
-        if ( 0 == line.find( "DigitalSourceType:" ) )
-        {
-            isAiEvidence =
-                string::npos != line.find( "trainedAlgorithmicMedia" ) ||
-                string::npos != line.find( "compositeWithTrainedAlgorithmicMedia" );
-            if ( string::npos != line.find( "algorithmicMedia" ) && !isAiEvidence )
-                otherEvidence.push_back( line );
-        }
-        else if ( 0 == line.find( "AI tool mention:" ) )
-            isAiEvidence = true;
-        else if ( 0 == line.find( "AI-use interpretation:" ) &&
-                  ( string::npos != line.find( "generative AI" ) ||
-                    string::npos != line.find( "AI-generated elements" ) ) )
-            isAiEvidence = true;
-        else if ( 0 == line.find( "History Software Agent:" ) ||
+        if ( 0 == line.find( "History Software Agent:" ) ||
                   0 == line.find( "CreatorTool" ) ||
                   0 == line.find( "C2PA SoftwareAgent" ) ||
                   0 == line.find( "Software:" ) ||
@@ -7635,13 +7797,19 @@ void PrintImgenaiAssessment()
     if ( modelStart )
         cameraModel.erase( 0, modelStart );
 
-    if ( !aiEvidence.empty() )
-        printf( "RESULT: Metadata indicates generative AI may have been used.\n" );
+    if ( declaredAI )
+        printf( "RESULT: Metadata declares generative AI use.\n" );
+    else if ( !aiEvidence.empty() )
+        printf( "RESULT: Metadata records an AI-capable editor.\n" );
     else
         printf( "RESULT: Metadata cannot determine whether generative AI was used.\n" );
 
-    if ( !aiEvidence.empty() || !otherEvidence.empty() )
+    if ( !aiEvidence.empty() || !otherEvidence.empty() || !g_imgenaiSourceTypes.empty() || declaredAI )
         printf( "Metadata evidence:\n" );
+    for ( const wstring & value : g_imgenaiSourceTypes )
+        PrintImgenaiWide( ( L"  DigitalSourceType: " + value + L"\n" ).c_str() );
+    for ( const wstring & value : g_imgenaiDeclarations )
+        PrintImgenaiWide( ( L"  Generative AI declaration: " + value + L"\n" ).c_str() );
     for ( const string & line : aiEvidence )
         printf( "  %s\n", line.c_str() );
     for ( const string & line : otherEvidence )
@@ -7659,52 +7827,22 @@ void PrintImgenaiAssessment()
         printf( "This tool only detects a possible credential block; it does not verify its signature or show that the image is unedited or AI-free.\n" );
     }
 
-    if ( !aiEvidence.empty() )
+    if ( !declaredAI && !aiEvidence.empty() )
         printf( "An AI-capable tool in metadata does not establish that its generative-AI features were used.\n" );
-    if ( aiEvidence.empty() )
+    if ( !declaredAI && aiEvidence.empty() )
         printf( "  No metadata indicating generative AI use was found.\n" );
-    printf( "Metadata absence cannot prove AI was not used; no signed provenance was validated.\n" );
+    printf( "Metadata alone cannot rule out generative AI use.\n" );
 }
 
-bool ContainsAIIndicator( const BYTE * data, size_t length )
+bool HasGenerativeXmp( const BYTE * payload, size_t length )
 {
-    static const char * indicators[] =
-    {
-        "trainedAlgorithmicMedia",
-        "algorithmicMedia",
-        "generative AI",
-        "generativeAI",
-        "AI-generated",
-        "AI generated",
-        "AI-assisted",
-        "AI assisted",
-        "c2pa",
-        "jumbf",
-        "contentcredentials",
-        "content credentials",
-        "Midjourney",
-        "Stable Diffusion",
-        "DALL-E",
-        "OpenAI",
-        "Runway",
-        "Ideogram",
-        "Leonardo AI",
-        "Generative Fill",
-        "Generative Expand",
-        "Topaz",
-        "Adobe Photoshop",
-        "Adobe Lightroom",
-        "Firefly",
-        "Luminar Neo",
-        "ON1 Photo RAW",
-        "Canva",
-        "Picsart",
-        "PhotoDirector"
-    };
-    for ( const char * indicator : indicators )
-        if ( ContainsInsensitive( data, length, indicator ) )
-            return true;
-    return false;
+    static const char identifier[] = "http://ns.adobe.com/xap/1.0/";
+    if ( length <= sizeof identifier || memcmp( payload, identifier, sizeof identifier ) != 0 )
+        return false;
+    const ImgenaiXmpEvidence evidence =
+        ReadImgenaiXmp( (const char *) payload + sizeof identifier, length - sizeof identifier );
+    return !evidence.declarations.empty() ||
+           any_of( evidence.sourceTypes.begin(), evidence.sourceTypes.end(), IsGenerativeSourceType );
 }
 
 bool WriteSanitizedJPEG( const WCHAR * inputPath, const WCHAR * outputBase )
@@ -7775,6 +7913,7 @@ bool WriteSanitizedJPEG( const WCHAR * inputPath, const WCHAR * outputBase )
         size_t offset = 2;
         size_t removedSegments = 0;
         bool reachedEnd = false;
+        vector<WORD> c2paInstances;
 
         while ( offset < input.size() )
         {
@@ -7795,6 +7934,11 @@ bool WriteSanitizedJPEG( const WCHAR * inputPath, const WCHAR * outputBase )
             BYTE marker = input[ offset++ ];
             if ( 0xd9 == marker )
             {
+                if ( removedSegments && offset < input.size() )
+                {
+                    printf( "ERROR: JPEG has trailing data; metadata removal could invalidate its offsets.\n" );
+                    return false;
+                }
                 output.insert( output.end(), input.begin() + markerStart, input.begin() + offset );
                 output.insert( output.end(), input.begin() + offset, input.end() );
                 reachedEnd = true;
@@ -7820,15 +7964,15 @@ bool WriteSanitizedJPEG( const WCHAR * inputPath, const WCHAR * outputBase )
             size_t segmentEnd = offset + segmentLength;
             const BYTE * payload = input.data() + offset + 2;
             size_t payloadLength = segmentLength - 2;
-            bool isApplicationSegment = marker >= 0xe0 && marker <= 0xef;
-            bool isJUMBF = marker == 0xeb && payloadLength >= 8 &&
-                           'J' == payload[ 0 ] && 'P' == payload[ 1 ] &&
-                           0 == memcmp( payload + 4, "jumb", 4 );
-            bool isJUMBFContinuation = marker == 0xeb && payloadLength >= 2 &&
-                                       'J' == payload[ 0 ] && 'P' == payload[ 1 ];
-            bool removeSegment = isJUMBF || isJUMBFContinuation ||
-                                 ( ( isApplicationSegment || 0xfe == marker ) &&
-                                   ContainsAIIndicator( payload, payloadLength ) );
+            bool isC2pa = false;
+            if ( marker == 0xeb && payloadLength >= 8 && memcmp( payload, "JP", 2 ) == 0 )
+            {
+                WORD instance = ( (WORD) payload[ 2 ] << 8 ) | payload[ 3 ];
+                if ( StartsJpegC2paStore( payload, payloadLength ) )
+                    c2paInstances.push_back( instance );
+                isC2pa = find( c2paInstances.begin(), c2paInstances.end(), instance ) != c2paInstances.end();
+            }
+            bool removeSegment = isC2pa || ( marker == 0xe1 && HasGenerativeXmp( payload, payloadLength ) );
             if ( removeSegment )
                 removedSegments++;
             else
@@ -7897,10 +8041,14 @@ bool WriteSanitizedJPEG( const WCHAR * inputPath, const WCHAR * outputBase )
             printf( "ERROR: Could not finish writing sanitized JPEG; no output was written.\n" );
             return false;
         }
-        if ( !MoveFileEx( temporaryPath, outputPath, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH ) )
+        if ( !MoveFileEx( temporaryPath, outputPath, MOVEFILE_WRITE_THROUGH ) )
         {
+            DWORD error = GetLastError();
             DeleteFile( temporaryPath );
-            printf( "ERROR: Could not move sanitized JPEG to the requested output path.\n" );
+            if ( error == ERROR_ALREADY_EXISTS || error == ERROR_FILE_EXISTS )
+                printf( "ERROR: The destination already exists; no file was replaced.\n" );
+            else
+                printf( "ERROR: Could not move sanitized JPEG to the requested output path (%lu).\n", error );
             return false;
         }
 
@@ -8311,13 +8459,13 @@ int ParseOldJpg( DWORD startingOffset = 0, __int64 maxLength = 0 )
                     PrintXMPData( bytes.get() + identifierLength + 1, data_length - identifierLength - 1 );
             }
         }
-        else if ( MARKER_APP11 == segment && data_length >= 8 )
+        else if ( MARKER_APP11 == segment && data_length >= 16 )
         {
-            BYTE signature[ 8 ] = {};
-            GetBytes( dataOffset, signature, sizeof signature );
-            if ( 'J' == signature[ 0 ] && 'P' == signature[ 1 ] &&
-                     0 == memcmp( signature + 4, "jumb", 4 ) )
-                    PrintC2PAManifestNotice( "JPEG" );
+            BYTE header[ 56 ] = {};
+            const size_t length = min( (size_t) data_length, sizeof header );
+            GetBytes( dataOffset, header, (int) length );
+            if ( StartsJpegC2paStore( header, length ) )
+                PrintC2PAManifestNotice( "JPEG" );
         }
         else if ( MARKER_DRI == segment )
         {
@@ -16453,6 +16601,7 @@ extern "C" int __cdecl wmain( int argc, WCHAR * argv[] )
     awcEmbeddedImage[0] = 0;
 #ifdef IMGENAI_ONLY
     WCHAR awcSanitizeOutputBase[ MAX_PATH + 1 ] = {};
+    WCHAR awcCredentialSettings[ MAX_PATH + 1 ] = {};
 #endif
 
     int iArg = 1;
@@ -16483,7 +16632,13 @@ extern "C" int __cdecl wmain( int argc, WCHAR * argv[] )
                g_FullInformation = true;
 #endif
 #ifdef IMGENAI_ONLY
-           else if ( 's' == a1 )
+           else if ( 'c' == a1 )
+            {
+                if ( ':' != pwcArg[ 2 ] || 0 == pwcArg[ 3 ] ||
+                     !_wfullpath( awcCredentialSettings, pwcArg + 3, _countof( awcCredentialSettings ) ) )
+                    Usage();
+            }
+            else if ( 's' == a1 )
            {
                if ( ':' != pwcArg[ 2 ] || 0 == pwcArg[ 3 ] ||
                     0 == _wfullpath( awcSanitizeOutputBase, pwcArg + 3, _countof( awcSanitizeOutputBase ) ) )
@@ -16609,6 +16764,8 @@ extern "C" int __cdecl wmain( int argc, WCHAR * argv[] )
         printf( "Assessment below applies to the input image.\n" );
     PrintImgenaiAssessment();
     if ( g_imgenaiInputError )
+        return 2;
+    if ( awcCredentialSettings[ 0 ] && !PrintImgenaiCredentials( awcFilename, awcCredentialSettings ) )
         return 2;
     if ( 0 != awcSanitizeOutputBase[ 0 ] &&
          !WriteSanitizedJPEG( awcFilename, awcSanitizeOutputBase ) )
