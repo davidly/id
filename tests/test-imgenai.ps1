@@ -188,7 +188,7 @@ try {
             @{ Path = 'provenance/capture-changed.jpg'; Result = 'Invalid or incompletely validated credential' }
             @{ Path = 'provenance/generated.jpg'; Result = 'Trusted credential records AI generation' }
             @{ Path = 'provenance/generative-edit.jpg'; Result = 'Trusted credential records a generative edit' }
-            @{ Path = 'provenance/generative-ingredient.jpg'; Result = 'Trusted credential without an explicit generative or capture-only claim' }
+            @{ Path = 'provenance/generative-ingredient.jpg'; Result = 'Trusted credential records a generative ingredient' }
         )
         foreach ($case in $builtinCases) {
             $output = Invoke-Imgenai @("-c:$settings", '-q', (Join-Path $images $case.Path))
@@ -199,6 +199,11 @@ try {
             Write-Host "PASS native C2PA summary $($case.Path)"
         }
 
+
+        $invalidIngredient = Invoke-Imgenai @("-c:$settings", (Join-Path $provenance 'ingredient-invalid.jpg'))
+        Assert-Contains $invalidIngredient 'assertion.dataHash.mismatch' 'invalid ingredient binding'
+        Assert-Contains $invalidIngredient 'C2PA RESULT: Trusted credential without an explicit generative or capture-only claim' 'invalid ingredient conclusion'
+        Write-Host 'PASS historical ingredient hash failure blocks a trusted generative finding'
 
         $sidecar = Join-Path $work 'explicit manifest.c2pa'
         Copy-Item -LiteralPath (Join-Path $provenance 'plain-detached.c2pa') -Destination $sidecar

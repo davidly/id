@@ -8,7 +8,11 @@ powershell -NoProfile -File .\tests\test-imgenai.ps1
 
 The runner uses checked-in fixtures and works offline. Use `-Exe` to test another build. Place `c2patool.exe` beside that executable to run the signature, trust, and detached-manifest cases. Use `-RequireC2pa` to fail if the verifier is missing. The signed fixtures were generated and tested with c2patool 0.29.0.
 
-The tests cover metadata declarations, editor-only matches, compressed PNG text, saved-output ComfyUI graphs, NovelAI alpha metadata, multipart JPEG XMP and C2PA, stripping, and detached credentials. A locally signed ingredient test exercises the conservative result returned when the validator's ingredient deltas lack an explicit signature-validation status.
+The tests cover metadata declarations, editor-only matches, compressed PNG text, saved-output ComfyUI graphs, NovelAI alpha metadata, multipart JPEG XMP and C2PA, stripping, and detached credentials. The signed ingredient fixtures exercise an unchanged signature status omitted from the validation delta and an earlier ingredient hash failure that still prevents a trusted finding. The optional SynthID helper has a separate offline test with a mocked HTTP request.
+
+```powershell
+pwsh -NoProfile -File .\tests\test-synthid.ps1
+```
 
 ## Fixture sources
 

@@ -9153,10 +9153,25 @@ bool HasGenerativeCredentialIngredient( IJsonObject * manifests, const wstring &
                 if ( CredentialString( delta.Get(), L"ingredientAssertionURI" ) != assertionUri )
                     continue;
                 const auto statuses = CredentialObject( delta.Get(), L"validationDeltas" );
+                const wstring signatureUri = childUri + L"/c2pa.signature";
                 if ( !CredentialList( statuses.Get(), L"failure" ).empty() ||
                      !HasCredentialStatus( statuses.Get(), L"ingredient.manifest.validated", childUri ) ||
-                     !HasCredentialStatus( statuses.Get(), L"claimSignature.validated", childUri + L"/c2pa.signature" ) ||
-                     !HasCredentialStatus( statuses.Get(), L"signingCredential.trusted", childUri + L"/c2pa.signature" ) )
+                     !HasCredentialStatus( statuses.Get(), L"signingCredential.trusted", signatureUri ) )
+                    continue;
+
+                // A v3 ingredient records validation at inclusion time. The verifier
+                // omits unchanged statuses from its delta. Require trust under the
+                // current policy; a historical lack of trust can then be superseded.
+                const auto recorded = CredentialObject( ingredient.Get(), L"validation_results" );
+                const auto prior = CredentialObject( recorded.Get(), L"activeManifest" );
+                const auto priorFailures = CredentialList( prior.Get(), L"failure" );
+                if ( any_of( priorFailures.begin(), priorFailures.end(), [&]( const ComPtr<IJsonObject> & failure )
+                     {
+                         return CredentialString( failure.Get(), L"code" ) != L"signingCredential.untrusted" ||
+                                CredentialString( failure.Get(), L"url" ) != signatureUri;
+                     } ) ||
+                     ( !HasCredentialStatus( statuses.Get(), L"claimSignature.validated", signatureUri ) &&
+                       !HasCredentialStatus( prior.Get(), L"claimSignature.validated", signatureUri ) ) )
                     continue;
                 const auto linked = CredentialObject( manifests, child.c_str() );
                 const auto actions = ReadCredentialActions( linked.Get() );

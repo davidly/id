@@ -489,3 +489,13 @@ For a detached Content Credential, supply the manifest explicitly:
 ```
 
 The supplied manifest overrides embedded or remote credentials for this check. The validator tests its signature and asset binding against the image you supplied. The image and sidecar are read-only.
+
+### Optional SynthID watermark check
+
+The [PowerShell 7 helper](check-synthid.ps1) checks one PNG, JPEG, WebP or GIF against the [OpenAI Content Provenance API](https://developers.openai.com/api/docs/guides/content-provenance). Set `OPENAI_API_KEY` as described in the [developer quickstart](https://developers.openai.com/api/docs/quickstart). Add `-SendToOpenAI` only when you want to send the selected file’s original bytes to OpenAI.
+
+```powershell
+pwsh -NoProfile -File .\check-synthid.ps1 -Image 'D:\photos\source.jpg' -SendToOpenAI
+```
+
+Use `-WhatIf` to preview the upload. Files are limited to 50 MiB. A positive result reports a supported OpenAI SynthID watermark. A negative result leaves AI use inconclusive. Regular `id.exe`, local `imgenai.exe` checks and the folder scan do not use this service.

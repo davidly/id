@@ -35,6 +35,14 @@ function Sign-Fixture([string[]] $Arguments) {
     if ($LASTEXITCODE) { throw "c2patool failed: $Arguments" }
 }
 
+function Add-PostSigningComment([string] $InputFile, [string] $OutputFile) {
+    $bytes = [IO.File]::ReadAllBytes($InputFile)
+    $comment = [Text.Encoding]::ASCII.GetBytes('Added after signing')
+    $marker = [byte[]]@(255, 254, 0, ($comment.Length + 2))
+    [IO.File]::WriteAllBytes($OutputFile,
+        [byte[]]($bytes[0..1] + $marker + $comment + $bytes[2..($bytes.Length - 1)]))
+}
+
 try {
     $plainDefinition = Join-Path $work 'capture.json'
     $editDefinition = Join-Path $work 'edit.json'
@@ -50,6 +58,10 @@ try {
     Sign-Fixture @($plain, '-m', $plainDefinition, '--create', 'trainedAlgorithmicMedia', '-f', '-o', $generation)
     Sign-Fixture @($plain, '-m', $editDefinition, '--parent', $capture, '-f', '-o', $edit)
     Sign-Fixture @($plain, '-m', $plainDefinition, '--parent', $generation, '-f', '-o', $ingredient)
+    $changedIngredient = Join-Path $work 'changed-ingredient.jpg'
+    Add-PostSigningComment $generation $changedIngredient
+    Sign-Fixture @($plain, '-m', $plainDefinition, '--parent', $changedIngredient, '-f',
+                   '-o', (Join-Path $provenance 'ingredient-invalid.jpg'))
     $asset = Join-Path $work 'plain-detached.jpg'
     Sign-Fixture @($plain, '-m', $plainDefinition, '--create', 'digitalCapture', '--sidecar', '-o', $asset)
     if ((Get-FileHash -LiteralPath $plain).Hash -ne (Get-FileHash -LiteralPath $asset).Hash) { throw 'Detached asset bytes differ.' }
@@ -58,11 +70,7 @@ try {
     if ($LASTEXITCODE) { throw 'Certificate extraction failed.' }
     ($certificates -join [Environment]::NewLine).TrimEnd() |
         Set-Content -LiteralPath (Join-Path $provenance 'test-certificates.pem') -Encoding ascii
-    $bytes = [IO.File]::ReadAllBytes($capture)
-    $comment = [Text.Encoding]::ASCII.GetBytes('Added after signing')
-    $marker = [byte[]]@(255, 254, 0, ($comment.Length + 2))
-    [IO.File]::WriteAllBytes((Join-Path $provenance 'capture-changed.jpg'),
-        [byte[]]($bytes[0..1] + $marker + $comment + $bytes[2..($bytes.Length - 1)]))
+    Add-PostSigningComment $capture (Join-Path $provenance 'capture-changed.jpg')
 } finally {
     Get-ChildItem -LiteralPath $work -File | Remove-Item
     [IO.Directory]::Delete($work)
