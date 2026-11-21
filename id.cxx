@@ -31,6 +31,7 @@ string g_imgenaiParserOutput;
 bool g_imgenaiInputError = false;
 vector<wstring> g_imgenaiSourceTypes;
 vector<wstring> g_imgenaiDeclarations;
+vector<string> g_imgenaiRetainedJpegEvidence;
 vector<wstring> g_imgenaiRemoteManifests;
 vector<wstring> g_imgenaiUnparsedXmp;
 #endif
@@ -58,6 +59,9 @@ vector<wstring> g_imgenaiUnparsedXmp;
 #pragma comment( lib, "ntdll.lib" )
 #pragma comment( lib, "strmiids.lib" )
 #pragma comment( lib, "xmllite.lib" )
+#ifdef IMGENAI_ONLY
+#pragma comment( lib, "crypt32.lib" )
+#endif
 
 typedef unsigned __int64 QWORD;
 
@@ -7488,6 +7492,7 @@ struct ImgenaiXmpEvidence
     vector<wstring> declarations;
     vector<wstring> remoteManifests;  // dcterms:provenance URLs of remote C2PA manifests
     vector<wstring> unparsedMentions; // AI terms found by text search in XMP that could not be fully parsed
+    vector<string> extendedXmpGuids;
     vector<string> softwareGenerators; // generators named by xmp:CreatorTool or stEvt:softwareAgent
 };
 
@@ -7528,6 +7533,8 @@ ImgenaiXmpEvidence ReadImgenaiXmp( const char * data, size_t length )
              0 == wcscmp( name, L"softwareAgent" ) ) return 8;
         // China's TC260-PG-20259A XMP carrier for the GB 45438-2025 implicit AIGC label
         if ( 0 == wcscmp( ns, L"http://www.tc260.org.cn/ns/AIGC/1.0/" ) && 0 == wcscmp( name, L"AIGC" ) ) return 9;
+        if ( 0 == wcscmp( ns, L"http://ns.adobe.com/xmp/note/" ) &&
+             0 == wcscmp( name, L"HasExtendedXMP" ) ) return 10;
         return 0;
     };
     auto isContainer = [&]( const WCHAR * ns, const WCHAR * name )
@@ -7559,10 +7566,23 @@ ImgenaiXmpEvidence ReadImgenaiXmp( const char * data, size_t length )
             evidence.declarations.push_back( L"IPTC AI System Version Used" );
         else if ( field == 6 )
             evidence.declarations.push_back( L"IPTC AI Prompt Writer Name" );
-        else if ( field == 7 )
+        else if ( field == 7 && ( 0 == _wcsnicmp( value.c_str(), L"http://", 7 ) ||
+                                    0 == _wcsnicmp( value.c_str(), L"https://", 8 ) ) )
         {
             replace_if( value.begin(), value.end(), []( WCHAR c ) { return c < 0x20; }, L' ' );
             evidence.remoteManifests.push_back( value );
+        }
+        else if ( field == 10 && value.size() == 32 &&
+                  all_of( value.begin(), value.end(), []( WCHAR c )
+                  {
+                      return ( c >= L'0' && c <= L'9' ) || ( c >= L'A' && c <= L'F' ) ||
+                             ( c >= L'a' && c <= L'f' );
+                  } ) )
+        {
+            string guid;
+            for ( WCHAR character : value )
+                guid.push_back( (char) towupper( character ) );
+            evidence.extendedXmpGuids.push_back( guid );
         }
         else if ( field == 8 || field == 9 )
         {
@@ -7875,12 +7895,56 @@ void ReportGenerativeMetadata( const char * source, const char * finding )
     wstring value( text.begin(), text.end() );
     if ( find( g_imgenaiDeclarations.begin(), g_imgenaiDeclarations.end(), value ) == g_imgenaiDeclarations.end() )
         g_imgenaiDeclarations.push_back( value );
+    if ( 0 == strcmp( source, "EXIF UserComment" ) || 0 == strcmp( source, "JPEG comment" ) )
+        g_imgenaiRetainedJpegEvidence.push_back( text );
 #endif
 }
 
-// C2PA manifests are CBOR, so assertion values such as digitalSourceType URIs and
-// claim-generator names are stored as plain UTF-8 strings. This finds them without
-// validating the signature; c2patool (-c in imgenai) is needed for that.
+// Reads the definite-length UTF-8 strings used by C2PA CBOR. Bounds are relative to the
+// supplied metadata block; this lightweight scan does not validate the manifest structure.
+bool ReadC2paText( const BYTE *& cursor, const BYTE * end, size_t & length )
+{
+    if ( cursor == end || ( *cursor >> 5 ) != 3 )
+        return false;
+    length = *cursor++ & 31;
+    if ( length >= 24 )
+    {
+        if ( length > 26 )
+            return false;
+        const size_t bytes = (size_t) 1 << ( length - 24 );
+        if ( (size_t) ( end - cursor ) < bytes )
+            return false;
+        length = 0;
+        for ( size_t i = 0; i < bytes; i++ )
+            length = ( length << 8 ) | *cursor++;
+    }
+    return length <= (size_t) ( end - cursor );
+}
+
+// Scan for a CBOR text key followed by a text value, rather than treating arbitrary
+// titles, embedded thumbnails and descriptions as assertion fields.
+bool HasC2paFieldText( const BYTE * data, size_t length, const char * key,
+                       const char * marker, bool exact )
+{
+    const size_t keyLength = strlen( key );
+    const size_t markerLength = strlen( marker );
+    if ( length <= keyLength || keyLength >= 24 )
+        return false;
+    const BYTE * end = data + length;
+    for ( const BYTE * candidate = data; (size_t) ( end - candidate ) > keyLength; candidate++ )
+    {
+        if ( *candidate != ( 0x60 | keyLength ) || memcmp( candidate + 1, key, keyLength ) != 0 )
+            continue;
+        const BYTE * value = candidate + keyLength + 1;
+        size_t valueLength;
+        if ( !ReadC2paText( value, end, valueLength ) )
+            continue;
+        if ( exact ? valueLength == markerLength && memcmp( value, marker, markerLength ) == 0 :
+                     ContainsBytes( value, valueLength, marker ) )
+            return true;
+    }
+    return false;
+}
 void ScanC2paManifestText( const BYTE * data, size_t length )
 {
     static const struct { const char * text; const char * finding; } markers[] =
@@ -7906,7 +7970,19 @@ void ScanC2paManifestText( const BYTE * data, size_t length )
         if ( find_if( reported.begin(), reported.end(),
                       [&]( const char * f ) { return 0 == strcmp( f, marker.finding ); } ) != reported.end() )
             continue;
-        if ( ContainsBytes( data, length, marker.text ) )
+        const bool isSourceType = 0 == strncmp( marker.text, "digitalsourcetype/", 18 );
+        bool found = false;
+        if ( isSourceType )
+        {
+            const string uri = string( "cv.iptc.org/newscodes/" ) + marker.text;
+            found = HasC2paFieldText( data, length, "digitalSourceType", ( "http://" + uri ).c_str(), true ) ||
+                    HasC2paFieldText( data, length, "digitalSourceType", ( "https://" + uri ).c_str(), true );
+        }
+        else
+            found = HasC2paFieldText( data, length, "name", marker.text, false ) ||
+                    HasC2paFieldText( data, length, "claim_generator", marker.text, false ) ||
+                    HasC2paFieldText( data, length, "softwareAgent", marker.text, false );
+        if ( found )
         {
             reported.push_back( marker.finding );
             ReportGenerativeMetadata( "C2PA manifest (signature not verified)", marker.finding );
@@ -7971,6 +8047,14 @@ const char * FindGeneratorName( const BYTE * text, size_t length )
     return NULL;
 }
 
+bool HasComfySampler( const BYTE * value, size_t length )
+{
+    return ContainsBytes( value, length, "\"KSampler\"" ) ||
+           ContainsBytes( value, length, "\"KSamplerAdvanced\"" ) ||
+           ContainsBytes( value, length, "\"SamplerCustom\"" ) ||
+           ContainsBytes( value, length, "\"SamplerCustomAdvanced\"" );
+}
+
 // Generation settings in free text: PNG parameters/prompt/Comment and EXIF UserComment.
 bool CheckGeneratorSettingsText( const char * source, const BYTE * value, size_t length )
 {
@@ -7978,7 +8062,8 @@ bool CheckGeneratorSettingsText( const char * source, const BYTE * value, size_t
          ( ContainsBytes( value, length, "Sampler: " ) || ContainsBytes( value, length, "Seed: " ) ||
            ContainsBytes( value, length, "CFG scale: " ) ) )
         ReportGenerativeMetadata( source, "Stable Diffusion WebUI generation settings" );
-    else if ( ContainsBytes( value, length, "\"class_type\"" ) && ContainsBytes( value, length, "\"inputs\"" ) )
+    else if ( HasComfySampler( value, length ) && ContainsBytes( value, length, "\"class_type\"" ) &&
+              ContainsBytes( value, length, "\"inputs\"" ) )
         ReportGenerativeMetadata( source, "ComfyUI prompt graph" );
     else if ( ContainsBytes( value, length, "\"use_stable_diffusion_model\"" ) )
         ReportGenerativeMetadata( source, "Easy Diffusion generation settings" );
@@ -8273,7 +8358,9 @@ void CheckPngGeneratorText( const string & key, const BYTE * value, size_t lengt
     char source[ 120 ];
     sprintf_s( source, "PNG text '%.80s'", key.c_str() );
 
-    if ( key == "invokeai_metadata" || key == "invokeai_graph" || key == "sd-metadata" || key == "Dream" )
+    if ( key == "invokeai_metadata" || key == "invokeai_graph" || key == "sd-metadata" || ( key == "Dream" && valueKnown &&
+          ContainsBytes( value, length, " -s " ) && ContainsBytes( value, length, " -S " ) &&
+          ContainsBytes( value, length, " -W " ) && ContainsBytes( value, length, " -H " ) ) )
     {
         ReportGenerativeMetadata( source, "InvokeAI generation settings" );
         return;
@@ -8304,10 +8391,12 @@ void CheckPngGeneratorText( const string & key, const BYTE * value, size_t lengt
         if ( key == "parameters" && ContainsBytes( value, length, "Fooocus", true ) )
             ReportGenerativeMetadata( source, "Fooocus generation settings" );
     }
-    else if ( key == "workflow" && ContainsBytes( value, length, "\"nodes\"" ) &&
+    else if ( key == "workflow" && HasComfySampler( value, length ) && ContainsBytes( value, length, "\"nodes\"" ) &&
               ContainsBytes( value, length, "\"links\"" ) )
         ReportGenerativeMetadata( source, "ComfyUI workflow" );
-    else if ( key == "Description" && ContainsBytes( value, length, "Job ID: " ) )
+    else if ( key == "Description" && ContainsBytes( value, length, "Job ID: " ) &&
+              ( ContainsBytes( value, length, " --ar " ) || ContainsBytes( value, length, " --stylize " ) ||
+                ContainsBytes( value, length, " --v " ) || ContainsBytes( value, length, " --niji " ) ) )
         ReportGenerativeMetadata( source, "Midjourney job description" );
     else if ( key == "Source" )
     {
@@ -8357,10 +8446,28 @@ struct JpegExtendedXmpPacket
 {
     string guid;
     vector<BYTE> data;
+    vector<pair<size_t, size_t>> ranges;
     size_t received = 0;
     bool invalid = false;
 
-    bool Complete() const { return !invalid && !data.empty() && received >= data.size(); }
+    bool Complete() const
+    {
+        if ( invalid || data.empty() || received != data.size() )
+            return false;
+#ifdef IMGENAI_ONLY
+        // Adobe stores the MD5 of the full serialization in the reference GUID.
+        BYTE digest[ 16 ];
+        DWORD digestLength = sizeof digest;
+        if ( !CryptHashCertificate( 0, CALG_MD5, 0, data.data(), (DWORD) data.size(), digest, &digestLength ) ||
+             digestLength != sizeof digest )
+            return false;
+        const char hex[] = "0123456789ABCDEF";
+        for ( size_t i = 0; i < sizeof digest; i++ )
+            if ( guid[ 2 * i ] != hex[ digest[ i ] >> 4 ] || guid[ 2 * i + 1 ] != hex[ digest[ i ] & 15 ] )
+                return false;
+#endif
+        return true;
+    }
 };
 
 bool ParseJpegExtendedXmp( const BYTE * payload, size_t length, JpegExtendedXmpChunk & chunk )
@@ -8369,7 +8476,10 @@ bool ParseJpegExtendedXmp( const BYTE * payload, size_t length, JpegExtendedXmpC
     if ( length < idLength + 40 || 0 != memcmp( payload, g_xmpExtensionIdentifier, idLength ) )
         return false;
     const BYTE * p = payload + idLength;
+    if ( !all_of( p, p + 32, []( BYTE c ) { return 0 != isxdigit( c ); } ) )
+        return false;
     chunk.guid.assign( (const char *) p, 32 );
+    transform( chunk.guid.begin(), chunk.guid.end(), chunk.guid.begin(), []( char c ) { return (char) toupper( c ); } );
     chunk.fullLength = ( (DWORD) p[ 32 ] << 24 ) | ( (DWORD) p[ 33 ] << 16 ) | ( (DWORD) p[ 34 ] << 8 ) | p[ 35 ];
     chunk.chunkOffset = ( (DWORD) p[ 36 ] << 24 ) | ( (DWORD) p[ 37 ] << 16 ) | ( (DWORD) p[ 38 ] << 8 ) | p[ 39 ];
     chunk.data = p + 40;
@@ -8377,19 +8487,23 @@ bool ParseJpegExtendedXmp( const BYTE * payload, size_t length, JpegExtendedXmpC
     return true;
 }
 
-void AddJpegExtendedXmpChunk( vector<JpegExtendedXmpPacket> & packets, const JpegExtendedXmpChunk & chunk )
+void AddJpegExtendedXmpChunk( vector<JpegExtendedXmpPacket> & packets, size_t & allocated,
+                              const JpegExtendedXmpChunk & chunk )
 {
+    if ( !chunk.length || chunk.chunkOffset > chunk.fullLength ||
+         chunk.length > chunk.fullLength - chunk.chunkOffset )
+        return;
     auto packet = find_if( packets.begin(), packets.end(),
                            [&]( const JpegExtendedXmpPacket & p ) { return p.guid == chunk.guid; } );
     if ( packet == packets.end() )
     {
+        if ( chunk.fullLength > MaxMetadataScanBytes - allocated || packets.size() >= 1024 )
+            return;
         packets.push_back( JpegExtendedXmpPacket() );
         packet = packets.end() - 1;
         packet->guid = chunk.guid;
-        if ( 0 == chunk.fullLength || chunk.fullLength > MaxMetadataScanBytes )
-            packet->invalid = true;
-        else
-            packet->data.resize( chunk.fullLength );
+        packet->data.resize( chunk.fullLength );
+        allocated += chunk.fullLength;
     }
     if ( packet->invalid )
         return;
@@ -8399,7 +8513,17 @@ void AddJpegExtendedXmpChunk( vector<JpegExtendedXmpPacket> & packets, const Jpe
         packet->invalid = true;
         return;
     }
-    memcpy( packet->data.data() + chunk.chunkOffset, chunk.data, chunk.length );
+    const size_t begin = chunk.chunkOffset;
+    const size_t end = begin + chunk.length;
+    const auto next = lower_bound( packet->ranges.begin(), packet->ranges.end(), make_pair( begin, end ) );
+    if ( ( next != packet->ranges.end() && next->first < end ) ||
+         ( next != packet->ranges.begin() && ( next - 1 )->second > begin ) )
+    {
+        packet->invalid = true;
+        return;
+    }
+    packet->ranges.insert( next, make_pair( begin, end ) );
+    memcpy( packet->data.data() + begin, chunk.data, chunk.length );
     packet->received += chunk.length;
 }
 
@@ -8577,6 +8701,8 @@ void PrintImgenaiAssessment()
                 while ( !field.empty() && ' ' == field.back() )
                     field.pop_back();
                 string text = field + " names " + generator;
+                if ( field == "Software" || field == "ProcessingSoftware" )
+                    g_imgenaiRetainedJpegEvidence.push_back( text );
                 wstring declaration( text.begin(), text.end() );
                 if ( find( g_imgenaiDeclarations.begin(), g_imgenaiDeclarations.end(), declaration ) ==
                      g_imgenaiDeclarations.end() )
@@ -8693,25 +8819,15 @@ bool HasGenerativeXmp( const BYTE * payload, size_t length )
     return IsGenerativeXmpText( (const char *) payload + sizeof identifier, length - sizeof identifier );
 }
 
-// Adds the xmpNote:HasExtendedXMP GUID named by a standard XMP packet, if any.
-void AddReferencedExtendedXmpGuid( const BYTE * payload, size_t length, vector<string> & guids )
+vector<string> ReferencedExtendedXmpGuids( const BYTE * payload, size_t length )
 {
-    static const char name[] = "HasExtendedXMP";
-    const BYTE * end = payload + length;
-    const BYTE * hit = search( payload, end, name, name + sizeof name - 1,
-                               []( BYTE a, char b ) { return a == (BYTE) b; } );
-    if ( hit == end )
-        return;
-    const BYTE * limit = min( end, hit + 96 );
-    for ( const BYTE * p = hit + sizeof name - 1; p + 32 <= limit; p++ )
-    {
-        if ( !all_of( p, p + 32, []( BYTE c ) { return 0 != isxdigit( c ); } ) )
-            continue;
-        string guid( (const char *) p, 32 );
-        if ( find( guids.begin(), guids.end(), guid ) == guids.end() )
-            guids.push_back( guid );
-        return;
-    }
+    static const char identifier[] = "http://ns.adobe.com/xap/1.0/";
+    if ( length <= sizeof identifier || memcmp( payload, identifier, sizeof identifier ) != 0 )
+        return {};
+    while ( length > sizeof identifier && 0 == payload[ length - 1 ] )
+        length--;
+    return ReadImgenaiXmp( (const char *) payload + sizeof identifier,
+                          length - sizeof identifier ).extendedXmpGuids;
 }
 
 // Finds Extended XMP GUIDs to remove: packets that are generative themselves, or that
@@ -8719,7 +8835,9 @@ void AddReferencedExtendedXmpGuid( const BYTE * payload, size_t length, vector<s
 vector<string> FindGenerativeExtendedXmp( const vector<BYTE> & input )
 {
     vector<JpegExtendedXmpPacket> packets;
+    size_t extendedXmpAllocated = 0;
     vector<string> guids;
+    vector<string> referenced;
     size_t offset = 2;
     while ( offset < input.size() && 0xff == input[ offset ] )
     {
@@ -8741,14 +8859,19 @@ vector<string> FindGenerativeExtendedXmp( const vector<BYTE> & input )
         size_t payloadLength = segmentLength - 2;
         JpegExtendedXmpChunk chunk;
         if ( 0xe1 == marker && ParseJpegExtendedXmp( payload, payloadLength, chunk ) )
-            AddJpegExtendedXmpChunk( packets, chunk );
-        else if ( 0xe1 == marker && HasGenerativeXmp( payload, payloadLength ) )
-            AddReferencedExtendedXmpGuid( payload, payloadLength, guids );
+            AddJpegExtendedXmpChunk( packets, extendedXmpAllocated, chunk );
+        else if ( 0xe1 == marker )
+        {
+            const auto references = ReferencedExtendedXmpGuids( payload, payloadLength );
+            referenced.insert( referenced.end(), references.begin(), references.end() );
+            if ( !references.empty() && HasGenerativeXmp( payload, payloadLength ) )
+                guids.insert( guids.end(), references.begin(), references.end() );
+        }
         offset += segmentLength;
     }
 
     for ( const JpegExtendedXmpPacket & packet : packets )
-        if ( packet.Complete() &&
+        if ( packet.Complete() && find( referenced.begin(), referenced.end(), packet.guid ) != referenced.end() &&
              IsGenerativeXmpText( (const char *) packet.data.data(), packet.data.size() ) &&
              find( guids.begin(), guids.end(), packet.guid ) == guids.end() )
             guids.push_back( packet.guid );
@@ -8885,9 +9008,21 @@ bool WriteSanitizedJPEG( const WCHAR * inputPath, const WCHAR * outputBase )
             }
             bool removeSegment = isC2pa || ( marker == 0xe1 && HasGenerativeXmp( payload, payloadLength ) );
             JpegExtendedXmpChunk extendedChunk;
-            if ( !removeSegment && marker == 0xe1 && ParseJpegExtendedXmp( payload, payloadLength, extendedChunk ) )
-                removeSegment = find( extendedXmpToRemove.begin(), extendedXmpToRemove.end(),
-                                      extendedChunk.guid ) != extendedXmpToRemove.end();
+            if ( !removeSegment && marker == 0xe1 && !extendedXmpToRemove.empty() )
+            {
+                if ( ParseJpegExtendedXmp( payload, payloadLength, extendedChunk ) )
+                    removeSegment = find( extendedXmpToRemove.begin(), extendedXmpToRemove.end(),
+                                          extendedChunk.guid ) != extendedXmpToRemove.end();
+                else
+                {
+                    const auto references = ReferencedExtendedXmpGuids( payload, payloadLength );
+                    removeSegment = any_of( references.begin(), references.end(), [&]( const string & guid )
+                    {
+                        return find( extendedXmpToRemove.begin(), extendedXmpToRemove.end(), guid ) !=
+                               extendedXmpToRemove.end();
+                    } );
+                }
+            }
             if ( removeSegment )
                 removedSegments++;
             else
@@ -8972,6 +9107,9 @@ bool WriteSanitizedJPEG( const WCHAR * inputPath, const WCHAR * outputBase )
                       L"Sanitized JPEG written to %ws; removed %u metadata segment(s).\n",
                       outputPath, (unsigned) removedSegments );
         PrintImgenaiWide( successMessage );
+        printf( "EXIF, JPEG comments and pixel watermarks are retained and may still carry AI evidence.\n" );
+        for ( const string & evidence : g_imgenaiRetainedJpegEvidence )
+            printf( "  Retained evidence: %s\n", evidence.c_str() );
         return true;
     }
     catch ( const bad_alloc & )
@@ -8998,6 +9136,10 @@ int ParseOldJpg( DWORD startingOffset = 0, __int64 maxLength = 0 )
     BYTE iccSegmentCount = 0;
     bool invalidICC = false;
     vector<JpegExtendedXmpPacket> extendedXmp;
+#ifdef IMGENAI_ONLY
+    vector<string> referencedExtendedXmp;
+#endif
+    size_t extendedXmpAllocated = 0;
     vector<pair<WORD, vector<BYTE>>> c2paStores; // APP11 instance number and reassembled JUMBF payload
 
     const BYTE MARKER_EOI   = 0xd9;          // end of image
@@ -9378,9 +9520,15 @@ int ParseOldJpg( DWORD startingOffset = 0, __int64 maxLength = 0 )
                 if ( data_length > identifierLength &&
                      0 == memcmp( bytes.get(), xmpIdentifier, identifierLength ) &&
                      0 == bytes[ identifierLength ] )
+                {
                     PrintXMPData( bytes.get() + identifierLength + 1, data_length - identifierLength - 1 );
+#ifdef IMGENAI_ONLY
+                    const auto references = ReferencedExtendedXmpGuids( (const BYTE *) bytes.get(), data_length );
+                    referencedExtendedXmp.insert( referencedExtendedXmp.end(), references.begin(), references.end() );
+#endif
+                }
                 else if ( ParseJpegExtendedXmp( (const BYTE *) bytes.get(), data_length, extendedChunk ) )
-                    AddJpegExtendedXmpChunk( extendedXmp, extendedChunk );
+                    AddJpegExtendedXmpChunk( extendedXmp, extendedXmpAllocated, extendedChunk );
             }
         }
         else if ( MARKER_APP11 == segment && data_length >= 16 )
@@ -9470,6 +9618,10 @@ int ParseOldJpg( DWORD startingOffset = 0, __int64 maxLength = 0 )
 
     for ( const JpegExtendedXmpPacket & packet : extendedXmp )
     {
+#ifdef IMGENAI_ONLY
+        if ( find( referencedExtendedXmp.begin(), referencedExtendedXmp.end(), packet.guid ) == referencedExtendedXmp.end() )
+            continue;
+#endif
         if ( packet.Complete() )
         {
             prf( "extended XMP packet %s: %zu bytes\n", packet.guid.c_str(), packet.data.size() );

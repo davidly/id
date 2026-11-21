@@ -174,7 +174,7 @@ Embedded image found: offset 314368 length 2128644  embedded image header: 0x600
 
 ### JPG with generative AI metadata
 
-This is the [IPTC example image](https://iptc.org/news/iptc-photo-metadata-standard-2025-1-adds-ai-properties/) made with Bing Image Creator. id prints the IPTC source type and what it means. It also notes the C2PA manifest and lists the AI markers found in the manifest text. The hex dump is the IPTC-IIM block in the Photoshop APP13 segment.
+This is the [IPTC example image](https://iptc.org/news/iptc-photo-metadata-standard-2025-1-adds-ai-properties/) made with Bing Image Creator. id prints the IPTC source type and what it means. It also notes the C2PA manifest and lists AI markers found by the manifest’s CBOR key/value scan. The hex dump is the IPTC-IIM block in the Photoshop APP13 segment.
 
 ```
 parsing input file C:\Users\david\OneDrive\imgenai\tests\images\iptc-bing-robot.jpeg
@@ -406,8 +406,8 @@ None of these are signature-checked. XMP properties are matched by namespace, an
 | XMP | `photoshop:Credit` | The value is `Made with Google AI` or `Edited with Google AI`, as Google Photos writes. |
 | XMP | `xmp:CreatorTool`, `stEvt:softwareAgent` (edit history) | The value names a generator, such as Midjourney, Firefly, DALL-E, Stable Diffusion, ComfyUI, NovelAI, Ideogram or Google Gemini. |
 | XMP, PNG `AIGC` text | TC260 `AIGC`, the implicit label from China's GB 45438-2025 | The label is 1, meaning AI-generated. Labels 2 and 3 (possibly and suspected AI-generated) appear only in `id` output. |
-| C2PA manifest | Text in the JUMBF boxes | It contains a generative IPTC source type, or names a generator such as OpenAI, ChatGPT, DALL-E, Adobe Firefly, Microsoft Responsible AI, Image Creator from Designer, Bing Image Creator, Midjourney or Stable Diffusion. Only the text is searched. Use `-c` to validate the signature. |
-| PNG text (`tEXt`, `zTXt`, `iTXt`) | Generator keys such as `parameters`, `prompt` and `workflow`, plus `Comment` and `Description` | The value holds generation settings. Recognized writers are Stable Diffusion WebUI and its forks, ComfyUI, InvokeAI, Fooocus and Easy Diffusion. JSON settings like NovelAI's and a Midjourney `Description` with a Job ID also count. Compressed chunks are decompressed, and APNG `comf` chunks are read too. |
+| C2PA manifest | CBOR key/value pairs in the JUMBF data | The scan looks for a generative IPTC source type or a generator in a software-related field. It does not establish the active manifest, assertion ownership, or signer trust. Use `-c` to validate the signature and asset binding. |
+| PNG text (`tEXt`, `zTXt`, `iTXt`) | Generator keys such as `parameters`, `prompt` and `workflow`, plus `Comment` and `Description` | The value holds generation settings. Recognized writers are Stable Diffusion WebUI and its forks, ComfyUI, InvokeAI, Fooocus and Easy Diffusion. JSON settings like NovelAI's also count. ComfyUI prompt and workflow checks look for a sampler node. Legacy InvokeAI `Dream` values need recognizable command-line options, and a Midjourney `Description` needs recognizable prompt flags along with the job ID. Compressed chunks are decompressed, and APNG `comf` chunks are read too. |
 | EXIF `UserComment`, GIF and JPEG comments | The comment text | The text holds generation settings. UserComment is decoded from ASCII or from UTF-16 in either byte order. |
 | EXIF | `Make`, `Model` | The value holds a ComfyUI graph (`workflow:{` or `prompt:{`). ComfyUI writes these in its WebP and AVIF output. |
 | EXIF, PNG | `Software`, PNG `Source` | The value names a generator. |
@@ -431,15 +431,15 @@ Photoshop CS and CC versions, and Lightroom before Lightroom Classic, are treate
 
 These are listed as evidence, but the result stays "cannot determine":
 
-- A C2PA manifest with no AI markers in its text, such as a camera credential.
+- A C2PA manifest with no recognized AI fields, such as a camera credential.
 - A generic source type such as `algorithmicMedia` or `digitalCapture`.
 - An editor version older than its generative features.
 - A malformed XMP packet whose text mentions an AI term. If the packet breaks after a declaration, the parsed declaration still counts.
-- A `dcterms:provenance` reference to a remote C2PA manifest, which isn't fetched.
+- An HTTP(S) `dcterms:provenance` reference to a remote C2PA manifest. The metadata scan does not fetch it.
 
 ### Where metadata is read
 
-XMP is read from JPEG (including Extended XMP), TIFF-based raw files, CR3, PNG, WebP, HEIF/AVIF, JPEG 2000 and JPEG XL. C2PA manifests are read from JPEG APP11, PNG `caBX`, WebP `C2PA`, ISO BMFF (HEIF, AVIF, MP4), JPEG 2000 and JPEG XL. A manifest split over several JPEG APP11 segments is reassembled.
+XMP is read from JPEG (including Extended XMP), TIFF-based raw files, CR3, PNG, WebP, HEIF/AVIF, JPEG 2000 and JPEG XL. C2PA manifests are read from JPEG APP11, PNG `caBX`, WebP `C2PA`, ISO BMFF (HEIF, AVIF, MP4), JPEG 2000 and JPEG XL. A manifest split over several JPEG APP11 segments is reassembled. In `imgenai`, Extended XMP must be referenced by standard XMP, cover the declared size without overlapping chunks, and match the reference digest.
 
 These aren't read:
 - Brotli-compressed C2PA or JPEG XL metadata boxes.
@@ -456,10 +456,10 @@ The output is `C:\temp\clean.jpg`. Use a base path in an existing directory and 
 
 The copy drops these segments:
 - Standard XMP APP1 packets that declare generative AI, name a generator in CreatorTool or the edit history, or are malformed and mention an AI term. Other fields in a dropped packet are lost with it.
-- Extended XMP segments whose packet declares generative AI, or whose standard packet is dropped.
+- Extended XMP segments whose packet declares generative AI or whose standard packet is dropped. When an extension is removed, its referring standard XMP packet is dropped too, so other fields in that packet can be lost.
 - Recognized embedded C2PA APP11 packets, including genuine camera credentials.
 
-EXIF and comments are kept. A generator named in EXIF `Software`, or settings in EXIF UserComment, remain in the copy. Image scan data is copied without recompression. Files with trailing data are rejected when segments would be removed, since offsets into trailing images could become invalid.
+EXIF and comments are kept. The copy command lists recognized generator evidence retained in EXIF software fields, EXIF UserComment, or JPEG comments. Image scan data is copied without recompression. Files with trailing data are rejected when segments would be removed, since offsets into trailing images could become invalid.
 
 ### Verify Content Credentials
 
@@ -469,4 +469,4 @@ Place [c2patool.exe](https://github.com/contentauth/c2patool/releases) beside `i
 imgenai -c:C:\temp\c2pa.toml D:\photos\source.jpg
 ```
 
-The command prints the validator's JSON report after the metadata assessment. Check the active manifest's validation state, signature trust, asset-binding result, signed actions and ingredients. The `RESULT:` line reports metadata evidence only, independent of the validation report. A missing or untrusted credential can't establish whether AI was used. `id.exe` doesn't use the verifier.
+The command prints the validator's JSON report after the metadata assessment. Check the active manifest's validation state, signature trust, asset-binding result, signed actions and ingredients. The `RESULT:` line reports metadata evidence only, independent of the validation report. A trusted camera capture claim with a matching asset binding is evidence about the current file. A capture claim recorded only as an ingredient describes that input, which can coexist with a later generative edit. A missing or untrusted credential leaves the question open. `id.exe` doesn't use the verifier.
