@@ -29,6 +29,15 @@ cl /nologo /D IMGENAI_ONLY id.cxx /I.\ /O2i /EHac /Zi /Gy /Fo:imgenai.obj /Fd:im
 
 The GitHub Actions workflow builds both and uploads them as the `application` artifact.
 
+## Regression tests
+
+The [imgenai test suite](tests/README.md) runs offline with locally generated fixtures and attributed CC BY-SA test images.
+
+```powershell
+powershell -NoProfile -File .\tests\test-imgenai.ps1
+```
+
+
 ## id usage
 
 ```
@@ -371,10 +380,12 @@ chunk: DGDA, size 267853
 Metadata is easy to remove or forge, so no result rules out generative AI, and missing metadata proves nothing.
 
 ```
-usage: imgenai [-s:<outputbase>] [-c:<settings.toml>] image
+usage: imgenai [-s:<outputbase>] [-c:<settings.toml> [-q] [-m:<manifest.c2pa>]] image
   Assess whether image metadata indicates generative AI may have been used.
   -s:<outputbase>  Write a JPEG copy without recognized AI XMP or C2PA segments.
   -c:<settings.toml>  Run c2patool.exe beside imgenai.exe.
+  -q                 With -c, omit the raw validation report.
+  -m:<manifest.c2pa> With -c, validate an explicitly supplied detached manifest.
 ```
 
 The exit code is 0 when the assessment completes, 1 for a usage error, and 2 when the image can't be read or the `-c` or `-s` step fails.
@@ -407,9 +418,9 @@ None of these are signature-checked. XMP properties are matched by namespace, an
 | XMP | `xmp:CreatorTool`, `stEvt:softwareAgent` (edit history) | The value names a generator, such as Midjourney, Firefly, DALL-E, Stable Diffusion, ComfyUI, NovelAI, Ideogram or Google Gemini. |
 | XMP, PNG `AIGC` text | TC260 `AIGC`, the implicit label from China's GB 45438-2025 | The label is 1, meaning AI-generated. Labels 2 and 3 (possibly and suspected AI-generated) appear only in `id` output. |
 | C2PA manifest | CBOR key/value pairs in the JUMBF data | The scan looks for a generative IPTC source type or a generator in a software-related field. It does not establish the active manifest, assertion ownership, or signer trust. Use `-c` to validate the signature and asset binding. |
-| PNG text (`tEXt`, `zTXt`, `iTXt`) | Generator keys such as `parameters`, `prompt` and `workflow`, plus `Comment` and `Description` | The value holds generation settings. Recognized writers are Stable Diffusion WebUI and its forks, ComfyUI, InvokeAI, Fooocus and Easy Diffusion. JSON settings like NovelAI's also count. ComfyUI prompt and workflow checks look for a sampler node. Legacy InvokeAI `Dream` values need recognizable command-line options, and a Midjourney `Description` needs recognizable prompt flags along with the job ID. Compressed chunks are decompressed, and APNG `comf` chunks are read too. |
+| PNG text (`tEXt`, `zTXt`, `iTXt`) | Generator keys such as `parameters`, `prompt` and `workflow`, plus `Comment` and `Description` | The value holds generation settings. Recognized writers are Stable Diffusion WebUI and its forks, ComfyUI, InvokeAI, Fooocus and Easy Diffusion. JSON settings like NovelAI's also count when a seed, positive step count, and sampler have valid values. For ComfyUI, `imgenai` traces recognized image inputs from save nodes back to a sampler. It leaves mixed save paths and workflow-only metadata inconclusive. Legacy InvokeAI `Dream` values need recognizable command-line options, and a Midjourney `Description` needs recognizable prompt flags along with the job ID. Compressed chunks are decompressed, and APNG `comf` chunks are read too. |
 | EXIF `UserComment`, GIF and JPEG comments | The comment text | The text holds generation settings. UserComment is decoded from ASCII or from UTF-16 in either byte order. |
-| EXIF | `Make`, `Model` | The value holds a ComfyUI graph (`workflow:{` or `prompt:{`). ComfyUI writes these in its WebP and AVIF output. |
+| EXIF | `Make`, `Model` | ComfyUI writes graph metadata in these fields for WebP and AVIF. `imgenai` reads the full `prompt:{` field to assess the saved image path. |
 | EXIF, PNG | `Software`, PNG `Source` | The value names a generator. |
 
 ### AI-capable editors
@@ -439,12 +450,12 @@ These are listed as evidence, but the result stays "cannot determine":
 
 ### Where metadata is read
 
-XMP is read from JPEG (including Extended XMP), TIFF-based raw files, CR3, PNG, WebP, HEIF/AVIF, JPEG 2000 and JPEG XL. C2PA manifests are read from JPEG APP11, PNG `caBX`, WebP `C2PA`, ISO BMFF (HEIF, AVIF, MP4), JPEG 2000 and JPEG XL. A manifest split over several JPEG APP11 segments is reassembled. In `imgenai`, Extended XMP must be referenced by standard XMP, cover the declared size without overlapping chunks, and match the reference digest.
+XMP is read from JPEG (including Extended XMP), TIFF-based raw files, CR3, PNG, WebP, HEIF/AVIF, JPEG 2000 and JPEG XL. C2PA manifests are read from JPEG APP11, PNG `caBX`, WebP `C2PA`, ISO BMFF (HEIF, AVIF, MP4), JPEG 2000 and JPEG XL. A manifest split over several JPEG APP11 segments is reassembled. In 8-bit RGBA PNGs up to 16 megapixels, `imgenai` also checks the alpha channel for NovelAI’s gzip-compressed metadata. It validates the payload checksum and reports the metadata without validating a NovelAI signature. In `imgenai`, Extended XMP must be referenced by standard XMP, cover the declared size without overlapping chunks, and match the reference digest.
 
 These aren't read:
 - Brotli-compressed C2PA or JPEG XL metadata boxes.
 - Settings kept in sidecar files.
-- Data hidden in pixels, such as NovelAI's alpha-channel metadata or SynthID watermarks.
+- Provider watermarks such as SynthID and hidden alpha metadata outside 8-bit RGBA PNGs.
 
 ### JPEG metadata copy
 
@@ -469,4 +480,12 @@ Place [c2patool.exe](https://github.com/contentauth/c2patool/releases) beside `i
 imgenai -c:C:\temp\c2pa.toml D:\photos\source.jpg
 ```
 
-The command prints the validator's JSON report after the metadata assessment. Check the active manifest's validation state, signature trust, asset-binding result, signed actions and ingredients. The `RESULT:` line reports metadata evidence only, independent of the validation report. A trusted camera capture claim with a matching asset binding is evidence about the current file. A capture claim recorded only as an ingredient describes that input, which can coexist with a later generative edit. A missing or untrusted credential leaves the question open. `id.exe` doesn't use the verifier.
+The command prints a `C2PA RESULT:` summary followed by the validator’s JSON report. Add `-q` with `-c` to omit the JSON. Trusted results distinguish generation, generative edits, linked generative ingredients, and a capture-only claim bound to the current asset. Check the active manifest's validation state, signature trust, asset-binding result, signed actions and ingredients. The `RESULT:` line reports metadata evidence only, independent of the validation report. A trusted camera capture claim with a matching asset binding is evidence about the current file. A capture claim recorded only as an ingredient describes that input, which can coexist with a later generative edit. A missing or untrusted credential leaves the question open. `id.exe` doesn't use the verifier.
+
+For a detached Content Credential, supply the manifest explicitly:
+
+```powershell
+.\imgenai.exe '-c:C:\temp\c2pa.toml' '-m:C:\temp\source.c2pa' -q 'D:\photos\source.jpg'
+```
+
+The supplied manifest overrides embedded or remote credentials for this check. The validator tests its signature and asset binding against the image you supplied. The image and sidecar are read-only.

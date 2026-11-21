@@ -29,6 +29,7 @@ using namespace std;
 #ifdef IMGENAI_ONLY
 string g_imgenaiParserOutput;
 bool g_imgenaiInputError = false;
+bool g_imgenaiRgbaPng = false;
 vector<wstring> g_imgenaiSourceTypes;
 vector<wstring> g_imgenaiDeclarations;
 vector<string> g_imgenaiRetainedJpegEvidence;
@@ -60,6 +61,15 @@ vector<wstring> g_imgenaiUnparsedXmp;
 #pragma comment( lib, "strmiids.lib" )
 #pragma comment( lib, "xmllite.lib" )
 #ifdef IMGENAI_ONLY
+#include <map>
+#include <set>
+#include <roapi.h>
+#include <windows.data.json.h>
+#include <wincodec.h>
+#pragma comment( lib, "windowscodecs.lib" )
+#include <wrl.h>
+#include <wrl/wrappers/corewrappers.h>
+#pragma comment( lib, "runtimeobject.lib" )
 #pragma comment( lib, "crypt32.lib" )
 #endif
 
@@ -291,10 +301,12 @@ void wprf( const WCHAR * format, ... )
 void Usage()
 {
 #ifdef IMGENAI_ONLY
-    printf( "usage: imgenai [-s:<outputbase>] [-c:<settings.toml>] image\n" );
+    printf( "usage: imgenai [-s:<outputbase>] [-c:<settings.toml> [-q] [-m:<manifest.c2pa>]] image\n" );
     printf( "  Assess whether image metadata indicates generative AI may have been used.\n" );
     printf( "  -s:<outputbase>  Write a JPEG copy without recognized AI XMP or C2PA segments.\n" );
     printf( "  -c:<settings.toml>  Run c2patool.exe beside imgenai.exe.\n" );
+    printf( "  -q                 With -c, omit the raw validation report.\n" );
+    printf( "  -m:<manifest.c2pa> With -c, validate an explicitly supplied detached manifest.\n" );
     exit( 1 );
 #else
     prf( "usage: id [-e:name.jpg] [-f] [filename]\n" );
@@ -8047,13 +8059,18 @@ const char * FindGeneratorName( const BYTE * text, size_t length )
     return NULL;
 }
 
-bool HasComfySampler( const BYTE * value, size_t length )
+#ifdef IMGENAI_ONLY
+bool HasComfySavedGeneration( const BYTE * value, size_t length );
+int JsonGenerationSettings( const BYTE * value, size_t length );
+#else
+bool HasComfySavedGeneration( const BYTE * value, size_t length )
 {
     return ContainsBytes( value, length, "\"KSampler\"" ) ||
            ContainsBytes( value, length, "\"KSamplerAdvanced\"" ) ||
            ContainsBytes( value, length, "\"SamplerCustom\"" ) ||
            ContainsBytes( value, length, "\"SamplerCustomAdvanced\"" );
 }
+#endif
 
 // Generation settings in free text: PNG parameters/prompt/Comment and EXIF UserComment.
 bool CheckGeneratorSettingsText( const char * source, const BYTE * value, size_t length )
@@ -8062,17 +8079,38 @@ bool CheckGeneratorSettingsText( const char * source, const BYTE * value, size_t
          ( ContainsBytes( value, length, "Sampler: " ) || ContainsBytes( value, length, "Seed: " ) ||
            ContainsBytes( value, length, "CFG scale: " ) ) )
         ReportGenerativeMetadata( source, "Stable Diffusion WebUI generation settings" );
-    else if ( HasComfySampler( value, length ) && ContainsBytes( value, length, "\"class_type\"" ) &&
+    else if ( ContainsBytes( value, length, "\"class_type\"" ) &&
               ContainsBytes( value, length, "\"inputs\"" ) )
+    {
+        if ( !HasComfySavedGeneration( value, length ) )
+            return false;
+#ifdef IMGENAI_ONLY
+        ReportGenerativeMetadata( source, "ComfyUI prompt graph traces a saved image to a sampler" );
+#else
         ReportGenerativeMetadata( source, "ComfyUI prompt graph" );
-    else if ( ContainsBytes( value, length, "\"use_stable_diffusion_model\"" ) )
-        ReportGenerativeMetadata( source, "Easy Diffusion generation settings" );
-    else if ( ContainsBytes( value, length, "\"seed\"" ) &&
-              ( ContainsBytes( value, length, "\"sampler\"" ) || ContainsBytes( value, length, "\"sampler_name\"" ) ) &&
-              ( ContainsBytes( value, length, "\"steps\"" ) || ContainsBytes( value, length, "\"num_inference_steps\"" ) ) )
-        ReportGenerativeMetadata( source, "diffusion generation settings (JSON, as NovelAI and Fooocus write)" );
+#endif
+    }
     else
-        return false;
+    {
+#ifdef IMGENAI_ONLY
+        const int settings = JsonGenerationSettings( value, length );
+        if ( settings == 1 )
+            ReportGenerativeMetadata( source, "Easy Diffusion generation settings" );
+        else if ( settings == 2 )
+            ReportGenerativeMetadata( source, "diffusion generation settings (JSON, as NovelAI and Fooocus write)" );
+        else
+            return false;
+#else
+        if ( ContainsBytes( value, length, "\"use_stable_diffusion_model\"" ) )
+            ReportGenerativeMetadata( source, "Easy Diffusion generation settings" );
+        else if ( ContainsBytes( value, length, "\"seed\"" ) &&
+                  ( ContainsBytes( value, length, "\"sampler\"" ) || ContainsBytes( value, length, "\"sampler_name\"" ) ) &&
+                  ( ContainsBytes( value, length, "\"steps\"" ) || ContainsBytes( value, length, "\"num_inference_steps\"" ) ) )
+            ReportGenerativeMetadata( source, "diffusion generation settings (JSON, as NovelAI and Fooocus write)" );
+        else
+            return false;
+#endif
+    }
     return true;
 }
 
@@ -8100,14 +8138,29 @@ void CheckAigcLabel( const char * source, const BYTE * value, size_t length )
 }
 
 // EXIF Make/Model as ComfyUI writes them for WebP and AVIF: "workflow:{...}" and "prompt:{...}".
-void CheckComfyUIExifField( const char * field, const char * value )
+void CheckComfyUIExifField( const char * field, const char * preview, __int64 offset, DWORD count )
 {
-    if ( 0 == strncmp( value, "workflow:{", 10 ) || 0 == strncmp( value, "prompt:{", 8 ) )
-    {
-        char source[ 40 ];
-        sprintf_s( source, "EXIF %s", field );
-        ReportGenerativeMetadata( source, "ComfyUI workflow or prompt graph" );
-    }
+    const bool prompt = 0 == strncmp( preview, "prompt:{", 8 );
+#ifdef IMGENAI_ONLY
+    if ( !prompt || count <= 8 || count > 4 * 1024 * 1024 || !IsFileRangeValid( offset, count ) )
+        return;
+    vector<BYTE> value( count );
+    GetBytes( offset, value.data(), (int) count );
+    if ( !HasComfySavedGeneration( value.data() + 7, count - 7 ) )
+        return;
+#else
+    if ( !prompt && 0 != strncmp( preview, "workflow:{", 10 ) )
+        return;
+    (void) offset;
+    (void) count;
+#endif
+    char source[ 40 ];
+    sprintf_s( source, "EXIF %s", field );
+#ifdef IMGENAI_ONLY
+    ReportGenerativeMetadata( source, "ComfyUI prompt graph traces a saved image to a sampler" );
+#else
+    ReportGenerativeMetadata( source, "ComfyUI workflow or prompt graph" );
+#endif
 }
 
 // zlib (RFC 1950/1951) decompression for PNG zTXt and compressed iTXt, after Mark Adler's puff.
@@ -8330,6 +8383,19 @@ public:
         if ( inLength < 2 || 8 != ( in[ 0 ] & 0x0f ) || 0 != ( ( in[ 0 ] << 8 ) | in[ 1 ] ) % 31 || ( in[ 1 ] & 0x20 ) )
             return false;
         pos = 2;
+        return Deflate();
+    }
+
+#ifdef IMGENAI_ONLY
+    bool RunRaw()
+    {
+        return Deflate() && pos == inLength;
+    }
+#endif
+
+private:
+    bool Deflate()
+    {
         int last;
         do
         {
@@ -8391,9 +8457,11 @@ void CheckPngGeneratorText( const string & key, const BYTE * value, size_t lengt
         if ( key == "parameters" && ContainsBytes( value, length, "Fooocus", true ) )
             ReportGenerativeMetadata( source, "Fooocus generation settings" );
     }
-    else if ( key == "workflow" && HasComfySampler( value, length ) && ContainsBytes( value, length, "\"nodes\"" ) &&
+#ifndef IMGENAI_ONLY
+    else if ( key == "workflow" && HasComfySavedGeneration( value, length ) && ContainsBytes( value, length, "\"nodes\"" ) &&
               ContainsBytes( value, length, "\"links\"" ) )
         ReportGenerativeMetadata( source, "ComfyUI workflow" );
+#endif
     else if ( key == "Description" && ContainsBytes( value, length, "Job ID: " ) &&
               ( ContainsBytes( value, length, " --ar " ) || ContainsBytes( value, length, " --stylize " ) ||
                 ContainsBytes( value, length, " --v " ) || ContainsBytes( value, length, " --niji " ) ) )
@@ -8615,7 +8683,540 @@ EditorClass ClassifyEditor( const string & value )
     return NotAnEditor;
 }
 
-bool PrintImgenaiCredentials( const WCHAR * imagePath, const WCHAR * credentialSettings )
+using ABI::Windows::Data::Json::IJsonArray;
+using ABI::Windows::Data::Json::IJsonObject;
+using ABI::Windows::Data::Json::IJsonObjectStatics;
+using Microsoft::WRL::ComPtr;
+using Microsoft::WRL::Wrappers::HString;
+using Microsoft::WRL::Wrappers::HStringReference;
+
+ComPtr<IJsonObject> CredentialObject( IJsonObject * object, const WCHAR * name )
+{
+    ComPtr<IJsonObject> result;
+    if ( object )
+        object->GetNamedObject( HStringReference( name, (UINT32) wcslen( name ) ).Get(), &result );
+    return result;
+}
+
+wstring CredentialString( IJsonObject * object, const WCHAR * name )
+{
+    HString result;
+    if ( object )
+        object->GetNamedString( HStringReference( name, (UINT32) wcslen( name ) ).Get(), result.GetAddressOf() );
+    return result.GetRawBuffer( NULL );
+}
+
+vector<ComPtr<IJsonObject>> CredentialList( IJsonObject * object, const WCHAR * name )
+{
+    ComPtr<IJsonArray> array;
+    vector<ComPtr<IJsonObject>> result;
+    if ( object && SUCCEEDED( object->GetNamedArray( HStringReference( name, (UINT32) wcslen( name ) ).Get(), &array ) ) )
+    {
+        for ( UINT32 i = 0; ; i++ )
+        {
+            ComPtr<IJsonObject> item;
+            if ( FAILED( array->GetObjectAt( i, &item ) ) )
+                break;
+            result.push_back( item );
+        }
+    }
+    return result;
+}
+
+// Python allows these three literals when serializing a workflow. Normalize only
+// unquoted tokens so they don't make an otherwise valid prompt graph unreadable.
+void NormalizeComfyNumbers( wstring & json )
+{
+    bool quoted = false;
+    for ( size_t i = 0; i < json.size(); i++ )
+    {
+        if ( quoted && json[ i ] == L'\\' )
+        {
+            i++;
+            continue;
+        }
+        if ( json[ i ] == L'"' )
+        {
+            quoted = !quoted;
+            continue;
+        }
+        if ( quoted || ( i && !iswspace( json[ i - 1 ] ) && !wcschr( L"[:,", json[ i - 1 ] ) ) )
+            continue;
+        for ( const WCHAR * token : { L"NaN", L"Infinity", L"-Infinity" } )
+        {
+            const size_t length = wcslen( token );
+            const size_t end = i + length;
+            if ( 0 == json.compare( i, length, token ) &&
+                 ( end == json.size() || iswspace( json[ end ] ) || wcschr( L",]}", json[ end ] ) ) )
+            {
+                json.replace( i, length, L"null" );
+                break;
+            }
+        }
+    }
+}
+
+ComPtr<IJsonObject> ReadJsonObject( const BYTE * data, size_t length, bool comfyNumbers = false )
+{
+    ComPtr<IJsonObjectStatics> parser;
+    ComPtr<IJsonObject> root;
+    HString json;
+    const char * utf8 = (const char *) data;
+    const int size = MultiByteToWideChar( CP_UTF8, MB_ERR_INVALID_CHARS, utf8, (int) length, NULL, 0 );
+    if ( !size )
+        return root;
+    wstring wide( size, L'\0' );
+    if ( !MultiByteToWideChar( CP_UTF8, MB_ERR_INVALID_CHARS, utf8, (int) length, &wide[ 0 ], size ) )
+        return root;
+    if ( comfyNumbers )
+        NormalizeComfyNumbers( wide );
+    if ( SUCCEEDED( json.Set( wide.data(), (UINT32) wide.size() ) ) &&
+         SUCCEEDED( RoGetActivationFactory( HStringReference( L"Windows.Data.Json.JsonObject" ).Get(),
+                                            IID_PPV_ARGS( &parser ) ) ) )
+        parser->Parse( json.Get(), &root );
+    return root;
+}
+
+bool IsJsonWholeNumber( IJsonObject * object, const WCHAR * name, double minimum )
+{
+    const HStringReference key( name, (UINT32) wcslen( name ) );
+    double number;
+    if ( SUCCEEDED( object->GetNamedNumber( key.Get(), &number ) ) )
+        return isfinite( number ) && number >= minimum && floor( number ) == number;
+    const auto text = CredentialString( object, name );
+    if ( text.empty() || !all_of( text.begin(), text.end(), []( WCHAR c ) { return c >= L'0' && c <= L'9'; } ) )
+        return false;
+    return minimum == 0 || text.find_first_not_of( L'0' ) != wstring::npos;
+}
+
+int JsonGenerationSettings( const BYTE * value, size_t length )
+{
+    while ( length && isspace( *value ) )
+    {
+        value++;
+        length--;
+    }
+    while ( length && value[ length - 1 ] == 0 )
+        length--;
+    if ( !length || *value != '{' || length > 4 * 1024 * 1024 )
+        return 0;
+    Microsoft::WRL::Wrappers::RoInitializeWrapper apartment( RO_INIT_MULTITHREADED );
+    if ( FAILED( apartment ) )
+        return 0;
+    const auto root = ReadJsonObject( value, length );
+    if ( !root )
+        return 0;
+    if ( !CredentialString( root.Get(), L"use_stable_diffusion_model" ).empty() )
+        return 1;
+    const auto swarm = CredentialObject( root.Get(), L"sui_image_params" );
+    IJsonObject * settings = swarm ? swarm.Get() : root.Get();
+    if ( IsJsonWholeNumber( settings, L"seed", 0 ) &&
+         ( IsJsonWholeNumber( settings, L"steps", 1 ) ||
+           IsJsonWholeNumber( settings, L"num_inference_steps", 1 ) ) &&
+         ( !CredentialString( settings, L"sampler" ).empty() ||
+           !CredentialString( settings, L"sampler_name" ).empty() ) )
+        return 2;
+    return 0;
+}
+
+using ABI::Windows::Data::Json::IJsonValue;
+using ABI::Windows::Foundation::Collections::IIterable;
+using ABI::Windows::Foundation::Collections::IIterator;
+using ABI::Windows::Foundation::Collections::IKeyValuePair;
+using JsonField = IKeyValuePair<HSTRING, IJsonValue *>;
+
+template<class Callback>
+void VisitJsonFields( IJsonObject * object, Callback visit )
+{
+    if ( !object )
+        return;
+    ComPtr<IIterable<JsonField *>> fields;
+    ComPtr<IIterator<JsonField *>> iterator;
+    if ( FAILED( object->QueryInterface( IID_PPV_ARGS( &fields ) ) ) || FAILED( fields->First( &iterator ) ) )
+        return;
+    boolean more = false;
+    iterator->get_HasCurrent( &more );
+    while ( more )
+    {
+        ComPtr<JsonField> field;
+        HString key;
+        ComPtr<IJsonValue> value;
+        if ( FAILED( iterator->get_Current( &field ) ) || FAILED( field->get_Key( key.GetAddressOf() ) ) ||
+             FAILED( field->get_Value( &value ) ) )
+            return;
+        visit( key.GetRawBuffer( NULL ), value.Get() );
+        if ( FAILED( iterator->MoveNext( &more ) ) )
+            return;
+    }
+}
+
+// ComfyUI links are two-item arrays: an upstream node ID and a nonnegative output slot.
+wstring ComfyLink( IJsonValue * input )
+{
+    ComPtr<IJsonArray> link;
+    HString node;
+    double slot;
+    if ( !input || FAILED( input->GetArray( &link ) ) || FAILED( link->GetStringAt( 0, node.GetAddressOf() ) ) ||
+         FAILED( link->GetNumberAt( 1, &slot ) ) || slot < 0 || floor( slot ) != slot )
+        return L"";
+    ComPtr<ABI::Windows::Foundation::Collections::IVector<IJsonValue *>> values;
+    UINT32 size = 0;
+    if ( FAILED( link.As( &values ) ) || FAILED( values->get_Size( &size ) ) || size != 2 )
+        return L"";
+    return node.GetRawBuffer( NULL );
+}
+
+DWORD ReadLittleEndian32( const BYTE * bytes )
+{
+    return (DWORD) bytes[ 0 ] | ( (DWORD) bytes[ 1 ] << 8 ) |
+           ( (DWORD) bytes[ 2 ] << 16 ) | ( (DWORD) bytes[ 3 ] << 24 );
+}
+
+DWORD GzipCrc32( const BYTE * bytes, size_t length )
+{
+    DWORD crc = 0xffffffff;
+    for ( size_t i = 0; i < length; i++ )
+    {
+        crc ^= bytes[ i ];
+        for ( int bit = 0; bit < 8; bit++ )
+            crc = ( crc >> 1 ) ^ ( ( crc & 1 ) ? 0xedb88320 : 0 );
+    }
+    return ~crc;
+}
+
+bool InflateNovelAiPayload( const vector<BYTE> & payload, vector<BYTE> & json )
+{
+    if ( payload.size() < 20 || payload[ 0 ] != 0x1f || payload[ 1 ] != 0x8b ||
+         payload[ 2 ] != 8 || ( payload[ 3 ] & 0xe0 ) )
+        return false;
+    const BYTE flags = payload[ 3 ];
+    const BYTE * trailer = payload.data() + payload.size() - 8;
+    const BYTE * cursor = payload.data() + 10;
+    if ( flags & 4 )
+    {
+        if ( trailer - cursor < 2 )
+            return false;
+        size_t extra = cursor[ 0 ] | ( cursor[ 1 ] << 8 );
+        cursor += 2;
+        if ( extra > (size_t) ( trailer - cursor ) )
+            return false;
+        cursor += extra;
+    }
+    for ( BYTE flag : { 8, 16 } )
+    {
+        if ( !( flags & flag ) )
+            continue;
+        cursor = find( cursor, trailer, (BYTE) 0 );
+        if ( cursor == trailer )
+            return false;
+        cursor++;
+    }
+    if ( flags & 2 )
+    {
+        if ( trailer - cursor < 2 ||
+             ( GzipCrc32( payload.data(), cursor - payload.data() ) & 0xffff ) !=
+                  (DWORD) ( cursor[ 0 ] | ( cursor[ 1 ] << 8 ) ) )
+            return false;
+        cursor += 2;
+    }
+    const DWORD expected = ReadLittleEndian32( trailer + 4 );
+    return expected && expected <= 4 * 1024 * 1024 && cursor < trailer &&
+           Inflater( cursor, trailer - cursor, json, expected ).RunRaw() &&
+           json.size() == expected && GzipCrc32( json.data(), json.size() ) == ReadLittleEndian32( trailer );
+}
+
+void CheckNovelAiAlphaPng( const WCHAR * path )
+{
+    Microsoft::WRL::Wrappers::RoInitializeWrapper apartment( RO_INIT_MULTITHREADED );
+    if ( FAILED( apartment ) )
+        return;
+    ComPtr<IWICImagingFactory> factory;
+    ComPtr<IWICBitmapDecoder> decoder;
+    ComPtr<IWICBitmapFrameDecode> frame;
+    ComPtr<IWICFormatConverter> converter;
+    UINT width = 0, height = 0;
+    GUID container = {};
+    if ( FAILED( CoCreateInstance( CLSID_WICImagingFactory, NULL, CLSCTX_INPROC_SERVER, IID_PPV_ARGS( &factory ) ) ) ||
+         FAILED( factory->CreateDecoderFromFilename( path, NULL, GENERIC_READ, WICDecodeMetadataCacheOnDemand, &decoder ) ) ||
+         FAILED( decoder->GetContainerFormat( &container ) ) || !IsEqualGUID( container, GUID_ContainerFormatPng ) ||
+         FAILED( decoder->GetFrame( 0, &frame ) ) || FAILED( frame->GetSize( &width, &height ) ) ||
+         !width || !height || (unsigned __int64) width * height > 16 * 1024 * 1024 ||
+         FAILED( factory->CreateFormatConverter( &converter ) ) ||
+         FAILED( converter->Initialize( frame.Get(), GUID_WICPixelFormat32bppBGRA, WICBitmapDitherTypeNone, NULL,
+                                        0, WICBitmapPaletteTypeCustom ) ) )
+        return;
+
+    const size_t pixelCount = (size_t) width * height;
+    const char magic[] = "stealth_pngcomp";
+    const size_t headerLength = sizeof magic - 1 + 4;
+    if ( pixelCount < headerLength * 8 )
+        return;
+    vector<BYTE> pixels( pixelCount * 4 );
+    if ( FAILED( converter->CopyPixels( NULL, width * 4, (UINT) pixels.size(), pixels.data() ) ) )
+        return;
+    size_t bit = 0;
+    auto nextByte = [&]()
+    {
+        BYTE value = 0;
+        for ( int n = 0; n < 8; n++, bit++ )
+        {
+            // NovelAI packs alpha bits most-significant first, walking down each column.
+            const size_t pixel = ( bit % height ) * width + bit / height;
+            value = (BYTE) ( ( value << 1 ) | ( pixels[ pixel * 4 + 3 ] & 1 ) );
+        }
+        return value;
+    };
+    for ( size_t i = 0; i < sizeof magic - 1; i++ )
+        if ( nextByte() != (BYTE) magic[ i ] )
+            return;
+    DWORD bits = 0;
+    for ( int n = 0; n < 4; n++ )
+        bits = ( bits << 8 ) | nextByte();
+    if ( bits % 8 || bits > pixelCount - bit )
+        return;
+    vector<BYTE> payload( bits / 8 );
+    for ( BYTE & byte : payload )
+        byte = nextByte();
+    vector<BYTE> json;
+    if ( !InflateNovelAiPayload( payload, json ) )
+        return;
+    const auto metadata = ReadJsonObject( json.data(), json.size() );
+    if ( !metadata )
+        return;
+    const auto software = CredentialString( metadata.Get(), L"Software" );
+    const auto source = CredentialString( metadata.Get(), L"Source" );
+    if ( software == L"NovelAI" || source == L"NovelAI Diffusion" || source.find( L"NovelAI Diffusion " ) == 0 )
+        ReportGenerativeMetadata( "PNG alpha channel", "NovelAI hidden metadata (signature not verified)" );
+}
+
+bool HasComfySavedGeneration( const BYTE * value, size_t length )
+{
+    while ( length && value[ length - 1 ] == 0 )
+        length--;
+    if ( !length || length > 4 * 1024 * 1024 )
+        return false;
+    Microsoft::WRL::Wrappers::RoInitializeWrapper apartment( RO_INIT_MULTITHREADED );
+    if ( FAILED( apartment ) )
+        return false;
+    const auto graph = ReadJsonObject( value, length, true );
+    if ( !graph )
+        return false;
+
+    // Follow dependencies forward from recognized samplers. Each save node must
+    // have a generated image input because the metadata doesn't identify the writer.
+    map<wstring, vector<wstring>> consumers;
+    set<wstring> generated;
+    vector<wstring> pending;
+    vector<wstring> savedImages;
+    VisitJsonFields( graph.Get(), [&]( const WCHAR * id, IJsonValue * value )
+    {
+        ComPtr<IJsonObject> node;
+        if ( FAILED( value->GetObject( &node ) ) )
+            return;
+        const auto type = CredentialString( node.Get(), L"class_type" );
+        const auto inputs = CredentialObject( node.Get(), L"inputs" );
+        if ( type.empty() || !inputs )
+            return;
+
+        if ( type == L"SaveImage" || type == L"SaveImageAdvanced" ||
+             type == L"SaveAnimatedPNG" || type == L"SaveAnimatedWEBP" )
+        {
+            ComPtr<IJsonValue> images;
+            inputs->GetNamedValue( HStringReference( L"images" ).Get(), &images );
+            savedImages.push_back( ComfyLink( images.Get() ) );
+            return;
+        }
+        if ( type == L"KSampler" || type == L"KSamplerAdvanced" ||
+             type == L"SamplerCustom" || type == L"SamplerCustomAdvanced" )
+        {
+            double denoise = 1, steps = 1;
+            inputs->GetNamedNumber( HStringReference( L"denoise" ).Get(), &denoise );
+            inputs->GetNamedNumber( HStringReference( L"steps" ).Get(), &steps );
+            double start = 0, end = steps;
+            inputs->GetNamedNumber( HStringReference( L"start_at_step" ).Get(), &start );
+            inputs->GetNamedNumber( HStringReference( L"end_at_step" ).Get(), &end );
+            if ( denoise > 0 && steps > 0 && start < min( end, steps ) && generated.insert( id ).second )
+                pending.push_back( id );
+        }
+        VisitJsonFields( inputs.Get(), [&]( const WCHAR * field, IJsonValue * input )
+        {
+            static const WCHAR * mediaInputs[] =
+            {
+                L"image", L"images", L"pixels", L"samples", L"latent", L"latent_image",
+                L"image1", L"image2", L"image_a", L"image_b", L"image_1", L"image_2",
+                L"source", L"destination", L"mask"
+            };
+            if ( none_of( begin( mediaInputs ), end( mediaInputs ), [&]( const WCHAR * name )
+                          { return 0 == wcscmp( field, name ); } ) )
+                return;
+            const auto upstream = ComfyLink( input );
+            if ( !upstream.empty() )
+                consumers[ upstream ].push_back( id );
+        } );
+    } );
+    for ( size_t i = 0; i < pending.size(); i++ )
+    {
+        const auto edges = consumers.find( pending[ i ] );
+        if ( edges != consumers.end() )
+            for ( const auto & dependent : edges->second )
+                if ( generated.insert( dependent ).second )
+                    pending.push_back( dependent );
+    }
+    return !savedImages.empty() && all_of( savedImages.begin(), savedImages.end(), [&]( const wstring & id )
+    {
+        return generated.count( id ) != 0;
+    } );
+}
+
+bool HasCredentialStatus( IJsonObject * validation, const WCHAR * code, const wstring & url = L"" )
+{
+    for ( const auto & status : CredentialList( validation, L"success" ) )
+        if ( CredentialString( status.Get(), L"code" ) == code &&
+             ( url.empty() || CredentialString( status.Get(), L"url" ) == url ) )
+            return true;
+    return false;
+}
+
+int CredentialSourceType( const wstring & uri )
+{
+    const size_t start = uri.find( L"cv.iptc.org/newscodes/digitalsourcetype/" );
+    if ( ( start != 7 || uri.compare( 0, 7, L"http://" ) != 0 ) &&
+         ( start != 8 || uri.compare( 0, 8, L"https://" ) != 0 ) )
+        return 0;
+    const wstring code = uri.substr( start + wcslen( L"cv.iptc.org/newscodes/digitalsourcetype/" ) );
+    if ( code == L"trainedAlgorithmicMedia" ) return 1;
+    if ( code == L"compositeWithTrainedAlgorithmicMedia" ) return 2;
+    if ( code == L"digitalCapture" ) return 3;
+    return 0;
+}
+
+struct CredentialActions
+{
+    bool generated = false;
+    bool generativeEdit = false;
+    bool captureOnly = false;
+};
+
+CredentialActions ReadCredentialActions( IJsonObject * manifest )
+{
+    CredentialActions evidence;
+    size_t count = 0;
+    for ( const auto & assertion : CredentialList( manifest, L"assertions" ) )
+    {
+        const auto label = CredentialString( assertion.Get(), L"label" );
+        if ( label != L"c2pa.actions" && label != L"c2pa.actions.v2" )
+            continue;
+        const auto data = CredentialObject( assertion.Get(), L"data" );
+        for ( const auto & action : CredentialList( data.Get(), L"actions" ) )
+        {
+            count++;
+            const auto name = CredentialString( action.Get(), L"action" );
+            const int source = CredentialSourceType( CredentialString( action.Get(), L"digitalSourceType" ) );
+            evidence.generated |= source == 1 && name == L"c2pa.created";
+            evidence.generativeEdit |= source == 2 || ( source == 1 && name != L"c2pa.created" );
+            evidence.captureOnly |= source == 3 && name == L"c2pa.created";
+        }
+    }
+    evidence.captureOnly &= count == 1;
+    return evidence;
+}
+
+bool HasGenerativeCredentialIngredient( IJsonObject * manifests, const wstring & active,
+                                        IJsonObject * validation )
+{
+    const auto deltas = CredentialList( validation, L"ingredientDeltas" );
+    vector<wstring> visited{ active };
+    for ( size_t i = 0; i < visited.size(); i++ )
+    {
+        const wstring label = visited[ i ];
+        const auto manifest = CredentialObject( manifests, label.c_str() );
+        for ( const auto & ingredient : CredentialList( manifest.Get(), L"ingredients" ) )
+        {
+            const auto relation = CredentialString( ingredient.Get(), L"relationship" );
+            if ( relation != L"parentOf" && relation != L"componentOf" )
+                continue;
+            const auto child = CredentialString( ingredient.Get(), L"active_manifest" );
+            if ( child.empty() )
+            {
+                int source = CredentialSourceType( CredentialString( ingredient.Get(), L"digital_source_type" ) );
+                if ( !source )
+                    source = CredentialSourceType( CredentialString( ingredient.Get(), L"digitalSourceType" ) );
+                if ( source == 1 || source == 2 )
+                    return true;
+                continue;
+            }
+            const auto ingredientLabel = CredentialString( ingredient.Get(), L"label" );
+            const wstring assertionUri = L"self#jumbf=/c2pa/" + label + L"/c2pa.assertions/" + ingredientLabel;
+            const wstring childUri = L"self#jumbf=/c2pa/" + child;
+            for ( const auto & delta : deltas )
+            {
+                if ( CredentialString( delta.Get(), L"ingredientAssertionURI" ) != assertionUri )
+                    continue;
+                const auto statuses = CredentialObject( delta.Get(), L"validationDeltas" );
+                if ( !CredentialList( statuses.Get(), L"failure" ).empty() ||
+                     !HasCredentialStatus( statuses.Get(), L"ingredient.manifest.validated", childUri ) ||
+                     !HasCredentialStatus( statuses.Get(), L"claimSignature.validated", childUri + L"/c2pa.signature" ) ||
+                     !HasCredentialStatus( statuses.Get(), L"signingCredential.trusted", childUri + L"/c2pa.signature" ) )
+                    continue;
+                const auto linked = CredentialObject( manifests, child.c_str() );
+                const auto actions = ReadCredentialActions( linked.Get() );
+                if ( actions.generated || actions.generativeEdit )
+                    return true;
+                if ( linked && find( visited.begin(), visited.end(), child ) == visited.end() )
+                    visited.push_back( child );
+                break;
+            }
+        }
+    }
+    return false;
+}
+
+const char * SummarizeCredentialReport( const string & report )
+{
+    if ( !report.empty() )
+    {
+        Microsoft::WRL::Wrappers::RoInitializeWrapper apartment( RO_INIT_MULTITHREADED );
+        const auto root = SUCCEEDED( apartment ) ?
+                          ReadJsonObject( (const BYTE *) report.data(), report.size() ) : ComPtr<IJsonObject>();
+        if ( root )
+        {
+            const auto name = CredentialString( root.Get(), L"active_manifest" );
+            const auto manifests = CredentialObject( root.Get(), L"manifests" );
+            const auto active = CredentialObject( manifests.Get(), name.c_str() );
+            const auto validation = CredentialObject( root.Get(), L"validation_results" );
+            const auto status = CredentialObject( validation.Get(), L"activeManifest" );
+            const auto state = CredentialString( root.Get(), L"validation_state" );
+            const auto failures = CredentialList( status.Get(), L"failure" );
+            const bool binding = HasCredentialStatus( status.Get(), L"assertion.dataHash.match" ) ||
+                                 HasCredentialStatus( status.Get(), L"assertion.bmffHash.match" ) ||
+                                 HasCredentialStatus( status.Get(), L"assertion.boxesHash.match" );
+            if ( !active || state == L"Invalid" || !binding ||
+                 !HasCredentialStatus( status.Get(), L"claimSignature.validated" ) ||
+                 any_of( failures.begin(), failures.end(), []( const ComPtr<IJsonObject> & failure )
+                 {
+                     return CredentialString( failure.Get(), L"code" ) != L"signingCredential.untrusted";
+                 } ) )
+                return "Invalid or incompletely validated credential";
+            if ( state != L"Trusted" || !failures.empty() ||
+                 !HasCredentialStatus( status.Get(), L"signingCredential.trusted" ) )
+                return "Valid signature and asset binding; signer trust not established";
+            const auto actions = ReadCredentialActions( active.Get() );
+            if ( actions.generativeEdit )
+                return "Trusted credential records a generative edit";
+            if ( actions.generated )
+                return "Trusted credential records AI generation";
+            if ( HasGenerativeCredentialIngredient( manifests.Get(), name, validation.Get() ) )
+                return "Trusted credential records a generative ingredient";
+            if ( actions.captureOnly && CredentialList( active.Get(), L"ingredients" ).empty() )
+                return "Trusted capture claim bound to the current asset";
+            return "Trusted credential without an explicit generative or capture-only claim";
+        }
+    }
+    return "Credential report could not be interpreted";
+}
+
+bool PrintImgenaiCredentials( const WCHAR * imagePath, const WCHAR * credentialSettings,
+                             const WCHAR * detachedManifest, bool summaryOnly )
 {
     WCHAR verifier[ MAX_PATH + 1 ] = {};
     DWORD length = GetModuleFileName( NULL, verifier, _countof( verifier ) );
@@ -8632,28 +9233,88 @@ bool PrintImgenaiCredentials( const WCHAR * imagePath, const WCHAR * credentialS
         return false;
     }
 
+    if ( *detachedManifest && ( !PathFileExists( detachedManifest ) || PathIsDirectory( detachedManifest ) ) )
+    {
+        printf( "ERROR: The detached C2PA manifest file was not found.\n" );
+        return false;
+    }
+
     wstring command = L"\"" + wstring( verifier ) + L"\" \"" + imagePath +
                       L"\" --settings \"" + credentialSettings + L"\"";
+    if ( *detachedManifest )
+        command += L" --external-manifest \"" + wstring( detachedManifest ) + L"\"";
     vector<WCHAR> arguments( command.begin(), command.end() );
     arguments.push_back( 0 );
+    SECURITY_ATTRIBUTES security = { sizeof security, NULL, TRUE };
+    HANDLE readPipe = NULL, writePipe = NULL;
+    if ( !CreatePipe( &readPipe, &writePipe, &security, 0 ) ||
+         !SetHandleInformation( readPipe, HANDLE_FLAG_INHERIT, 0 ) )
+    {
+        if ( readPipe ) CloseHandle( readPipe );
+        if ( writePipe ) CloseHandle( writePipe );
+        printf( "ERROR: Could not create the C2PA report pipe.\n" );
+        return false;
+    }
+
     STARTUPINFO startup = {};
     startup.cb = sizeof startup;
+    startup.dwFlags = STARTF_USESTDHANDLES;
+    startup.hStdInput = GetStdHandle( STD_INPUT_HANDLE );
+    startup.hStdOutput = writePipe;
+    startup.hStdError = writePipe;
     PROCESS_INFORMATION process = {};
-    printf( "C2PA validation report for the input image:\n" );
-    fflush( stdout );
-    if ( !CreateProcess( verifier, arguments.data(), NULL, NULL, TRUE, 0, NULL, NULL, &startup, &process ) )
+    const BOOL started = CreateProcess( verifier, arguments.data(), NULL, NULL, TRUE, 0, NULL, NULL, &startup, &process );
+    CloseHandle( writePipe );
+    if ( !started )
     {
-        printf( "ERROR: Could not launch c2patool.exe (%lu).\n", GetLastError() );
+        CloseHandle( readPipe );
+        printf( "ERROR: Could not launch c2patool.exe.\n" );
         return false;
     }
     CloseHandle( process.hThread );
+
+    string report;
+    bool tooLarge = false;
+    char buffer[ 8192 ];
+    DWORD bytes;
+    while ( ReadFile( readPipe, buffer, sizeof buffer, &bytes, NULL ) && bytes )
+    {
+        if ( report.size() + bytes > MaxMetadataScanBytes )
+            tooLarge = true;
+        if ( !tooLarge )
+            report.append( buffer, bytes );
+    }
+    CloseHandle( readPipe );
     DWORD exitCode = 1;
-    bool success = WAIT_OBJECT_0 == WaitForSingleObject( process.hProcess, INFINITE ) &&
-                   GetExitCodeProcess( process.hProcess, &exitCode ) && exitCode == 0;
+    const bool success = WAIT_OBJECT_0 == WaitForSingleObject( process.hProcess, INFINITE ) &&
+                         GetExitCodeProcess( process.hProcess, &exitCode ) && exitCode == 0;
     CloseHandle( process.hProcess );
-    if ( !success )
-        printf( "C2PA report unavailable; c2patool did not complete successfully.\n" );
-    return success;
+    if ( !success || tooLarge )
+    {
+        if ( !*detachedManifest && !tooLarge && report.find( "Error: No claim found" ) == 0 )
+        {
+            printf( "C2PA RESULT: No credential found\n" );
+            return true;
+        }
+        if ( !tooLarge && report.find( "Error: Unsupported file type" ) == 0 )
+        {
+            printf( "C2PA RESULT: Unsupported format for credential verification\n" );
+            return true;
+        }
+        printf( "ERROR: C2PA verification failed%s.\n", tooLarge ? " (report exceeded the size limit)" : "" );
+        if ( !tooLarge )
+            fputs( report.c_str(), stdout );
+        return false;
+    }
+    if ( *detachedManifest )
+        printf( "C2PA source: explicitly supplied detached manifest\n" );
+    printf( "C2PA RESULT: %s\n", SummarizeCredentialReport( report ) );
+    if ( !summaryOnly )
+    {
+        printf( "C2PA validation report for the input image:\n" );
+        fputs( report.c_str(), stdout );
+    }
+    return true;
 }
 
 void PrintImgenaiAssessment()
@@ -11600,14 +12261,14 @@ void EnumerateIFD0( int depth, __int64 IFDOffset, __int64 headerBase, bool littl
                 GetString( stringOffset + headerBase, g_acMake, _countof( g_acMake ), head.count );
 
                 prf( "Make:                                 %s\n", g_acMake );
-                CheckComfyUIExifField( "Make", g_acMake );
+                CheckComfyUIExifField( "Make", g_acMake, (__int64) stringOffset + headerBase, head.count );
             }
             else if ( 272 == head.id && 2 == head.type )
             {
                 ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                 GetString( stringOffset + headerBase, g_acModel, _countof( g_acModel ), head.count );
                 prf( "Model:                                %s\n", g_acModel );
-                CheckComfyUIExifField( "Model", g_acModel );
+                CheckComfyUIExifField( "Model", g_acModel, (__int64) stringOffset + headerBase, head.count );
 
                 WCHAR awcModel[ 100 ];
                 mbstowcs( awcModel, g_acModel, _countof( awcModel ) );
@@ -12713,6 +13374,9 @@ __int64 ParsePNG()
                 return 0;
             }
 
+#ifdef IMGENAI_ONLY
+            g_imgenaiRgbaPng = bitDepth == 8 && colorType == 6;
+#endif
             prf( "image width:           %16u\n", width );
             prf( "image height:          %16u\n", height );
             prf( "bit depth:             %16u\n", bitDepth );
@@ -17907,6 +18571,8 @@ extern "C" int __cdecl wmain( int argc, WCHAR * argv[] )
 #ifdef IMGENAI_ONLY
     WCHAR awcSanitizeOutputBase[ MAX_PATH + 1 ] = {};
     WCHAR awcCredentialSettings[ MAX_PATH + 1 ] = {};
+    bool credentialSummaryOnly = false;
+    WCHAR awcDetachedManifest[ MAX_PATH + 1 ] = {};
 #endif
 
     int iArg = 1;
@@ -17937,10 +18603,18 @@ extern "C" int __cdecl wmain( int argc, WCHAR * argv[] )
                g_FullInformation = true;
 #endif
 #ifdef IMGENAI_ONLY
-           else if ( 'c' == a1 )
+           else if ( 'q' == a1 && 0 == pwcArg[ 2 ] )
+                credentialSummaryOnly = true;
+            else if ( 'c' == a1 )
             {
                 if ( ':' != pwcArg[ 2 ] || 0 == pwcArg[ 3 ] ||
                      !_wfullpath( awcCredentialSettings, pwcArg + 3, _countof( awcCredentialSettings ) ) )
+                    Usage();
+            }
+            else if ( 'm' == a1 )
+            {
+                if ( ':' != pwcArg[ 2 ] || 0 == pwcArg[ 3 ] || awcDetachedManifest[ 0 ] ||
+                     !_wfullpath( awcDetachedManifest, pwcArg + 3, _countof( awcDetachedManifest ) ) )
                     Usage();
             }
             else if ( 's' == a1 )
@@ -17964,6 +18638,10 @@ extern "C" int __cdecl wmain( int argc, WCHAR * argv[] )
        iArg++;
     }
 
+#ifdef IMGENAI_ONLY
+    if ( ( credentialSummaryOnly || awcDetachedManifest[ 0 ] ) && !awcCredentialSettings[ 0 ] )
+        Usage();
+#endif
     if ( 0 == awcFilename[0] )
         Usage();
 
@@ -18067,10 +18745,12 @@ extern "C" int __cdecl wmain( int argc, WCHAR * argv[] )
 #ifdef IMGENAI_ONLY
     if ( 0 != awcSanitizeOutputBase[ 0 ] )
         printf( "Assessment below applies to the input image.\n" );
+    if ( !g_imgenaiInputError && g_imgenaiRgbaPng )
+        CheckNovelAiAlphaPng( awcFilename );
     PrintImgenaiAssessment();
     if ( g_imgenaiInputError )
         return 2;
-    if ( awcCredentialSettings[ 0 ] && !PrintImgenaiCredentials( awcFilename, awcCredentialSettings ) )
+    if ( awcCredentialSettings[ 0 ] && !PrintImgenaiCredentials( awcFilename, awcCredentialSettings, awcDetachedManifest, credentialSummaryOnly ) )
         return 2;
     if ( 0 != awcSanitizeOutputBase[ 0 ] &&
          !WriteSanitizedJPEG( awcFilename, awcSanitizeOutputBase ) )
