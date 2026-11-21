@@ -225,58 +225,96 @@ YCbCrPositioning:                     1
 
 ### FLAC
 
+id prints Vorbis comments, including multi-line lyrics, and the metadata of the embedded cover image.
+
 ```
-parsing input file C:\Users\david\OneDrive\id\wake.flac
-file size:                     31983601
+parsing input file F:\flac\mini trees\always in motion\01 Moments in Between.flac
+file size:                     38054700
 mimetype:                             audio/flac
 Stream Info:
   Minimum block size               4096
   Maximum block size               4096
-  Minimum frame size                 16
-  Maximum frame size              13983
-  Sample rate per sec             44100
+  Minimum frame size               5335
+  Maximum frame size              21950
+  Sample rate per sec             48000
   Channel count                       2
-  Bits per sample                    16
-  Samples                      11725896
-  Length in min:sec                4:25
-  MD5 signature                       6e4748c30445eaee2c09a452becd9066
+  Bits per sample                    24
+  Samples                       8190689
+  Length in min:sec                2:50
+  MD5 signature                       e344c343c1f4823a023f9467db6ca870
 Comments:
   Vendor                              reference libFLAC 1.3.2 20170101
-  Album                               Solid State
-  Album Artist                        Jonathan Coulton
-  Artist                              Jonathan Coulton
-  Encoder                             xACT 2.39
-  Title                               Wake Up
+  Title                               Moments in Between
+  Artist                              Mini Trees
+  Year                                2021
+  Comment                             Visit https://minitrees.bandcamp.com
+  Album                               Always In Motion
   Track                               1
-  Total Tracks                        17
-  Year                                2017
+  Album Artist                        Mini Trees
+  Lyrics
+Color shades of glass
+Faded with the tide
+Calls me back
+
+Drifting further toward
+Nothing I have known before
+
+Brighter in the morning
+Feel it start to calm 
+You're taking my hand and you're pulling me on
+Leave the ground beneath me, light ethereal scene
+Can you tell me what more are we waiting for?
+
+How long are all the moments in between it?
+
+Dreaming again
+But I know that it's all in my head 
+Dreaming again
+
+Running, hopping fence
+Carrying the thought
+Is it all a myth?
+
+Reaching further forward
+Never wanted something more
+
+Brighter in the morning
+Feel it start to calm
+You're taking my hand and you're pulling me on
+Leave the ground beneath me, light ethereal scene
+Can you tell me what more are we waiting for?
+
+How long til you're taking me there?
+I'm growing wearier here
+But I know it's all the moments in between it
 Picture:
   Picture type                        3 Cover (front)
-  mime type                           image/png
+  mime type                           image/jpeg
   Description
-  Width                            2110
-  Height                           2110
-  Bits per pixel                     32
+  Width                             700
+  Height                            700
+  Bits per pixel                     24
   Indexed colors                      0
-  Image size                    3546480
+  Image size                     114149
 Embedded image metadata:
-file size:                      3546480
-mimetype:                             image/png
-image width:                       2110
-image height:                      2110
-bit depth:                            8
-color type:                           2 (RGB)
-compression method:                   0 (deflate)
-filter method:                        0 (none)
-interlace method:                     0 (sequential)
-sRGB rendering intent:                0 (perceptual)
-pixels per unit X:                11811
-pixels per unit Y:                11811
-unit specifier:                       1 (meters)
-resolution:            300.00 x 300.00 dpi
-IDAT segments:                      217
-IDAT data bytes:                3543797
-Embedded image found: offset 786 length 3546480  embedded image header: 0xa1a0a0d474e5089; image is likely png
+file size:                       114149
+mimetype:                             image/jpeg
+id marker:                            JFIF
+major version:                        1
+minor version:                        1
+units:                                dots/inch
+x density:                           72
+y density:                           72
+quantization tables:                 1 (16-bit precision: no)
+quantization tables:                 1 (16-bit precision: no)
+start of frame:                     192 (0xc0) (baseline DCT process frame marker)
+bits per sample:                      8
+image height:                       700
+image width:                        700
+color components:                     3 (YCbCr)
+compression:                          YCbCr4:4:4 (1 1)
+number of components:                 3
+Embedded image found: offset 1504 length 114149  embedded image header: 0x464a1000e0ffd8ff; image is likely jpg
 ```
 
 ### WAV
