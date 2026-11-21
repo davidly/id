@@ -7334,33 +7334,70 @@ void PrintXMPField( const char * data, size_t length, const char * name, const c
 
     if ( !field )
     {
+        // Element form: <name>value</name> or <name><rdf:Seq><rdf:li>value</rdf:li>...</name>.
+        // Only look inside this element, and skip empty or self-closing list items.
         key = string( "<" ) + name;
-        field = strstr( data, key.c_str() );
-        if ( field )
+        const char * end = data + length;
+        for ( field = strstr( data, key.c_str() ); field; field = strstr( field + 1, key.c_str() ) )
         {
-            const char * tagEnd = (const char *) memchr( field, '>', length - min( length, (size_t) ( field - data ) ) );
-            if ( tagEnd )
-            {
-                field = tagEnd + 1;
-                const char * listItem = strstr( field, "<rdf:li" );
-                if ( listItem )
-                {
-                    const char * listItemEnd = strchr( listItem, '>' );
-                    if ( listItemEnd )
-                        field = listItemEnd + 1;
-                }
-                terminator = '<';
-            }
-            else
-                field = NULL;
+            char next = field[ key.size() ];
+            if ( '>' == next || '/' == next || isspace( (unsigned char) next ) )
+                break;
         }
+        if ( !field || field >= end )
+            return;
+
+        const char * tagEnd = (const char *) memchr( field, '>', end - field );
+        if ( !tagEnd || '/' == tagEnd[ -1 ] )
+            return;
+
+        const char * content = tagEnd + 1;
+        string closing = string( "</" ) + name;
+        const char * contentEnd = strstr( content, closing.c_str() );
+        if ( !contentEnd || contentEnd > end )
+            contentEnd = end;
+
+        string inner( content, contentEnd - content );
+        size_t value = 0;
+        size_t valueEnd = inner.size();
+        if ( string::npos != inner.find( "<rdf:li" ) )
+        {
+            value = string::npos;
+            for ( size_t item = inner.find( "<rdf:li" ); string::npos != item; item = inner.find( "<rdf:li", item + 1 ) )
+            {
+                size_t itemTagEnd = inner.find( '>', item );
+                if ( string::npos == itemTagEnd )
+                    break;
+                if ( '/' == inner[ itemTagEnd - 1 ] )
+                    continue;
+                size_t itemEnd = inner.find( '<', itemTagEnd + 1 );
+                if ( string::npos == itemEnd )
+                    itemEnd = inner.size();
+                size_t first = inner.find_first_not_of( " \t\r\n", itemTagEnd + 1 );
+                if ( string::npos != first && first < itemEnd )
+                {
+                    value = first;
+                    valueEnd = itemEnd;
+                    break;
+                }
+            }
+            if ( string::npos == value )
+                return;
+        }
+        else if ( string::npos != inner.find( '<' ) )
+            valueEnd = inner.find( '<' );
+
+        while ( value < valueEnd && isspace( (unsigned char) inner[ value ] ) )
+            value++;
+        while ( valueEnd > value && isspace( (unsigned char) inner[ valueEnd - 1 ] ) )
+            valueEnd--;
+
+        if ( valueEnd > value )
+            prf( "  %-22s: %.*s\n", label, (int) min( valueEnd - value, (size_t) 200 ), inner.data() + value );
+        return;
     }
 
-    if ( !field )
-        return;
-
-    if ( '"' == terminator )
-        field += key.size();
+    field += key.size();
     size_t available = length - min( length, (size_t) ( field - data ) );
     size_t valueLength = 0;
     while ( valueLength < available && field[ valueLength ] != terminator )

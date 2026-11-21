@@ -1,340 +1,434 @@
 # id
-Image Data. Windows command line app to show image (and audio) metadata for files.
 
-I encourage you to use exiftool, not id. It's much better in every possible way. ID was a way for me to learn about file formats.
+Image Data. A Windows command-line app that shows metadata for image, audio and video files.
+
+I encourage you to use exiftool, not id. It's much better in every possible way. id was a way for me to learn about file formats.
 
 The number of hacks per line of code is staggering. Apple, Microsoft, Leica, Panasonic, Olympus, Canon, Nikon, Ricoh, Fujifilm,
 and more conspire to ignore standards and make life difficult.
 
-This tool can be used to extract JPG and PNG images embedded in raw, FLAC, and MP3 files.
+id can also extract the images embedded in raw, FLAC and MP3 files. These are usually JPG or PNG.
 
-Usage:
+The same source builds a second tool, `imgenai`, which reports whether an image's metadata indicates generative AI use. See [imgenai](#imgenai) below.
 
-    usage: id [-e:name.jpg] [-f] [filename]
-      image data enumeration
-           filename       filename of the image or audio file to check
-           -f             Full information is displayed (all binary data, all field values, etc.)
-           -e:<output>    Extract highest-resolution embedded image (if one exists) to the file specified.
+## Building
 
-      examples:
-          id img_0178.cr2
-          id -f img_0178.cr2
-          id img_0178.cr2 /e:178.jpg
-          id track.flac /e:track.png
+Both tools build with the Microsoft C++ compiler for x64. Run the commands from an x64 Visual Studio Developer Command Prompt (or after running `vcvars64.bat`) in the repository directory. The source is `id.cxx` plus `djl_strm.hxx`. The required Windows libraries are linked with `#pragma comment`.
 
-      notes:
-          Most image formats are supported: CR2, NEF, RW2, DNG, PNG, TIFF, JPG, ARW, HEIC, HIF, CR3, BMP, ORF
-          Some non-image formats are supported: FLAC, WAV, MP3, WMA, WMV
-          Some image formats aren't supported yet: presumably many others
-          By default, just the first 256 bytes of binary data is displayed. Use -f for all data
-          Embedded images may be JPG, PNG, HIF, or some other format
-          Fujifilm RAF files are only supported in that the embedded JPG is parsed
+To build `id.exe`, run `m.bat`, which runs:
 
-JPG sample:
+```
+cl /nologo id.cxx /I.\ /O2i /EHac /Zi /Gy /D_AMD64_ /link /incremental:no /OPT:REF
+```
 
-    C:\>id 07_ilie.jpg
-    parsing input file C:\07_ilie.jpg
-    file size: 61123
-    mimetype:                             image/jpeg
-    id marker:                            JFIF
-    major version:                        1
-    minor version:                        1
-    units:                                dots/inch
-    x density:                           72
-    y density:                           72
-    start of frame:                     192 (0xc0) (baseline DCT process frame marker)
-    bits per sample:                      8
-    image height:                       700
-    image width:                        700
-    color components:                     3 (YCbCr)
-    compression:                          YCbCr4:4:4 (1 1)
-    number of components:                 3
+To build `imgenai.exe`, define `IMGENAI_ONLY`. The `/Fo`, `/Fd` and `/PDB` options keep its object and symbol files separate from those of `id.exe`:
 
-Canon CR3 sample:
+```
+cl /nologo /D IMGENAI_ONLY id.cxx /I.\ /O2i /EHac /Zi /Gy /Fo:imgenai.obj /Fd:imgenai-vc.pdb /Fe:imgenai.exe /link /incremental:no /OPT:REF /PDB:imgenai.pdb
+```
 
-    C:\Users\david\OneDrive\id>id R5_00707.CR3
-    parsing input file C:\Users\david\OneDrive\id\R5_00707.CR3
-    file size: 11565650
-    mimetype:                             image/x-canon-cr3
-    ImageWidth:                           8192
-    ImageHeight:                          5464
-    BitsPerSample:                        8, 8, 8
-    Compression:                          6 (JPEG (old-style))
-    Make:                                 Canon
-    Model:                                Canon EOS R5
-    Orientation:                          1 (horizontal (normal))
-    XResolution:                          72 / 1 = 72.000000
-    YResolution:                          72 / 1 = 72.000000
-    ResolutionUnit:                       inches (2)
-    DateTime:                             2020:10:24 16:57:01
-    Artist:
-    Copyright:
-    Canon CR3 Exif IFD:
-    exif IFDOffset 8, NumTags 39
-    exif ExposureTime:                  4 / 1 = 4.000000
-    exif FNumber:                       8 / 1 = 8.000000
-    exif ExposureProgram                manual
-    exif ISO                            100
-    exif Sensitivity Type               recommended exposure index
-    exif Recommended Exposure Index     100
-    exif ExifVersion                    4
-    exif DateTimeOriginal:              2020:10:24 16:57:01
-    exif CreateDate:                    2020:10:24 16:57:01
-    exif Offset Time:                   -08:00
-    exif Offset Time Original:          -08:00
-    exif Offset Time Digital:           -08:00
-    exif ComponentsConfiguration:       4 bytes
-              0xa2  00 00 00 18                                                                                      ....
-    exif ShutterSpeedValue:             -131072 / 65536 = -2.000000
-    exif ApertureValue:                 393216 / 65536 = 6.000000
-    exif ExposureCompensation:          0 / 1 = 0.000000
-    exif MeteringMode:                  5
-    exif Flash:                         0 - no flash
-    exif FocalLength:                   11 / 1 = 11.000000
-    exif User Comment:
-    exif SubSecTime:                    83
-    exif SubSecTimeOriginal:            83
-    exif SubSecTimeDigitized:           83
-    exif FlashpixVersion                0x30303130
-    exif Color Space                    sRGB
-    exif PixelWidth                     8192
-    exif PixelHeight                    5464
-    exif XResolution:                   8192000 / 1419 = 5773.079634
-    exif YResolution:                   5464000 / 947 = 5769.799366
-    exif SensorSizeUnit:                2 (inches)
-    exif Custom Rendered:               normal
-    exif Exposure Mode:                 manual
-    exif White Balance:                 auto
-    exif Scene Capture Type:            standard
-    exif Owner Name:
-    exif Body Serial Number:            022021002580
-    exif Lens min/max FL and Aperture:  11.00, 24.00, 0.00, 0.00
-    exif Lens Model:                    EF11-24mm f/4L USM
-    exif Lens Serial Number:            2400000736
-    exif (Computed) sensor WxH:         36.042600, 24.053800
-    Canon CR3 Makernotes:
-    makernote IFDOffset 8==0x8, NumTags 56, headerBase 2384==0x950, effective 0x958
-    makernote tag 0 ID 1==0x1, type 3, count 55, offset/value 686
-    makernote tag 1 ID 2==0x2, type 3, count 4, offset/value 796
-    makernote tag 2 ID 3==0x3, type 3, count 4, offset/value 804
-    makernote tag 3 ID 4==0x4, type 3, count 34, offset/value 812
-    makernote tag 4 ID 6==0x6, type 2, count 13, offset/value 880 Canon EOS R5
-    makernote tag 5 ID 7==0x7, type 2, count 24, offset/value 944 Firmware Version 1.1.0
-    makernote tag 6 ID 9==0x9, type 2, count 32, offset/value 968
-    makernote tag 7 ID 16==0x10, type 4, count 1, offset/value -2147482591
-    makernote tag 8 ID 19==0x13, type 3, count 4, offset/value 1000
-    makernote tag 9 ID 25==0x19, type 3, count 1, offset/value 1
-    makernote tag 10 ID 38==0x26, type 3, count 4419, offset/value 1008
-    makernote tag 11 ID 40==0x28, type 1, count 16, offset/value 9846
-    makernote tag 12 ID 50==0x32, type 4, count 11, offset/value 9862
-    makernote tag 13 ID 51==0x33, type 4, count 4, offset/value 9906
-    makernote tag 14 ID 53==0x35, type 4, count 4, offset/value 9922
-    makernote tag 15 ID 56==0x38, type 7, count 76, offset/value 9938
-            0x3022  4c 00 00 00 4c 50 2d 45 36 4e 48 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  L...LP-E6NH.....................
-            0x3042  00 00 00 00 00 00 00 00 00 00 00 00 01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  ................................
-            0x3062  00 00 00 00 00 00 00 00 00 00 00 00                                                              ............
-    makernote tag 16 ID 63==0x3f, type 4, count 1, offset/value 17
-    makernote tag 17 ID 147==0x93, type 3, count 77, offset/value 10014
-    makernote tag 18 ID 149==0x95, type 2, count 138, offset/value 10168 EF11-24mm f/4L USM
-    makernote tag 19 ID 150==0x96, type 2, count 16, offset/value 10306 FQ0020415
-    makernote tag 20 ID 151==0x97, type 7, count 1024, offset/value 10322
-            0x31a2  00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  ................................
-            0x31c2  00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  ................................
-            0x31e2  00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  ................................
-            0x3202  00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  ................................
-            0x3222  00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  ................................
-            0x3242  00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  ................................
-            0x3262  00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  ................................
-            0x3282  00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  ................................
-    makernote tag 21 ID 152==0x98, type 3, count 4, offset/value 11346
-    makernote tag 22 ID 153==0x99, type 4, count 178, offset/value 11354
-    makernote tag 23 ID 154==0x9a, type 4, count 5, offset/value 12066
-    makernote tag 24 ID 160==0xa0, type 3, count 18, offset/value 12086
-    makernote tag 25 ID 170==0xaa, type 3, count 6, offset/value 12122
-    makernote tag 26 ID 180==0xb4, type 3, count 1, offset/value 1
-    makernote tag 27 ID 208==0xd0, type 4, count 1, offset/value 0
-    makernote sensor width 8352, height    5586
-    makernote left, top, right, bottom:   144 112 8335 5575
-    makernote tag 29 ID 16392==0x4008, type 3, count 3, offset/value 12168
-    makernote tag 30 ID 16393==0x4009, type 3, count 3, offset/value 12174
-    makernote tag 31 ID 16400==0x4010, type 2, count 32, offset/value 12180
-    makernote tag 32 ID 16401==0x4011, type 7, count 252, offset/value 12212
-            0x3904  00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  ................................
-            0x3924  00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  ................................
-            0x3944  00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  ................................
-            0x3964  00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  ................................
-            0x3984  00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  ................................
-            0x39a4  00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  ................................
-            0x39c4  00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  ................................
-            0x39e4  00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00              ............................
-    makernote tag 33 ID 16402==0x4012, type 2, count 32, offset/value 12464
-    makernote tag 34 ID 16403==0x4013, type 4, count 11, offset/value 12496
-    makernote tag 35 ID 16406==0x4016, type 4, count 10, offset/value 12540
-    makernote tag 36 ID 16408==0x4018, type 4, count 15, offset/value 12580
-    makernote tag 37 ID 16409==0x4019, type 7, count 30, offset/value 12640
-            0x3ab0  24 00 00 07 36 83 00 0f 2a 00 0f 67 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00        $...6...*..g..................
-    makernote tag 38 ID 16416==0x4020, type 4, count 8, offset/value 12670
-    makernote tag 39 ID 16417==0x4021, type 4, count 5, offset/value 12702
-    makernote tag 40 ID 16421==0x4025, type 4, count 9, offset/value 12722
-    makernote tag 41 ID 16423==0x4027, type 4, count 6, offset/value 12758
-    makernote tag 42 ID 16424==0x4028, type 4, count 25, offset/value 12782
-    makernote tag 43 ID 16428==0x402c, type 4, count 2, offset/value 12882
-    makernote tag 44 ID 16433==0x4031, type 7, count 1122, offset/value 12890
-            0x3baa  62 04 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00  b...............................
-            0x3bca  01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00  ................................
-            0x3bea  01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00  ................................
-            0x3c0a  01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00  ................................
-            0x3c2a  01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00  ................................
-            0x3c4a  01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00  ................................
-            0x3c6a  01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00  ................................
-            0x3c8a  01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00 01 00  ................................
-    makernote tag 45 ID 16437==0x4035, type 7, count 556, offset/value 14012
-            0x400c  db 07 6c 07 72 07 ee 06 20 05 94 03 dd 02 8c 02 37 02 cf 01 19 0a 73 08 e8 07 07 08 7d 07 3a 06  ..l.r... .......7.....s.....}.:.
-            0x402c  7a 05 fd 04 8d 04 92 03 d9 0c ec 07 92 05 2a 05 4a 05 26 05 73 04 a3 03 21 03 9f 02 47 05 80 05  z.............*.J.&.s...!...G...
-            0x404c  61 05 09 06 f3 08 ef 0c ba 0f 00 12 9b 14 e3 1a 12 04 f4 04 7b 05 50 05 df 05 2a 08 5e 0a b5 0b  a...................{.P...*.^...
-            0x406c  82 0c 8c 13 2f 03 a9 05 ab 08 21 0a 10 0b 57 0c 0b 0f 5e 12 51 16 65 1b d0 01 ef 01 ed 01 19 02  ..../.....!...W...^.Q.e.........
-            0x408c  e4 02 d5 03 58 04 a7 04 4d 05 30 07 c3 01 24 02 51 02 38 02 6c 02 1b 03 80 03 8e 03 d1 03 d0 05  ....X...M.0...$.Q.8.l...........
-            0x40ac  c0 01 fe 02 41 04 a4 04 ef 04 74 05 3d 06 0e 07 ee 07 fd 07 00 00 0f 00 19 00 17 00 0f 00 1b 00  ....A.....t.=...................
-            0x40cc  21 00 1f 00 1b 00 1f 00 00 00 f4 ff e4 ff ee ff 03 00 fb ff 01 00 e8 ff ef ff d7 ff 00 00 d9 ff  !...............................
-            0x40ec  db ff dd ff d4 ff d1 ff cd ff d0 ff c0 ff ac ff a0 03 ea 02 b1 02 6d 02 d9 01 36 01 fa 00 d5 00  ......................m...6.....
-    makernote tag 46 ID 16439==0x4037, type 7, count 24, offset/value 14568
-            0x4238  80 02 aa 01 0a 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00                          ........................
-    makernote tag 47 ID 16441==0x4039, type 1, count 16, offset/value 14592
-    makernote tag 48 ID 16442==0x403a, type 3, count 256, offset/value 14608
-    makernote tag 49 ID 16444==0x403c, type 4, count 3, offset/value 15120
-    makernote tag 50 ID 16447==0x403f, type 4, count 3, offset/value 15132
-    makernote tag 51 ID 16448==0x4040, type 4, count 10, offset/value 15144
-    makernote tag 52 ID 16457==0x4049, type 3, count 4, offset/value 15184
-    makernote tag 53 ID 16459==0x404b, type 3, count 2, offset/value -1
-    makernote tag 54 ID 16465==0x4051, type 3, count 42, offset/value 15192
-    makernote tag 55 ID 16463==0x404f, type 3, count 5, offset/value 15276
-    Canon CR3 Exif GPS IFD:
-    GPS IFDOffset 8, NumTags 1
-    GPS VersionID:                      0x302
-    Embedded image found: offset 314368 length 2128644  embedded image header: 0x6008400dbffd8ff; image is likely jpg
+The GitHub Actions workflow builds both and uploads them as the `application` artifact.
 
-Flac sample:
+## id usage
 
-    D:\flac\mini trees\always in motion>id "01 Moments in Between.flac"
-    parsing input file D:\flac\mini trees\always in motion\01 Moments in Between.flac
-    file size:                     38054700
-    mimetype:                             audio/flac
-    Stream Info:
-      Minimum block size               4096
-      Maximum block size               4096
-      Minimum frame size               5335
-      Maximum frame size              21950
-      Sample rate per sec             48000
-      Channel count                       2
-      Bits per sample                    24
-      Samples                       8190689
-      Length in min:sec                2:50
-      MD5 signature                       e344c343c1f4823a023f9467db6ca870
-    Comments:
-      Vendor                              reference libFLAC 1.3.2 20170101
-      Title                               Moments in Between
-      Artist                              Mini Trees
-      Year                                2021
-      Comment                             Visit https://minitrees.bandcamp.com
-      Album                               Always In Motion
-      Track                               1
-      Album Artist                        Mini Trees
-      Lyrics
-    Color shades of glass
-    Faded with the tide
-    Calls me back
-    
-    Drifting further toward
-    Nothing I have known before
-    
-    Brighter in the morning
-    Feel it start to calmá
-    You're taking my hand and you're pulling me on
-    Leave the ground beneath me, light ethereal scene
-    Can you tell me what more are we waiting for?
-    
-    How long are all the moments in between it?
-    
-    Dreaming again
-    But I know that it's all in my headá
-    Dreaming again
-    
-    Running, hopping fence
-    Carrying the thought
-    Is it all a myth?
-    
-    Reaching further forward
-    Never wanted something more
-    
-    Brighter in the morning
-    Feel it start to calm
-    You're taking my hand and you're pulling me on
-    Leave the ground beneath me, light ethereal scene
-    Can you tell me what more are we waiting for?
-    
-    How long til you're taking me there?
-    I'm growing wearier here
-    But I know it's all the moments in between it
-    Picture:
-      Picture type                        3 Cover (front)
-      mime type                           image/jpeg
-      Description
-      Width                             700
-      Height                            700
-      Bits per pixel                     24
-      Indexed colors                      0
-      Image size                     114149
-    Embedded image metadata:
-    file size:                       114149
-    mimetype:                             image/jpeg
-    id marker:                            JFIF
-    major version:                        1
-    minor version:                        1
-    units:                                dots/inch
-    x density:                           72
-    y density:                           72
-    start of frame:                     192 (0xc0) (baseline DCT process frame marker)
-    bits per sample:                      8
-    image height:                       700
-    image width:                        700
-    color components:                     3 (YCbCr)
-    compression:                          YCbCr4:4:4 (1 1)
-    number of components:                 3
-    Embedded image found: offset 1504 length 114149  embedded image header: 0x464a1000e0ffd8ff; image is likely jpg
-    
-WAV sample:
+```
+usage: id [-e:name.jpg] [-f] [filename]
+  image data enumeration
+       filename       filename of the image to check
+       -f             Full information is displayed (all binary data, all field values, etc.)
+       -e:<output>    Extract highest-resolution embedded image (if one exists) to the file specified.
 
-    C:\>id tmbg.wav
-    parsing input file C:\Users\david\OneDrive\id\tmbg.wav
-    file size:                     50759408
-    WAV file is RIFF and WAVE. Size - 8: 50759400
-    mimetype:                    audio/x-wav
-    chunk: JUNK, size 92
-    chunk: bext, size 602
-    chunk: fmt , size 40
-      type of format:            1 -- PCM
-      channels:                  2
-      sample rate (samples/sec): 48000
-      dataRate (Bytes/sec):      288000
-      blockAlign:                6
-      bits per sample:           24
-    chunk: minf, size 16
-    chunk: elm1, size 214
-    chunk: data, size 50490390
-      data size:                 50490390
-      sample count:              8415065
-      seconds:                   175.313854
-             0x400  01 00 00 fc ff ff 06 00 00 fd ff ff 02 00 00 f9 ff ff fc ff ff f5 ff ff ff ff ff fa ff ff fe ff  ................................
-             0x420  ff 03 00 00 02 00 00 05 00 00 06 00 00 00 00 00 04 00 00 00 00 00 04 00 00 09 00 00 05 00 00 0b  ................................
-             0x440  00 00 04 00 00 09 00 00 04 00 00 0a 00 00 04 00 00 09 00 00 04 00 00 09 00 00 fc ff ff 05 00 00  ................................
-             0x460  f4 ff ff 00 00 00 f7 ff ff fe ff ff f8 ff ff fa ff ff fb ff ff fb ff ff 04 00 00 fc ff ff 02 00  ................................
-             0x480  00 fb ff ff fc ff ff fc ff ff fe ff ff fc ff ff ff ff ff f8 ff ff fe ff ff f4 ff ff ff ff ff f6  ................................
-             0x4a0  ff ff fe ff ff fa ff ff fe ff ff fe ff ff ff ff ff 01 00 00 ff ff ff 09 00 00 ff ff ff 0c 00 00  ................................
-             0x4c0  ff ff ff 05 00 00 ff ff ff 02 00 00 03 00 00 03 00 00 07 00 00 03 00 00 05 00 00 03 00 00 01 00  ................................
-             0x4e0  00 03 00 00 fd ff ff 03 00 00 ff ff ff 03 00 00 ff ff ff fe ff ff fe ff ff fa ff ff 03 00 00 fc  ................................
-    chunk: regn, size 92
-    chunk: umid, size 24
-    chunk: DGDA, size 267853
-    chunk:     , size 0
-    
-    
+  examples:
+      id img_0178.cr2
+      id -f img_0178.cr2
+      id img_0178.cr2 /e:178.jpg
+      id track.flac /e:track.png
+
+  notes:
+      Still-image formats include: JPG, TIFF, PNG, BMP, GIF, SVG, WebP, HEIF/HEIC, AVIF, JP2/J2K, JXL, and camera RAW
+      Some non-image formats are supported: FLAC, WAV, MP3, M4A, MP4, MOV, M4V, WMA, WMV
+      Some image formats aren't supported yet: presumably many others
+      By default, just the first 256 bytes of binary data is displayed. Use -f for all data
+      Embedded images may be JPG, PNG, HIF, or some other format
+      Fujifilm RAF headers, CFA metadata, raw dimensions, and embedded JPG metadata are parsed
+```
+
+## id samples
+
+### JPG
+
+```
+parsing input file C:\Users\david\OneDrive\id\07_ilie.jpg
+file size:                        61123
+mimetype:                             image/jpeg
+id marker:                            JFIF
+major version:                        1
+minor version:                        1
+units:                                dots/inch
+x density:                           72
+y density:                           72
+quantization tables:                 1 (16-bit precision: no)
+quantization tables:                 1 (16-bit precision: no)
+start of frame:                     192 (0xc0) (baseline DCT process frame marker)
+bits per sample:                      8
+image height:                       700
+image width:                        700
+color components:                     3 (YCbCr)
+compression:                          YCbCr4:4:4 (1 1)
+number of components:                 3
+```
+
+### Canon CR3
+
+Most of the Canon makernote is omitted where `...` appears.
+
+```
+parsing input file C:\Users\david\OneDrive\id\R5_00707.CR3
+file size:                     11565650
+XMP metadata:
+  Rating                : 0
+mimetype:                             image/x-canon-cr3
+ImageWidth:                           8192
+ImageHeight:                          5464
+BitsPerSample:                        8, 8, 8
+Compression:                          6 (JPEG (old-style))
+Make:                                 Canon
+Model:                                Canon EOS R5
+Orientation:                          1 (horizontal (normal))
+XResolution:                          72 / 1 = 72.000000
+YResolution:                          72 / 1 = 72.000000
+ResolutionUnit:                       inches (2)
+DateTime:                             2020:10:24 16:57:01
+Artist:
+Copyright:
+Canon CR3 Exif IFD:
+exif IFDOffset 8, NumTags 39
+exif ExposureTime:                  4 / 1 = 4.000000
+exif FNumber:                       8 / 1 = 8.000000
+exif ExposureProgram                manual
+exif ISO                            100
+exif Sensitivity Type               recommended exposure index
+exif Recommended Exposure Index     100
+exif ExifVersion                    0231
+exif DateTimeOriginal:              2020:10:24 16:57:01
+exif CreateDate:                    2020:10:24 16:57:01
+exif Offset Time:                   -08:00
+exif Offset Time Original:          -08:00
+exif Offset Time Digital:           -08:00
+exif ComponentsConfiguration:       Y, Cb, Cr, -
+exif ShutterSpeedValue:             -131072 / 65536 = -2.000000
+exif ApertureValue:                 393216 / 65536 = 6.000000 == f / 8.000000
+exif ExposureCompensation:          0 / 1 = 0.000000
+exif MeteringMode:                  multi-segment (5)
+exif Flash:                         0 - no flash
+exif FocalLength:                   11 / 1 = 11.000000
+exif User Comment:
+exif SubSecTime:                    83
+exif SubSecTimeOriginal:            83
+exif SubSecTimeDigitized:           83
+exif FlashpixVersion                0x30303130
+exif Color Space                    sRGB
+exif PixelWidth                     8192
+exif PixelHeight                    5464
+exif XResolution:                   8192000 / 1419 = 5773.079634
+exif YResolution:                   5464000 / 947 = 5769.799366
+exif SensorSizeUnit:                2 (inches)
+exif Custom Rendered:               normal
+exif Exposure Mode:                 manual
+exif White Balance:                 auto
+exif Scene Capture Type:            standard
+exif Owner Name:
+exif Body Serial Number:            022021002580
+exif Lens min/max FL and Aperture:  11.00, 24.00, 0.00, 0.00
+exif Lens Model:                    EF11-24mm f/4L USM
+exif Lens Serial Number:            2400000736
+exif (Computed) sensor WxH:         36.042600, 24.053800
+Canon CR3 Makernotes:
+canon makernote IFDOffset 0x8 8, NumTags 56, headerBase 0x950 2384
+  CameraSettings:
+  MacroMode                      : 2 (raw)
+  SelfTimer                      : 0 (raw)
+  Quality                        : 7 (raw)
+  CanonFlashMode                 : 0 (raw)
+  ContinuousDrive                : 0 (raw)
+  FocusMode                      : 0 (raw)
+  RecordMode                     : 12 (raw)
+  ...
+  AFInfo2:
+  AFAreaMode                     : 6
+  NumAFPoints                    : 1053
+  ValidAFPoints                  : 1
+  CanonImageWidth                : 8192
+  CanonImageHeight               : 5464
+  AFImageWidth                   : 8192
+  AFImageHeight                  : 5464
+  AF areas (index, width, height, x, y):
+    0: 1536, 769, -462, 1014
+  CanonMakernote tag 11 ID 40==0x28, type 1, count 16, offset/value 9846:
+  ...
+Canon CR3 Exif GPS IFD:
+GPS IFDOffset 8, NumTags 1
+GPS VersionID:                      2.3.0.0
+Embedded image found: offset 314368 length 2128644  embedded image header: 0x6008400dbffd8ff; image is likely jpg
+```
+
+### JPG with generative AI metadata
+
+This is the [IPTC example image](https://iptc.org/news/iptc-photo-metadata-standard-2025-1-adds-ai-properties/) made with Bing Image Creator. id prints the IPTC source type and what it means. It also notes the C2PA manifest and lists the AI markers found in the manifest text. The hex dump is the IPTC-IIM block in the Photoshop APP13 segment.
+
+```
+parsing input file C:\Users\david\OneDrive\imgenai\tests\images\iptc-bing-robot.jpeg
+file size:                       148681
+mimetype:                             image/jpeg
+photoshop irb data:
+              0xbe  50 68 6f 74 6f 73 68 6f 70 20 33 2e 30 00 38 42 49 4d 04 04 00 00 00 00 00 b8 1c 02 05 00 1d 47  Photoshop 3.0.8BIM.............G
+              0xde  65 6e 41 49 20 52 6f 62 6f 74 20 69 6e 20 67 61 72 64 65 6e 20 65 78 61 6d 70 6c 65 1c 02 37 00  enAI Robot in garden example..7.
+              0xfe  08 32 30 32 35 31 31 32 36 1c 02 50 00 00 1c 02 6e 00 20 42 72 65 6e 64 61 6e 20 51 75 69 6e 6e  .20251126..P....n. Brendan Quinn
+             0x11e  2f 42 69 6e 67 20 49 6d 61 67 65 20 43 72 65 61 74 6f 72 1c 02 78 00 53 43 75 74 65 20 72 6f 62  /Bing Image Creator..x.SCute rob
+             0x13e  6f 74 20 73 69 74 74 69 6e 67 20 61 74 20 61 20 63 61 73 74 2d 69 72 6f 6e 20 74 61 62 6c 65 20  ot sitting at a cast-iron table
+             0x15e  69 6e 20 61 20 67 61 72 64 65 6e 20 64 72 61 77 69 6e 67 20 61 20 70 69 63 74 75 72 65 20 69 6e  in a garden drawing a picture in
+             0x17e  20 61 20 6e 6f 74 65 62 6f 6f 6b 1c 02 00 00 02 00 04                                             a notebook.......
+XMP metadata:
+  DateCreated           : 2025-11-26
+  Title                 : GenAI Robot in garden example
+  Description           : Cute robot sitting at a cast-iron table in a garden drawing a picture in a notebook
+  Credit                : Brendan Quinn/Bing Image Creator
+  DigitalSourceType:    http://cv.iptc.org/newscodes/digitalsourcetype/trainedAlgorithmicMedia
+  AI-use interpretation: created using generative AI (IPTC label)
+JPEG: C2PA/JUMBF data block detected; Content Credentials may be present
+  The signature is not validated; assertion text is only searched for generative AI markers
+  Note: a manifest indicates provenance data, not by itself that AI was used
+id marker:                            JFIF
+major version:                        1
+minor version:                        1
+units:                                none
+x density:                            1
+y density:                            1
+quantization tables:                 1 (16-bit precision: no)
+quantization tables:                 1 (16-bit precision: no)
+start of frame:                     192 (0xc0) (baseline DCT process frame marker)
+bits per sample:                      8
+image height:                      1248
+image width:                        832
+color components:                     3 (YCbCr)
+compression:                          YCbCr4:2:0 (2 2)
+number of components:                 3
+  AI generator metadata: C2PA manifest (signature not verified): digitalSourceType trainedAlgorithmicMedia
+  AI generator metadata: C2PA manifest (signature not verified): generator Microsoft Responsible AI
+  AI generator metadata: C2PA manifest (signature not verified): generator Image Creator from Designer
+ImageDescription:                     Cute robot sitting at a cast-iron table in a garden drawing a picture in a notebook
+XResolution:                          72 / 1 = 72.000000
+YResolution:                          72 / 1 = 72.000000
+ResolutionUnit:                       inches (2)
+YCbCrPositioning:                     1
+```
+
+### FLAC
+
+```
+parsing input file C:\Users\david\OneDrive\id\wake.flac
+file size:                     31983601
+mimetype:                             audio/flac
+Stream Info:
+  Minimum block size               4096
+  Maximum block size               4096
+  Minimum frame size                 16
+  Maximum frame size              13983
+  Sample rate per sec             44100
+  Channel count                       2
+  Bits per sample                    16
+  Samples                      11725896
+  Length in min:sec                4:25
+  MD5 signature                       6e4748c30445eaee2c09a452becd9066
+Comments:
+  Vendor                              reference libFLAC 1.3.2 20170101
+  Album                               Solid State
+  Album Artist                        Jonathan Coulton
+  Artist                              Jonathan Coulton
+  Encoder                             xACT 2.39
+  Title                               Wake Up
+  Track                               1
+  Total Tracks                        17
+  Year                                2017
+Picture:
+  Picture type                        3 Cover (front)
+  mime type                           image/png
+  Description
+  Width                            2110
+  Height                           2110
+  Bits per pixel                     32
+  Indexed colors                      0
+  Image size                    3546480
+Embedded image metadata:
+file size:                      3546480
+mimetype:                             image/png
+image width:                       2110
+image height:                      2110
+bit depth:                            8
+color type:                           2 (RGB)
+compression method:                   0 (deflate)
+filter method:                        0 (none)
+interlace method:                     0 (sequential)
+sRGB rendering intent:                0 (perceptual)
+pixels per unit X:                11811
+pixels per unit Y:                11811
+unit specifier:                       1 (meters)
+resolution:            300.00 x 300.00 dpi
+IDAT segments:                      217
+IDAT data bytes:                3543797
+Embedded image found: offset 786 length 3546480  embedded image header: 0xa1a0a0d474e5089; image is likely png
+```
+
+### WAV
+
+The hex dumps are shortened where `...` appears.
+
+```
+parsing input file C:\Users\david\OneDrive\id\tmbg.wav
+file size:                     50759408
+header.size (file size - 8):   50759400
+mimetype:                      audio/x-wav
+chunk: JUNK, size 92
+        0x14  00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  ................................
+        ...
+chunk: bext, size 602
+        0x78  00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  ................................
+        ...
+chunk: fmt , size 40
+  type of format:              1 -- PCM
+  channels:                    2
+  sample rate (samples/sec):   48000
+  dataRate (Bytes/sec):        288000
+  blockAlign:                  6
+  bits per sample:             24
+chunk: minf, size 16
+       0x30a  38 f0 6b 95 08 d7 d6 01 02 00 00 00 00 00 00 00                                                  8.k.............
+chunk: elm1, size 214
+       0x322  00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  ................................
+        ...
+chunk: data, size 50490390
+  data size:                   50490390
+  sample count:                8415065
+  seconds:                     175.313854
+       0x400  01 00 00 fc ff ff 06 00 00 fd ff ff 02 00 00 f9 ff ff fc ff ff f5 ff ff ff ff ff fa ff ff fe ff  ................................
+        ...
+chunk: regn, size 92
+   0x302701e  01 00 00 00 00 00 00 00 00 00 00 2a d2 a4 42 6e e7 43 80 00 00 00 00 00 00 00 00 00 59 67 80 00  ...........*..Bn.C..........Yg..
+        ...
+chunk: umid, size 24
+   0x3027082  00 00 00 00 00 00 00 2a d2 a4 42 6e e7 43 80 00 00 00 00 00 00 00 00 00                          .......*..Bn.C..........
+chunk: DGDA, size 267853
+   0x30270a2  04 00 00 00 01 00 41 6e 61 6c 79 73 69 73 53 65 74 73 48 64 72 04 00 ea 15 04 00 02 00 00 00 41  ......AnalysisSetsHdr..........A
+        ...
+```
+
+## imgenai
+
+`imgenai` reuses id's parsers to assess whether an image's metadata indicates generative AI use. It prints one of three results, followed by the evidence it found:
+
+- **Metadata declares generative AI use.** An explicit declaration is present. The declarations are listed below.
+- **Metadata records an AI-capable editor.** A software field names an editor that has generative features. This shows only that the app was used, not that its generative features were.
+- **Metadata cannot determine whether generative AI was used.** Nothing conclusive was found.
+
+Metadata is easy to remove or forge, so no result rules out generative AI, and missing metadata proves nothing.
+
+```
+usage: imgenai [-s:<outputbase>] [-c:<settings.toml>] image
+  Assess whether image metadata indicates generative AI may have been used.
+  -s:<outputbase>  Write a JPEG copy without recognized AI XMP or C2PA segments.
+  -c:<settings.toml>  Run c2patool.exe beside imgenai.exe.
+```
+
+The exit code is 0 when the assessment completes, 1 for a usage error, and 2 when the image can't be read or the `-c` or `-s` step fails.
+
+### Sample
+
+```
+RESULT: Metadata declares generative AI use.
+Metadata evidence:
+  DigitalSourceType: http://cv.iptc.org/newscodes/digitalsourcetype/trainedAlgorithmicMedia
+  Generative AI declaration: IPTC AI Prompt Information
+  Generative AI declaration: IPTC AI Prompt Writer Name
+  Generative AI declaration: IPTC AI System Used
+  Generative AI declaration: C2PA manifest (signature not verified): digitalSourceType trainedAlgorithmicMedia
+  Generative AI declaration: C2PA manifest (signature not verified): generator Microsoft Responsible AI
+  Generative AI declaration: C2PA manifest (signature not verified): generator Image Creator from Designer
+  JPEG: C2PA/JUMBF data block detected; Content Credentials may be present
+Metadata alone cannot rule out generative AI use.
+```
+
+### What counts as a declaration
+
+None of these are signature-checked. XMP properties are matched by namespace, and values wrapped in `rdf:Alt`, `rdf:Bag` or `rdf:Seq` are read.
+
+| Source | Field | Counts when |
+|---|---|---|
+| XMP | `Iptc4xmpExt:DigitalSourceType` | The value is `trainedAlgorithmicMedia` or `compositeWithTrainedAlgorithmicMedia`. The IPTC newscodes prefix can use `http` or `https` or be omitted, and a trailing slash is allowed. |
+| XMP | `Iptc4xmpExt:AISystemUsed`, `AISystemVersionUsed`, `AIPromptInformation`, `AIPromptWriterName` | Any non-empty value. These fields were added in IPTC Photo Metadata 2025.1. |
+| XMP | `photoshop:Credit` | The value is `Made with Google AI` or `Edited with Google AI`, as Google Photos writes. |
+| XMP | `xmp:CreatorTool`, `stEvt:softwareAgent` (edit history) | The value names a generator, such as Midjourney, Firefly, DALL-E, Stable Diffusion, ComfyUI, NovelAI, Ideogram or Google Gemini. |
+| XMP, PNG `AIGC` text | TC260 `AIGC`, the implicit label from China's GB 45438-2025 | The label is 1, meaning AI-generated. Labels 2 and 3 (possibly and suspected AI-generated) appear only in `id` output. |
+| C2PA manifest | Text in the JUMBF boxes | It contains a generative IPTC source type, or names a generator such as OpenAI, ChatGPT, DALL-E, Adobe Firefly, Microsoft Responsible AI, Image Creator from Designer, Bing Image Creator, Midjourney or Stable Diffusion. Only the text is searched. Use `-c` to validate the signature. |
+| PNG text (`tEXt`, `zTXt`, `iTXt`) | Generator keys such as `parameters`, `prompt` and `workflow`, plus `Comment` and `Description` | The value holds generation settings. Recognized writers are Stable Diffusion WebUI and its forks, ComfyUI, InvokeAI, Fooocus and Easy Diffusion. JSON settings like NovelAI's and a Midjourney `Description` with a Job ID also count. Compressed chunks are decompressed, and APNG `comf` chunks are read too. |
+| EXIF `UserComment`, GIF and JPEG comments | The comment text | The text holds generation settings. UserComment is decoded from ASCII or from UTF-16 in either byte order. |
+| EXIF | `Make`, `Model` | The value holds a ComfyUI graph (`workflow:{` or `prompt:{`). ComfyUI writes these in its WebP and AVIF output. |
+| EXIF, PNG | `Software`, PNG `Source` | The value names a generator. |
+
+### AI-capable editors
+
+A software field that names one of these editors gives the AI-capable editor result: Adobe Photoshop, Lightroom and Camera Raw, Topaz, Luminar Neo, ON1 Photo RAW, Canva, Picsart, PhotoDirector, Affinity, ACDSee Photo Studio, Google Photos and Samsung Photo Assist. The software fields are CreatorTool, the edit history, and EXIF or PNG `Software`. Names are heuristic aliases matched as whole words, so "Canvas" doesn't match Canva.
+
+Adobe editors count only from the version that added a generative feature. An Adobe string with no version that can be read counts as AI-capable.
+
+| Editor | First version | Feature |
+|---|---|---|
+| Photoshop | 22.0 | Neural Filters (Generative Fill arrived in 24.6) |
+| Lightroom Classic | 13.3 | Generative Remove |
+| Lightroom | 7.3 | Generative Remove |
+| Camera Raw | 16.3 | Generative Remove |
+
+Photoshop CS and CC versions, and Lightroom before Lightroom Classic, are treated as predating generative features. The cutoffs are in `ClassifyEditor` in `id.cxx`.
+
+### Evidence that doesn't change the result
+
+These are listed as evidence, but the result stays "cannot determine":
+
+- A C2PA manifest with no AI markers in its text, such as a camera credential.
+- A generic source type such as `algorithmicMedia` or `digitalCapture`.
+- An editor version older than its generative features.
+- A malformed XMP packet whose text mentions an AI term. If the packet breaks after a declaration, the parsed declaration still counts.
+- A `dcterms:provenance` reference to a remote C2PA manifest, which isn't fetched.
+
+### Where metadata is read
+
+XMP is read from JPEG (including Extended XMP), TIFF-based raw files, CR3, PNG, WebP, HEIF/AVIF, JPEG 2000 and JPEG XL. C2PA manifests are read from JPEG APP11, PNG `caBX`, WebP `C2PA`, ISO BMFF (HEIF, AVIF, MP4), JPEG 2000 and JPEG XL. A manifest split over several JPEG APP11 segments is reassembled.
+
+These aren't read:
+- Brotli-compressed C2PA or JPEG XL metadata boxes.
+- Settings kept in sidecar files.
+- Data hidden in pixels, such as NovelAI's alpha-channel metadata or SynthID watermarks.
+
+### JPEG metadata copy
+
+```
+imgenai -s:C:\temp\clean D:\photos\source.jpg
+```
+
+The output is `C:\temp\clean.jpg`. Use a base path in an existing directory and omit the extension. The command won't overwrite an existing file.
+
+The copy drops these segments:
+- Standard XMP APP1 packets that declare generative AI, name a generator in CreatorTool or the edit history, or are malformed and mention an AI term. Other fields in a dropped packet are lost with it.
+- Extended XMP segments whose packet declares generative AI, or whose standard packet is dropped.
+- Recognized embedded C2PA APP11 packets, including genuine camera credentials.
+
+EXIF and comments are kept. A generator named in EXIF `Software`, or settings in EXIF UserComment, remain in the copy. Image scan data is copied without recompression. Files with trailing data are rejected when segments would be removed, since offsets into trailing images could become invalid.
+
+### Verify Content Credentials
+
+Place [c2patool.exe](https://github.com/contentauth/c2patool/releases) beside `imgenai.exe`. Pass a [C2PA settings file](https://opensource.contentauthenticity.org/docs/c2patool/docs/usage/) that contains the trust policy you want.
+
+```
+imgenai -c:C:\temp\c2pa.toml D:\photos\source.jpg
+```
+
+The command prints the validator's JSON report after the metadata assessment. Check the active manifest's validation state, signature trust, asset-binding result, signed actions and ingredients. The `RESULT:` line reports metadata evidence only, independent of the validation report. A missing or untrusted credential can't establish whether AI was used. `id.exe` doesn't use the verifier.

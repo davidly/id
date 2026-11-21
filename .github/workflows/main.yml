@@ -1,39 +1,37 @@
-# This is a basic workflow to help you get started with Actions
-
 name: CI
 
-# Controls when the action will run. 
 on:
-  # Triggers the workflow on push or pull request events but only for the main branch
   push:
     branches: [ main ]
   pull_request:
     branches: [ main ]
-
-  # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
 
-# A workflow run is made up of one or more jobs that can run sequentially or in parallel
 jobs:
-  # This workflow contains a single job called "build"
   build:
-    # The type of runner that the job will run on
     runs-on: windows-2022
 
-    # Steps represent a sequence of tasks that will be executed as part of the job
     steps:
-      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v7
 
-      # Runs a single command using the runners shell
-      - name: build the app
-        run: |
-          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
-          .\m.bat
+      # Find the installed Visual Studio with vswhere, so the build doesn't depend on its edition or path.
+      - name: build id.exe and imgenai.exe
         shell: cmd
-        
-      - name: archive the binary
-        uses: actions/upload-artifact@v4
+        run: |
+          set "VSINSTALL="
+          "%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath > "%TEMP%\vsinstall.txt" || exit /b 1
+          set /p VSINSTALL=<"%TEMP%\vsinstall.txt"
+          if not defined VSINSTALL exit /b 1
+          call "%VSINSTALL%\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
+          call .\m.bat || exit /b 1
+          cl /nologo /D IMGENAI_ONLY id.cxx /I.\ /O2i /EHac /Zi /Gy /Fo:imgenai.obj /Fd:imgenai-vc.pdb /Fe:imgenai.exe /link /incremental:no /OPT:REF /PDB:imgenai.pdb || exit /b 1
+          if not exist id.exe exit /b 1
+          if not exist imgenai.exe exit /b 1
+
+      - name: archive the binaries
+        uses: actions/upload-artifact@v7
         with:
           name: application
-          path: id.exe
+          path: |
+            id.exe
+            imgenai.exe
