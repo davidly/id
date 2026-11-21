@@ -21,7 +21,7 @@ To build `id.exe`, run `m.bat`, which runs:
 cl /nologo id.cxx /I.\ /O2i /EHac /Zi /Gy /D_AMD64_ /link /incremental:no /OPT:REF
 ```
 
-To build `imgenai.exe`, define `IMGENAI_ONLY`. The `/Fo`, `/Fd` and `/PDB` options keep its object and symbol files separate from those of `id.exe`:
+To build `imgenai.exe`, run `mimgenai.bat`, which defines `IMGENAI_ONLY`. The `/Fo`, `/Fd` and `/PDB` options keep its object and symbol files separate from those of `id.exe`:
 
 ```
 cl /nologo /D IMGENAI_ONLY id.cxx /I.\ /O2i /EHac /Zi /Gy /Fo:imgenai.obj /Fd:imgenai-vc.pdb /Fe:imgenai.exe /link /incremental:no /OPT:REF /PDB:imgenai.pdb
